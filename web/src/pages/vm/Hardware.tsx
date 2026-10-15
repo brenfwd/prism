@@ -4,7 +4,8 @@ import { Link } from "@tanstack/react-router";
 import { api, humanError, type Disk, type Nic, type Vm } from "../../api";
 import { putVm } from "../../events";
 import { bytes, GiB } from "../../lib/format";
-import { useAllVolumes, usePools, useVms, volumeUsers } from "../../lib/hooks";
+import { useAllVolumes, useNetworks, usePools, useVms, volumeUsers } from "../../lib/hooks";
+import { nicLabel } from "../../lib/networks";
 import { toast } from "../../lib/toast";
 import { confirm } from "../../components/Confirm";
 import { Icon, type IconName } from "../../components/icons";
@@ -33,6 +34,7 @@ async function deviceChange(qc: QueryClient, vm: Vm, what: string, run: () => Pr
 }
 
 export function HardwareTab({ vm }: { vm: Vm }) {
+  const nets = useNetworks().data;
   const { data: volumes } = useAllVolumes();
   const size = (d: Disk) => volumes.find((v) => v.pool === d.pool && v.name === d.volume);
   const disks = vm.disks.filter((d) => d.device === "disk");
@@ -156,7 +158,7 @@ export function HardwareTab({ vm }: { vm: Vm }) {
                   <DeviceRow
                     key={n.id}
                     icon="network"
-                    title={n.network.type === "bridge" ? <>Bridge <span className="font-mono">{n.network.bridge}</span></> : "Private NAT"}
+                    title={n.network.type === "bridge" ? <>Bridge <span className="font-mono">{n.network.bridge}</span></> : nicLabel(n.network, nets)}
                     sub={<span className="font-mono">{n.mac}</span>}
                     badge={n.boot_order != null ? <Badge tone="indigo">boot #{n.boot_order}</Badge> : undefined}
                     actions={
@@ -411,14 +413,17 @@ function AddDisk({ vm, onClose }: { vm: Vm; onClose: () => void }) {
 
 function AddNic({ vm, onClose }: { vm: Vm; onClose: () => void }) {
   const qc = useQueryClient();
-  const [type, setType] = useState<"user" | "bridge">("bridge");
+  const nets = useNetworks().data ?? [];
+  const [type, setType] = useState<"network" | "user" | "bridge">("network");
+  const [netId, setNetId] = useState<string | undefined>();
+  const chosen = netId ?? nets[0]?.id;
   const [bridge, setBridge] = useState("br0");
   const [mac, setMac] = useState("");
   const macOk = !mac || /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(mac);
   const m = useMutation({
     mutationFn: () =>
       deviceChange(qc, vm, "Network adapter added", () =>
-        api.addNic(vm.id, { network: type === "bridge" ? { type: "bridge", bridge } : { type: "user" }, mac: mac || undefined }),
+        api.addNic(vm.id, { network: type === "network" && chosen ? { type: "network", network: chosen } : type === "bridge" ? { type: "bridge", bridge } : { type: "user" }, mac: mac || undefined }),
       ),
     onSuccess: (ok) => ok && onClose(),
   });
@@ -434,9 +439,16 @@ function AddNic({ vm, onClose }: { vm: Vm; onClose: () => void }) {
       }
     >
       <div className="space-y-4">
-        <Segmented label="Network type" value={type} onChange={setType} className="w-full" options={[{ value: "bridge", label: "Bridged to a LAN" }, { value: "user", label: "Private NAT" }]} />
+        <Segmented label="Network type" value={type} onChange={setType} className="w-full" options={[...(nets.length ? [{ value: "network" as const, label: "Prism network" }] : []), { value: "bridge" as const, label: "Host bridge" }, { value: "user" as const, label: "Private NAT" }]} />
+        {type === "network" && nets.length > 0 && (
+          <Field label="Network" htmlFor="nic-net" hint="The machine gets an address automatically.">
+            <select id="nic-net" value={chosen} onChange={(e) => setNetId(e.target.value)} className="w-full rounded-lg bg-white px-3 py-2 text-sm ring-1 ring-zinc-300 dark:bg-zinc-900 dark:ring-zinc-700">
+              {nets.map((n) => <option key={n.id} value={n.id}>{n.name} ({n.subnet})</option>)}
+            </select>
+          </Field>
+        )}
         <p className="text-[13px] text-zinc-500">
-          {type === "bridge" ? "Joins a bridge on the host, so the machine gets an address on that network and is reachable like any other computer." : "Outbound-only internet through the host. Nothing can connect in."}
+          {type === "network" ? "Joins a Prism network: addresses, DHCP and DNS are handled for you." : type === "bridge" ? "Joins a bridge on the host, so the machine gets an address on that network and is reachable like any other computer." : "Outbound-only internet through the host. Nothing can connect in."}
         </p>
         {type === "bridge" && (
           <Field label="Host bridge" htmlFor="nic-br">

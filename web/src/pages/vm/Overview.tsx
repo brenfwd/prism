@@ -4,10 +4,13 @@ import { SAMPLE_CAPACITY, guestUsedKib, useSamples } from "../../lib/stats";
 import { duration, kib, memLabel, pct } from "../../lib/format";
 import { Icon, type IconName } from "../../components/icons";
 import { Badge, Card, CopyButton, Meter, Sparkline, cx } from "../../components/ui";
+import { useNetworks } from "../../lib/hooks";
+import { nicLabel } from "../../lib/networks";
 import { isOn } from "./VmPage";
 
 export function OverviewTab({ vm }: { vm: Vm }) {
   const samples = useSamples(vm.id);
+  const nets = useNetworks().data;
   const s = vm.status;
   const on = isOn(vm);
   const lastCpu = [...samples].reverse().find((x) => x.cpu != null)?.cpu ?? null;
@@ -101,7 +104,7 @@ export function OverviewTab({ vm }: { vm: Vm }) {
               <li key={n.id} className="flex items-center gap-3 py-2">
                 <Icon name="network" className="size-4 text-zinc-400" />
                 <span className="w-10 font-mono text-xs text-zinc-500">nic</span>
-                <span className="min-w-0 flex-1 truncate">{n.network.type === "bridge" ? `Bridge ${n.network.bridge}` : "Private NAT"}</span>
+                <span className="min-w-0 flex-1 truncate">{nicLabel(n.network, nets)}</span>
                 <span className="font-mono text-xs text-zinc-500">{n.mac}</span>
               </li>
             ))}

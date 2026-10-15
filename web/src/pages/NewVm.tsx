@@ -5,7 +5,7 @@ import { api, type BalloonMode, type CpuModel, type CreateVm, type Firmware, typ
 import { putVm } from "../events";
 import { defaultUser, invalidKey, sshKeyLines, userData } from "../lib/cloudinit";
 import { GiB, bytes, memLabel } from "../lib/format";
-import { hostAvailableBytes, looksLikeVmDisk, runAction, useAllVolumes, useNode, usePools, useVms, volumeUsers } from "../lib/hooks";
+import { hostAvailableBytes, looksLikeVmDisk, runAction, useAllVolumes, useNetworks, useNode, usePools, useVms, volumeUsers } from "../lib/hooks";
 import { local, useStore } from "../lib/store";
 import { startUpload, uploads } from "../lib/tasks";
 import { toast } from "../lib/toast";
@@ -126,7 +126,11 @@ export function NewVmPage({ search }: { search: NewVmSearch }) {
   const noLogin = source === "image" && raw == null && !sshKeyLines(sshKeys).length && !password;
 
   // ---- network & advanced
-  const [net, setNet] = useState<"user" | "bridge">("user");
+  const networks = useNetworks().data ?? [];
+  const [netChoice, setNetChoice] = useState<string | undefined>();
+  const [net, setNet] = useState<"network" | "user" | "bridge">("network");
+  const netId = netChoice ?? networks[0]?.id;
+  const kind: "network" | "user" | "bridge" = net === "network" && !netId ? "user" : net;
   const [bridge, setBridge] = useState("br0");
   const [firmware, setFirmware] = useState<Firmware>("bios");
   const [cpuModel, setCpuModel] = useState<CpuModel>("host_model");
@@ -159,7 +163,7 @@ export function NewVmPage({ search }: { search: NewVmSearch }) {
         cpu_model: cpuModel,
         pool: pool!,
         disk_gib: diskGib,
-        network: net === "bridge" ? { type: "bridge", bridge } : { type: "user" },
+        network: kind === "network" && netId ? { type: "network", network: netId } : kind === "bridge" ? { type: "bridge", bridge } : { type: "user" },
         autostart,
         description: description || undefined,
       };
@@ -404,16 +408,24 @@ export function NewVmPage({ search }: { search: NewVmSearch }) {
           {/* 4. Network */}
           <Card title={<Step n={source === "image" ? 4 : 3}>Network</Step>}>
             <div role="radiogroup" aria-label="Network" className="grid gap-2.5 sm:grid-cols-2">
-              <Choice active={net === "user"} onClick={() => setNet("user")} icon="cloud" title="Private (NAT)" body="Reaches the internet through the host. Works everywhere; not reachable from your LAN." />
-              <Choice active={net === "bridge"} onClick={() => setNet("bridge")} icon="network" title="Bridged to a LAN" body="Joins a host bridge and gets an address from that network, like a physical box." />
+              {networks.length > 0 && <Choice active={kind === "network"} onClick={() => setNet("network")} icon="network" title="Prism network" body="Addresses, DHCP and DNS handled for you. Machines on it can talk to each other." />}
+              <Choice active={kind === "user"} onClick={() => setNet("user")} icon="cloud" title="Private (NAT)" body="Reaches the internet through the host. Works everywhere; not reachable from your LAN." />
+              <Choice active={kind === "bridge"} onClick={() => setNet("bridge")} icon="network" title="Bridged to a LAN" body="Joins a host bridge and gets an address from that network, like a physical box." />
             </div>
-            {net === "user" && source === "image" && (
+            {kind === "network" && networks.length > 1 && (
+              <Field className="mt-4 max-w-xs" label="Network" htmlFor="pnet">
+                <select id="pnet" value={netId} onChange={(e) => setNetChoice(e.target.value)} className="w-full rounded-lg bg-white px-3 py-2 text-sm ring-1 ring-zinc-300 dark:bg-zinc-900 dark:ring-zinc-700">
+                  {networks.map((n) => <option key={n.id} value={n.id}>{n.name} ({n.subnet})</option>)}
+                </select>
+              </Field>
+            )}
+            {kind === "user" && source === "image" && (
               <p className="mt-3 flex items-start gap-1.5 text-xs leading-relaxed text-zinc-500">
                 <Icon name="info" className="mt-0.5 size-3.5 shrink-0" />
                 With private NAT you sign in through the Serial or Console tab. Pick Bridged if you want to SSH in from your network.
               </p>
             )}
-            {net === "bridge" && (
+            {kind === "bridge" && (
               <Field className="mt-4 max-w-xs" label="Host bridge" htmlFor="br" hint="The bridge interface on this host, e.g. br0.">
                 <Input id="br" value={bridge} onChange={(e) => setBridge(e.target.value)} spellCheck={false} className="font-mono" />
               </Field>
@@ -477,7 +489,7 @@ export function NewVmPage({ search }: { search: NewVmSearch }) {
               <SumRow icon="cpu" k="vCPUs" v={vcpus} />
               <SumRow icon="memory" k="Memory" v={memLabel(memMib)} warn={memOver} />
               <SumRow icon="disk" k="Disk" v={`${diskGib} GiB`} warn={diskOver} />
-              <SumRow icon="network" k="Network" v={net === "user" ? "Private NAT" : bridge} />
+              <SumRow icon="network" k="Network" v={kind === "network" ? (networks.find((n) => n.id === netId)?.name ?? "Prism network") : kind === "user" ? "Private NAT" : bridge} />
               {source === "image" && <SumRow icon="key" k="Sign-in" v={raw != null ? "Custom" : `${username || "?"}${sshKeyLines(sshKeys).length ? " · key" : ""}${password ? " · password" : ""}`} warn={noLogin} />}
             </dl>
             {avail != null && node && (

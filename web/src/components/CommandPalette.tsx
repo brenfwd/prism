@@ -80,6 +80,7 @@ export function CommandPalette() {
       { id: "go-home", group: "Go to", label: "Overview", keywords: "dashboard home", icon: "home", hint: <><Kbd>G</Kbd><Kbd>O</Kbd></>, run: go(() => navigate({ to: "/" })) },
       { id: "go-vms", group: "Go to", label: "Machines", keywords: "vms list", icon: "server", hint: <><Kbd>G</Kbd><Kbd>M</Kbd></>, run: go(() => navigate({ to: "/vms" })) },
       { id: "go-storage", group: "Go to", label: "Storage", keywords: "pools volumes images iso", icon: "database", hint: <><Kbd>G</Kbd><Kbd>S</Kbd></>, run: go(() => navigate({ to: "/storage" })) },
+      { id: "go-networks", group: "Go to", label: "Networks", keywords: "network subnet switch vlan dhcp", icon: "network", run: go(() => navigate({ to: "/networks" })) },
       { id: "go-tasks", group: "Go to", label: "Tasks", keywords: "activity jobs", icon: "activity", hint: <><Kbd>G</Kbd><Kbd>T</Kbd></>, run: go(() => navigate({ to: "/tasks" })) },
     ];
     for (const vm of vms) {

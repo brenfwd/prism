@@ -9,6 +9,7 @@ import { OverviewPage } from "./pages/Overview";
 import { MachinesPage } from "./pages/Machines";
 import { NewVmPage, type NewVmSearch } from "./pages/NewVm";
 import { VmPage } from "./pages/vm/VmPage";
+import { NetworksPage } from "./pages/Networks";
 import { StoragePage } from "./pages/Storage";
 import { TasksPage } from "./pages/Tasks";
 import { VM_TABS } from "./components/Shortcuts";
@@ -64,6 +65,7 @@ const routeTree = rootRoute.addChildren([
   newVmRoute,
   vmRoute,
   storageRoute,
+  createRoute({ getParentRoute: () => rootRoute, path: "/networks", component: NetworksPage }),
   createRoute({ getParentRoute: () => rootRoute, path: "/tasks", component: TasksPage }),
 ]);
 

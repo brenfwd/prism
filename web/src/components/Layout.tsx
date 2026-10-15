@@ -13,10 +13,11 @@ import { TaskTray } from "./TaskTray";
 import { Toaster } from "./Toaster";
 import { Button, IconButton, Kbd, Meter, cx, modKey } from "./ui";
 
-const nav: { to: "/" | "/vms" | "/storage" | "/tasks"; label: string; icon: IconName; exact?: boolean }[] = [
+const nav: { to: "/" | "/vms" | "/storage" | "/networks" | "/tasks"; label: string; icon: IconName; exact?: boolean }[] = [
   { to: "/", label: "Overview", icon: "home", exact: true },
   { to: "/vms", label: "Machines", icon: "server" },
   { to: "/storage", label: "Storage", icon: "database" },
+  { to: "/networks", label: "Networks", icon: "network" },
   { to: "/tasks", label: "Tasks", icon: "activity" },
 ];
 
@@ -184,6 +185,7 @@ function Breadcrumbs() {
   if (path === "/vms/new") crumbs.push({ label: "New machine" });
   if (m) crumbs.push({ label: vms?.find((v) => v.id === m[1])?.name ?? "…" });
   if (path === "/storage") crumbs.push({ label: "Storage" });
+  if (path === "/networks") crumbs.push({ label: "Networks" });
   if (path === "/tasks") crumbs.push({ label: "Tasks" });
   if (path === "/") crumbs.push({ label: "Overview" });
   return (

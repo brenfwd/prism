@@ -33,7 +33,25 @@ export interface VmRuntime {
 export type BalloonMode = "off" | "manual" | "auto";
 export type CpuModel = "host_model" | "host_passthrough";
 export type Firmware = "bios" | "uefi";
-export type NicNetwork = { type: "user" } | { type: "bridge"; bridge: string };
+export type NicNetwork =
+  | { type: "user" }
+  | { type: "bridge"; bridge: string }
+  | { type: "network"; network: string; ipv4?: string | null; egress?: string | null };
+
+export interface NetworkInfo {
+  id: string;
+  name: string;
+  kind: "nat" | "isolated";
+  vni: number;
+  subnet: string;
+  egress: string | null;
+  dhcp: boolean;
+  created: number;
+  bridge: string;
+  domain: string;
+  /** Names of the VMs with a NIC on it. */
+  vms: string[];
+}
 
 export interface Disk {
   id: string;
@@ -215,6 +233,12 @@ export const api = {
   deleteVm: (id: string, deleteDisks: boolean) =>
     request<void>("DELETE", `/vms/${id}?delete_disks=${deleteDisks}`),
   action: (id: string, action: VmAction) => request<Vm>("POST", `/vms/${id}/actions/${action}`),
+
+  networks: () => request<NetworkInfo[]>("GET", "/networks"),
+  createNetwork: (req: { name?: string; kind?: "nat" | "isolated"; subnet?: string; dhcp?: boolean } = {}) =>
+    request<NetworkInfo>("POST", "/networks", req),
+  updateNetwork: (id: string, req: { name?: string; dhcp?: boolean }) => request<NetworkInfo>("PATCH", `/networks/${id}`, req),
+  deleteNetwork: (id: string) => request<void>("DELETE", `/networks/${id}`),
 
   addDisk: (id: string, req: { pool: string; volume?: string; size_gib?: number; device: "disk" | "cdrom" }) =>
     request<Vm>("POST", `/vms/${id}/disks`, req),

@@ -8,6 +8,7 @@ export const useVms = () => useQuery({ queryKey: ["vms"], queryFn: api.vms });
 export const useVm = (id: string) => useQuery({ queryKey: ["vm", id], queryFn: () => api.vm(id) });
 export const useNodes = () => useQuery({ queryKey: ["nodes"], queryFn: api.nodes });
 export const usePools = () => useQuery({ queryKey: ["pools"], queryFn: api.pools });
+export const useNetworks = () => useQuery({ queryKey: ["networks"], queryFn: api.networks });
 export const useTasks = () => useQuery({ queryKey: ["tasks"], queryFn: api.tasks });
 export const useVolumes = (pool: string | undefined) =>
   useQuery({ queryKey: ["volumes", pool], queryFn: () => api.volumes(pool!), enabled: !!pool });

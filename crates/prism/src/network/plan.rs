@@ -1,7 +1,7 @@
 //! What one node's data plane should look like, computed from replicated
 //! state. Pure, so it is tested without netlink.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
@@ -11,8 +11,8 @@ use prism_net::dhcp::Lease;
 use prism_net::link::VxlanFdb;
 use uuid::Uuid;
 
-use super::firewall::GuestRules;
-use super::{NetworkDoc, NetworkKind, switch_mtu};
+use super::firewall::{GuestRules, Routed};
+use super::{NetworkDoc, NetworkKind, VLAN_OVERHEAD, switch_mtu};
 use crate::cluster::model::MemberDoc;
 use crate::spec::{NicNetwork, VmSpec};
 
@@ -44,6 +44,12 @@ pub struct SwitchPlan {
     /// DHCP leases for NICs of VMs on this node (empty when DHCP is off).
     pub leases: HashMap<MacAddr, Lease>,
     pub dhcp: bool,
+    /// Every VLAN any NIC on the network uses, cluster-wide: the VXLAN
+    /// port carries these tagged. Empty means the network has no VLANs.
+    pub vlans: BTreeSet<u16>,
+    /// Local taps on a VLAN-aware network and the VLAN each is an access
+    /// port for (1 when the NIC has none).
+    pub ports: Vec<(String, u16)>,
     /// The zone origin, `<network>.prism`.
     pub domain: String,
     /// Every VM on the network, by name.
@@ -83,9 +89,15 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
         .map(|m| (m.node_id, m.mesh_addr))
         .collect();
     let local_mesh = mesh.get(&input.node).copied();
-    let mtu = switch_mtu(input.wg_mtu);
+    let base_mtu = switch_mtu(input.wg_mtu);
     let mut out = NodePlan::default();
     for net in input.networks {
+        let vlans = net_vlans(net.id, input.vms);
+        let mtu = if vlans.is_empty() {
+            base_mtu
+        } else {
+            base_mtu.saturating_sub(VLAN_OVERHEAD)
+        };
         let gateway = net.gateways.get(&input.node).copied();
         let address = gateway.map(|g| Ipv4Net::new_assert(g, net.subnet.prefix_len()));
         let vxlan = local_mesh.map(|local| VxlanPlan {
@@ -109,6 +121,8 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
             vxlan,
             leases: HashMap::new(),
             dhcp: net.dhcp,
+            vlans,
+            ports: Vec::new(),
             domain: net.domain(),
             hosts: HashMap::new(),
         };
@@ -118,6 +132,7 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                     network,
                     ipv4,
                     egress,
+                    vlan,
                 } = &nic.network
                 else {
                     continue;
@@ -135,6 +150,9 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                         .push(IpAddr::V4(*ip));
                 }
                 if runs_on(vm, input.node) {
+                    if !sw.vlans.is_empty() {
+                        sw.ports.push((tap_name(nic.id), vlan.unwrap_or(1)));
+                    }
                     out.firewall.ports.push(prism_net::nft::GuestPort {
                         tap: tap_name(nic.id),
                         mac,
@@ -162,16 +180,37 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                     source: net.subnet,
                     egress: uplink.clone(),
                 });
-                out.firewall
-                    .routed
-                    .push((sw.bridge.clone(), Some(uplink.clone())));
+                out.firewall.routed.push(Routed {
+                    bridge: sw.bridge.clone(),
+                    out: Some(uplink.clone()),
+                    allow: net.allow_prefixes.clone(),
+                });
             }
-            _ => out.firewall.routed.push((sw.bridge.clone(), None)),
+            _ => out.firewall.routed.push(Routed {
+                bridge: sw.bridge.clone(),
+                out: None,
+                allow: Vec::new(),
+            }),
         }
         out.switches.push(sw);
     }
     out.firewall.blocked = blocked_destinations(input.members);
     out
+}
+
+/// The VLANs NICs on `network` use.
+fn net_vlans(network: Uuid, vms: &[VmSpec]) -> BTreeSet<u16> {
+    vms.iter()
+        .flat_map(|v| &v.nics)
+        .filter_map(|n| match &n.network {
+            NicNetwork::Network {
+                network: id,
+                vlan: Some(v),
+                ..
+            } if *id == network => Some(*v),
+            _ => None,
+        })
+        .collect()
 }
 
 fn lease(
@@ -235,6 +274,7 @@ mod tests {
             ]),
             egress: None,
             dhcp: true,
+            allow_prefixes: Vec::new(),
             created: 0,
         }
     }
@@ -265,6 +305,7 @@ mod tests {
                 network: Uuid::from_u128(10),
                 ipv4: Some(Ipv4Addr::new(10, 88, 0, ip)),
                 egress,
+                vlan: None,
             },
             boot_order: None,
         }];

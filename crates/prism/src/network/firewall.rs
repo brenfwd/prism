@@ -20,7 +20,17 @@ pub struct GuestRules {
     /// other members' underlay addresses).
     pub blocked: Vec<Ipv4Net>,
     /// Each bridge and the only interface it may forward out of.
-    pub routed: Vec<(String, Option<String>)>,
+    pub routed: Vec<Routed>,
+}
+
+/// A bridge's forwarding policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Routed {
+    pub bridge: String,
+    /// The only interface it may forward out of.
+    pub out: Option<String>,
+    /// Blocked destinations this bridge may still reach.
+    pub allow: Vec<Ipv4Net>,
 }
 
 /// The mesh, when this node is in a cluster.
@@ -56,7 +66,15 @@ impl Firewall {
         };
         inet.chains.push(guest_input_chain(&rules.switches));
         if let Some(fwd) = inet.chain_mut("forward") {
-            for (bridge, out) in &rules.routed {
+            for Routed { bridge, out, allow } in &rules.routed {
+                for net in allow {
+                    fwd.push(
+                        Rule::new(Family::Inet)
+                            .iifname(bridge)
+                            .ip_daddr(*net)
+                            .accept(),
+                    );
+                }
                 for net in &rules.blocked {
                     fwd.push(
                         Rule::new(Family::Inet)
@@ -102,13 +120,17 @@ mod tests {
                 vip: "10.88.0.1".parse().unwrap(),
             }],
             blocked: vec!["100.64.0.0/10".parse().unwrap()],
-            routed: vec![("ps100000".into(), Some("eth0".into()))],
+            routed: vec![Routed {
+                bridge: "ps100000".into(),
+                out: Some("eth0".into()),
+                allow: vec!["100.64.9.0/24".parse().unwrap()],
+            }],
             ..GuestRules::default()
         };
         let t = Firewall::tables(&rules, None);
         assert_eq!(t.len(), 3);
         let fwd = t[0].chains.iter().find(|c| c.name == "forward").unwrap();
-        assert_eq!(fwd.rules.len(), 2);
+        assert_eq!(fwd.rules.len(), 3);
         assert!(t[0].chains.iter().any(|c| c.name == "input"));
     }
 }

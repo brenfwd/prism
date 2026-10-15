@@ -9,10 +9,10 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use super::backups::unix_now;
-use super::{Node, NodeError, Result};
+use super::{Node, NodeError, Result, VmState};
 use crate::network::{
-    CheckNetwork, CreateNetwork, DEFAULT_NETWORK, NetworkDoc, UpdateNetwork, host, ipam,
-    valid_network_name, valid_subnet,
+    CheckNetwork, CreateNetwork, DEFAULT_NETWORK, NetworkDoc, NetworkKind, UpdateNetwork, host,
+    ipam, valid_allow_prefixes, valid_network_name, valid_subnet,
 };
 use crate::spec::NicNetwork;
 use crate::state::Command;
@@ -35,6 +35,9 @@ pub struct NetworkCheck {
     pub subnet_error: Option<String>,
     /// A free subnet to offer when the one asked for does not work.
     pub suggestion: Option<Ipv4Net>,
+    /// Running VMs that would break if an existing network moved to the
+    /// subnet asked for; stop them first.
+    pub blocking_vms: Vec<String>,
 }
 
 impl Node {
@@ -70,12 +73,34 @@ impl Node {
                 };
                 Some(format!("{s} overlaps {hit}, used by {who}."))
             });
+            if out.subnet_error.is_none()
+                && let Some(id) = req.id
+                && self.network(&id.to_string())?.network.subnet != s
+            {
+                out.blocking_vms = self.running_on(id)?;
+            }
             if out.subnet_error.is_some() {
                 taken.push(ipam::CGNAT);
                 out.suggestion = ipam::pick_subnet(&taken);
             }
         }
         Ok(out)
+    }
+
+    /// Names of VMs with a NIC on network `id` that are not stopped.
+    fn running_on(&self, id: Uuid) -> Result<Vec<String>> {
+        Ok(self
+            .vms()?
+            .into_iter()
+            .filter(|v| {
+                v.spec
+                    .nics
+                    .iter()
+                    .any(|n| n.network.network_id() == Some(id))
+            })
+            .filter(|v| !matches!(v.status.state, VmState::Stopped | VmState::Missing))
+            .map(|v| v.spec.name)
+            .collect())
     }
 
     /// The bridge of each network, for rendering NICs.
@@ -157,6 +182,7 @@ impl Node {
             ipam::pick_subnet(&taken)
                 .ok_or_else(|| NodeError::Conflict("no free subnet left".into()))?
         };
+        valid_allow_prefixes(req.kind, &req.allow_prefixes).map_err(NodeError::Invalid)?;
         let doc = NetworkDoc {
             id: Uuid::new_v4(),
             name,
@@ -166,6 +192,7 @@ impl Node {
             gateways: BTreeMap::default(),
             egress: req.egress,
             dhcp: req.dhcp.unwrap_or(true),
+            allow_prefixes: req.allow_prefixes,
             created: unix_now(),
         };
         let id = doc.id;
@@ -188,6 +215,33 @@ impl Node {
         }
         if let Some(d) = req.dhcp {
             doc.dhcp = d;
+        }
+        if let Some(k) = req.kind {
+            doc.kind = k;
+            if k == NetworkKind::Isolated {
+                doc.egress = None;
+                doc.allow_prefixes.clear();
+            }
+        }
+        if let Some(p) = req.allow_prefixes {
+            doc.allow_prefixes = p;
+        }
+        if let Some(s) = req.subnet.filter(|s| *s != doc.subnet) {
+            let check = self.check_network(&CheckNetwork {
+                id: Some(doc.id),
+                name: None,
+                subnet: Some(s),
+            })?;
+            if let Some(e) = check.subnet_error {
+                return Err(NodeError::Conflict(e));
+            }
+            if !check.blocking_vms.is_empty() {
+                return Err(NodeError::Conflict(format!(
+                    "stop {} before changing the subnet: running guests would keep their old address",
+                    check.blocking_vms.join(", ")
+                )));
+            }
+            doc.subnet = s;
         }
         let id = doc.id;
         self.state
@@ -223,6 +277,7 @@ impl Node {
                     network: n.id,
                     ipv4: None,
                     egress: None,
+                    vlan: None,
                 })
         })
     }

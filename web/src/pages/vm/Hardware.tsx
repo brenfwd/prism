@@ -429,11 +429,14 @@ function AddNic({ vm, onClose }: { vm: Vm; onClose: () => void }) {
   const bridge = bridgeSel ?? bridges.find((b) => !b.prism)?.name ?? bridges[0]?.name ?? "br0";
   const setBridge = setBridgeSel;
   const [mac, setMac] = useState("");
+  const [vlanText, setVlanText] = useState("");
+  const vlan = vlanText ? Number(vlanText) : undefined;
+  const vlanOk = vlan === undefined || (Number.isInteger(vlan) && vlan >= 2 && vlan <= 4094);
   const macOk = !mac || /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(mac);
   const m = useMutation({
     mutationFn: () =>
       deviceChange(qc, vm, "Network adapter added", () =>
-        api.addNic(vm.id, { network: type === "network" && chosen ? { type: "network", network: chosen } : type === "bridge" ? { type: "bridge", bridge } : { type: "user" }, mac: mac || undefined }),
+        api.addNic(vm.id, { network: type === "network" && chosen ? { type: "network", network: chosen, vlan } : type === "bridge" ? { type: "bridge", bridge } : { type: "user" }, mac: mac || undefined }),
       ),
     onSuccess: (ok) => ok && onClose(),
   });
@@ -444,7 +447,7 @@ function AddNic({ vm, onClose }: { vm: Vm; onClose: () => void }) {
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={m.isPending} disabled={!macOk || (type === "bridge" && !bridge)} onClick={() => m.mutate()}>Add adapter</Button>
+          <Button variant="primary" loading={m.isPending} disabled={!macOk || !vlanOk || (type === "bridge" && !bridge)} onClick={() => m.mutate()}>Add adapter</Button>
         </>
       }
     >
@@ -469,6 +472,11 @@ function AddNic({ vm, onClose }: { vm: Vm; onClose: () => void }) {
             ) : (
               <Input id="nic-br" value={bridge} onChange={(e) => setBridge(e.target.value)} className="font-mono" autoFocus placeholder="No bridges found; type a name" />
             )}
+          </Field>
+        )}
+        {type === "network" && nets.length > 0 && (
+          <Field label="VLAN" htmlFor="nic-vlan" hint="Optional. Puts this adapter on its own segment (2 to 4094): it only sees adapters on the same VLAN, not the gateway or DHCP, so give it a static address." error={vlanOk ? undefined : "Use a number from 2 to 4094."}>
+            <Input id="nic-vlan" inputMode="numeric" value={vlanText} onChange={(e) => setVlanText(e.target.value.replace(/\D/g, ""))} placeholder="none" className="font-mono" aria-invalid={!vlanOk} />
           </Field>
         )}
         <Field label="MAC address" htmlFor="nic-mac" hint="Leave empty to pick a random one." error={macOk ? undefined : "Format: 52:54:00:12:34:56"}>

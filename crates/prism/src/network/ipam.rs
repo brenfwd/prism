@@ -49,6 +49,17 @@ pub fn is_host(subnet: Ipv4Net, ip: Ipv4Addr) -> bool {
     subnet.contains(&ip) && ip != subnet.network() && ip != subnet.broadcast()
 }
 
+/// Where `ip` of `old` lands in `new` when the networks have the same size:
+/// the same host offset. `None` when the sizes differ or it does not fit.
+pub fn translate(old: Ipv4Net, new: Ipv4Net, ip: Ipv4Addr) -> Option<Ipv4Addr> {
+    if old.prefix_len() != new.prefix_len() || !old.contains(&ip) {
+        return None;
+    }
+    let off = u32::from(ip) - u32::from(old.network());
+    let out = Ipv4Addr::from(u32::from(new.network()) + off);
+    is_host(new, out).then_some(out)
+}
+
 /// The lowest VNI in [`VNI_MIN`]..=[`VNI_MAX`] not in `unavailable`.
 pub fn alloc_vni(unavailable: &BTreeSet<u32>) -> Option<u32> {
     (VNI_MIN..=VNI_MAX).find(|v| !unavailable.contains(v))
@@ -106,6 +117,20 @@ mod tests {
         assert!(!is_host(s, Ipv4Addr::new(10, 88, 0, 7)));
         assert!(!is_host(s, Ipv4Addr::new(10, 88, 0, 0)));
         assert!(!is_host(s, Ipv4Addr::new(10, 88, 1, 1)));
+    }
+
+    #[test]
+    fn translation_keeps_the_host_offset() {
+        let (a, b) = (net("10.88.0.0/24"), net("10.90.4.0/24"));
+        assert_eq!(
+            translate(a, b, Ipv4Addr::new(10, 88, 0, 7)),
+            Some(Ipv4Addr::new(10, 90, 4, 7))
+        );
+        assert_eq!(
+            translate(a, net("10.90.0.0/23"), Ipv4Addr::new(10, 88, 0, 7)),
+            None
+        );
+        assert_eq!(translate(a, b, Ipv4Addr::new(10, 88, 1, 7)), None);
     }
 
     #[test]

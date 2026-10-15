@@ -4,17 +4,21 @@ import { api, type NetworkCheck, type NetworkInfo } from "../../api";
 import { toast } from "../../lib/toast";
 import { Button, ErrorText, Field, Input, Modal, Segmented } from "../../components/ui";
 
-/** Create a network (everything optional) or rename an existing one. */
+/** Create a network (everything optional) or edit an existing one. */
 export function NetworkModal({ existing, onClose }: { existing?: NetworkInfo; onClose: () => void }) {
   const qc = useQueryClient();
   const [name, setName] = useState(existing?.name ?? "");
-  const [kind, setKind] = useState<"nat" | "isolated">("nat");
+  const [kind, setKind] = useState<"nat" | "isolated">(existing?.kind ?? "nat");
   const [custom, setCustom] = useState(false);
-  const [subnet, setSubnet] = useState("");
+  const [subnet, setSubnet] = useState(existing?.subnet ?? "");
+  const [allowText, setAllowText] = useState((existing?.allow_prefixes ?? []).join(", "));
+  const allow = allowText.split(/[\s,]+/).filter(Boolean);
+  const allowOk = allow.every((a) => /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(a));
   const [check, setCheck] = useState<NetworkCheck | null>(null);
 
   // Live validation, debounced, against the other networks and the host's own routes.
-  const wantSubnet = custom && !existing ? subnet.trim() : "";
+  const subnetChanged = !!existing && subnet.trim() !== existing.subnet;
+  const wantSubnet = existing ? (subnetChanged ? subnet.trim() : "") : custom ? subnet.trim() : "";
   useEffect(() => {
     if (!name.trim() && !wantSubnet) return setCheck(null);
     let stale = false;
@@ -33,27 +37,32 @@ export function NetworkModal({ existing, onClose }: { existing?: NetworkInfo; on
   const save = useMutation({
     mutationFn: () =>
       existing
-        ? api.updateNetwork(existing.id, { name: name.trim() })
-        : api.createNetwork({ name: name.trim() || undefined, kind, subnet: wantSubnet || undefined }),
+        ? api.updateNetwork(existing.id, {
+            name: name.trim(),
+            kind: kind !== existing.kind ? kind : undefined,
+            subnet: subnetChanged ? wantSubnet : undefined,
+            allow_prefixes: kind === "nat" ? allow : [],
+          })
+        : api.createNetwork({ name: name.trim() || undefined, kind, subnet: wantSubnet || undefined, allow_prefixes: kind === "nat" && allow.length ? allow : undefined }),
     onSuccess: (n) => {
-      toast({ tone: "success", title: existing ? `Renamed to ${n.name}` : `Network ${n.name} created on ${n.subnet}` });
+      toast({ tone: "success", title: existing ? `${n.name} updated` : `Network ${n.name} created on ${n.subnet}` });
       void qc.invalidateQueries({ queryKey: ["networks"] });
       onClose();
     },
   });
   const subnetFormat = !wantSubnet || /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(wantSubnet);
   const subnetError = !subnetFormat ? "Write it like 10.50.0.0/24." : check?.subnet_error;
-  const blocked = !!check?.name_error || !!subnetError || (custom && !existing && !wantSubnet) || (!!existing && !name.trim());
+  const blocked = !!check?.name_error || !!subnetError || (custom && !existing && !wantSubnet) || (!!existing && !name.trim()) || !allowOk || !!check?.blocking_vms?.length;
 
   return (
     <Modal
-      title={existing ? `Rename ${existing.name}` : "New network"}
-      description={existing ? "Machines resolve each other as <machine>.<name>.prism, so the new name applies to DNS right away." : "Leave everything as is for a private network with internet access on a free subnet."}
+      title={existing ? `Edit ${existing.name}` : "New network"}
+      description={existing ? "Machines resolve each other as <machine>.<name>.prism. Changing the subnet moves every address; stopped machines keep their place in the range." : "Leave everything as is for a private network with internet access on a free subnet."}
       onClose={onClose}
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" disabled={blocked} loading={save.isPending} onClick={() => save.mutate()}>{existing ? "Rename" : "Create network"}</Button>
+          <Button variant="primary" disabled={blocked} loading={save.isPending} onClick={() => save.mutate()}>{existing ? "Save changes" : "Create network"}</Button>
         </>
       }
     >
@@ -61,7 +70,7 @@ export function NetworkModal({ existing, onClose }: { existing?: NetworkInfo; on
         <Field label="Name" htmlFor="net-name" error={check?.name_error} hint={existing ? undefined : "Optional. Lowercase letters, digits and hyphens."}>
           <Input id="net-name" autoFocus value={name} aria-invalid={!!check?.name_error} placeholder={existing ? undefined : "e.g. lab"} onChange={(e) => setName(e.target.value.toLowerCase())} />
         </Field>
-        {!existing && (
+        {(
           <>
             <Field label="Access" hint={kind === "nat" ? "Machines can reach the internet and each other." : "Machines can only talk to each other. No internet, no gateway."}>
               <Segmented
@@ -74,7 +83,26 @@ export function NetworkModal({ existing, onClose }: { existing?: NetworkInfo; on
                 ]}
               />
             </Field>
-            {!custom ? (
+            {existing ? (
+              <Field
+                label="Subnet"
+                htmlFor="net-subnet"
+                error={subnetError}
+                hint="Machines must be stopped to move to a new range; they get matching addresses automatically."
+              >
+                <Input id="net-subnet" className="font-mono" value={subnet} aria-invalid={!!subnetError} onChange={(e) => setSubnet(e.target.value)} />
+                {check?.subnet_error && check.suggestion && (
+                  <button type="button" className="mt-1.5 text-xs text-indigo-600 hover:underline dark:text-indigo-400" onClick={() => setSubnet(check.suggestion ?? "")}>
+                    Use {check.suggestion} instead
+                  </button>
+                )}
+                {!!check?.blocking_vms?.length && (
+                  <p role="alert" className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+                    Stop {check.blocking_vms.join(", ")} first. Running machines would keep their old address and lose the network.
+                  </p>
+                )}
+              </Field>
+            ) : !custom ? (
               <button type="button" className="text-[13px] text-indigo-600 hover:underline dark:text-indigo-400" onClick={() => setCustom(true)}>
                 Choose the subnet myself
               </button>
@@ -95,6 +123,16 @@ export function NetworkModal({ existing, onClose }: { existing?: NetworkInfo; on
               </Field>
             )}
           </>
+        )}
+        {kind === "nat" && (
+          <Field
+            label="Allowed destinations"
+            htmlFor="net-allow"
+            hint="Optional. Machines normally cannot reach the tailnet (100.64.0.0/10) or the cluster's own addresses. List prefixes, like 100.64.2.0/24, to let them through."
+            error={allowOk ? undefined : "Write prefixes like 100.64.2.0/24, separated by commas."}
+          >
+            <Input id="net-allow" className="font-mono" value={allowText} aria-invalid={!allowOk} placeholder="none" onChange={(e) => setAllowText(e.target.value)} />
+          </Field>
         )}
         <ErrorText error={save.error} />
       </div>

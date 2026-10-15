@@ -10,8 +10,8 @@ use super::{Outcome, VMS};
 use crate::cluster::model::{MEMBERS, MemberDoc};
 use crate::db::Docs;
 use crate::network::{
-    NETWORKS, NetworkDoc, RELEASED_VNIS, ReleasedVni, VNI_COOLDOWN_SECS, ipam, valid_network_name,
-    valid_subnet,
+    NETWORKS, NetworkDoc, RELEASED_VNIS, ReleasedVni, VNI_COOLDOWN_SECS, ipam,
+    valid_allow_prefixes, valid_network_name, valid_subnet,
 };
 use crate::spec::{NicNetwork, VmSpec};
 
@@ -82,6 +82,9 @@ pub(super) fn put_network(
             new.subnet
         )));
     }
+    if let Err(e) = valid_allow_prefixes(new.kind, &new.allow_prefixes) {
+        return Ok(Outcome::Conflict(e));
+    }
     let nodes = nodes(d, local)?;
     if let Some(e) = new.egress
         && !nodes.contains(&e)
@@ -92,14 +95,14 @@ pub(super) fn put_network(
     }
     let mut doc = new.clone();
     if let Some(old) = d.get::<NetworkDoc>(NETWORKS, &new.id.to_string())? {
-        if old.subnet != new.subnet || old.kind != new.kind {
-            return Ok(Outcome::Conflict(
-                "a network's subnet and kind cannot change; create a new network".into(),
-            ));
-        }
         doc.vni = old.vni;
-        doc.gateways = old.gateways;
+        doc.gateways = old.gateways.clone();
         doc.created = old.created;
+        if old.subnet != new.subnet
+            && let Err(e) = renumber(d, &old, &mut doc)?
+        {
+            return Ok(Outcome::Conflict(e));
+        }
     } else {
         let mut taken: BTreeSet<u32> = others.iter().map(|n| n.vni).collect();
         for r in d.list::<ReleasedVni>(RELEASED_VNIS)? {
@@ -127,6 +130,60 @@ pub(super) fn put_network(
     }
     d.put(NETWORKS, &doc.id.to_string(), &doc)?;
     Ok(Outcome::Ok)
+}
+
+/// Moves a network to `doc.subnet`: every gateway and NIC lease keeps its
+/// host offset when the new subnet is the same size, and otherwise gets the
+/// lowest free address. Nothing is written unless everything fits.
+fn renumber(
+    d: &Docs<'_>,
+    old: &NetworkDoc,
+    doc: &mut NetworkDoc,
+) -> anyhow::Result<Result<(), String>> {
+    let mut used = BTreeSet::new();
+    let mut pick = |ip: Ipv4Addr| -> Option<Ipv4Addr> {
+        let new = ipam::translate(old.subnet, doc.subnet, ip)
+            .filter(|n| !used.contains(n))
+            .or_else(|| ipam::first_free(doc.subnet, &used))?;
+        used.insert(new);
+        Some(new)
+    };
+    let too_small = || format!("{} is too small for the addresses in use", doc.subnet);
+    let mut gateways = old.gateways.clone();
+    for ip in gateways.values_mut() {
+        let Some(n) = pick(*ip) else {
+            return Ok(Err(too_small()));
+        };
+        *ip = n;
+    }
+    let mut vms = Vec::new();
+    for mut vm in d.list::<VmSpec>(VMS)? {
+        let mut changed = false;
+        for nic in &mut vm.nics {
+            if let NicNetwork::Network {
+                network,
+                ipv4: Some(ip),
+                ..
+            } = &mut nic.network
+                && *network == old.id
+            {
+                let Some(n) = pick(*ip) else {
+                    return Ok(Err(too_small()));
+                };
+                *ip = n;
+                changed = true;
+            }
+        }
+        if changed {
+            vm.generation += 1;
+            vms.push(vm);
+        }
+    }
+    doc.gateways = gateways;
+    for vm in vms {
+        d.put(VMS, &vm.id.to_string(), &vm)?;
+    }
+    Ok(Ok(()))
 }
 
 pub(super) fn delete_network(d: &Docs<'_>, id: Uuid, now: i64) -> anyhow::Result<Outcome> {
@@ -169,6 +226,11 @@ pub(super) fn assign_leases(d: &Docs<'_>, vm: &mut VmSpec) -> anyhow::Result<Res
         let Some(net) = d.get::<NetworkDoc>(NETWORKS, &network.to_string())? else {
             return Ok(Err(format!("network {network} does not exist")));
         };
+        if let NicNetwork::Network { vlan: Some(v), .. } = &vm.nics[i].network
+            && !(2..=4094).contains(v)
+        {
+            return Ok(Err(format!("VLAN {v} is out of range 2 to 4094")));
+        }
         let mut used = used_addresses(d, &net, Some(nic_id))?;
         // Earlier NICs of this VM, as they will be stored.
         for other in &vm.nics[..i] {

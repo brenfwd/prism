@@ -61,7 +61,7 @@ function NetworkCard({ net, vms, onRename }: { net: NetworkInfo; vms: Vm[]; onRe
       description={<span className="font-mono">{net.subnet}</span>}
       actions={
         <>
-        <IconButton icon="pencil" label="Rename network" onClick={onRename} />
+        <IconButton icon="pencil" label="Edit network" onClick={onRename} />
         <IconButton
           icon="trash"
           label="Delete network"

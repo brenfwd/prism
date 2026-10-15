@@ -154,6 +154,10 @@ pub enum NicNetwork {
         /// Egress node override; `None` uses the network's egress.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         egress: Option<Uuid>,
+        /// Access VLAN (2 to 4094) inside the network; the NIC then shares
+        /// a segment only with NICs on the same VLAN, not the gateway.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vlan: Option<u16>,
     },
 }
 

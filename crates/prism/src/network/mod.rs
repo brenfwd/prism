@@ -41,6 +41,9 @@ pub const MAX_MTU: u32 = 1500;
 /// VXLAN over IPv6 costs 70 bytes inside `wg-prism`.
 pub const VXLAN_OVERHEAD: u32 = 70;
 
+/// An 802.1Q tag costs 4 bytes inside the VXLAN packet.
+pub const VLAN_OVERHEAD: u32 = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkKind {
@@ -69,6 +72,10 @@ pub struct NetworkDoc {
     pub egress: Option<Uuid>,
     /// Serve DHCP with IPAM leases.
     pub dhcp: bool,
+    /// Destinations inside the blocked ranges (tailnet, member addresses)
+    /// that guests on this NAT network may still reach.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_prefixes: Vec<Ipv4Net>,
     pub created: i64,
 }
 
@@ -171,6 +178,8 @@ pub struct CreateNetwork {
     pub subnet: Option<Ipv4Net>,
     pub egress: Option<Uuid>,
     pub dhcp: Option<bool>,
+    #[serde(default)]
+    pub allow_prefixes: Vec<Ipv4Net>,
 }
 
 /// `POST /api/v1/networks/check` body: what the form has so far.
@@ -193,6 +202,35 @@ pub struct UpdateNetwork {
     #[serde(default, deserialize_with = "double_option")]
     pub egress: Option<Option<Uuid>>,
     pub dhcp: Option<bool>,
+    /// Re-addresses the network: gateways and stopped VMs' leases move.
+    /// Refused while a VM on the network is running.
+    pub subnet: Option<Ipv4Net>,
+    pub kind: Option<NetworkKind>,
+    /// Replaces the list of blocked destinations guests may reach.
+    pub allow_prefixes: Option<Vec<Ipv4Net>>,
+}
+
+/// Most `allow_prefixes` per network.
+pub const MAX_ALLOW_PREFIXES: usize = 16;
+
+/// Checks a network's allowed prefixes.
+pub fn valid_allow_prefixes(kind: NetworkKind, prefixes: &[Ipv4Net]) -> Result<(), String> {
+    if prefixes.is_empty() {
+        return Ok(());
+    }
+    if kind == NetworkKind::Isolated {
+        return Err("an isolated network cannot reach anything outside; allowed prefixes need a NAT network".into());
+    }
+    if prefixes.len() > MAX_ALLOW_PREFIXES {
+        return Err(format!("at most {MAX_ALLOW_PREFIXES} allowed prefixes"));
+    }
+    if let Some(p) = prefixes.iter().find(|p| p.network() != p.addr()) {
+        return Err(format!("{p} has host bits set; use {}", p.trunc()));
+    }
+    if let Some(p) = prefixes.iter().find(|p| p.prefix_len() == 0) {
+        return Err(format!("{p} would open everything; use a narrower prefix"));
+    }
+    Ok(())
 }
 
 #[allow(clippy::option_option)]
@@ -221,6 +259,7 @@ mod tests {
             ]),
             egress: None,
             dhcp: true,
+            allow_prefixes: Vec::new(),
             created: 0,
         }
     }

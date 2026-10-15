@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ipnet::{IpNet, Ipv6Net};
 use prism_net::Netlink;
-use prism_net::link::{BridgeConfig, VXLAN_PORT, VxlanConfig};
+use prism_net::link::{BridgeConfig, PortVlans, VXLAN_PORT, VxlanConfig};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -132,6 +132,20 @@ async fn apply_switch(nl: &Netlink, sw: &SwitchPlan) -> anyhow::Result<()> {
         )
         .await?;
         nl.sync_vxlan_fdb(&v.name, &v.fdb).await?;
+        nl.set_port_vlans(
+            &v.name,
+            &PortVlans::Trunk {
+                native: Some(1),
+                tagged: sw.vlans.iter().copied().collect(),
+            },
+        )
+        .await?;
+    }
+    for (tap, vid) in &sw.ports {
+        // The tap only exists while its VM runs; the next resync catches it.
+        if let Err(e) = nl.set_port_vlans(tap, &PortVlans::Access(*vid)).await {
+            tracing::debug!(%tap, "port vlan: {e}");
+        }
     }
     Ok(())
 }

@@ -36,7 +36,7 @@ export type Firmware = "bios" | "uefi";
 export type NicNetwork =
   | { type: "user"; forwards?: PortForward[] }
   | { type: "bridge"; bridge: string }
-  | { type: "network"; network: string; ipv4?: string | null; egress?: string | null };
+  | { type: "network"; network: string; ipv4?: string | null; egress?: string | null; vlan?: number | null };
 
 export interface PortForward {
   proto: "tcp" | "udp";
@@ -80,7 +80,7 @@ export interface Prereq {
   hint: string | null;
 }
 
-export interface NetworkCheck { name_error: string | null; subnet_error: string | null; suggestion: string | null }
+export interface NetworkCheck { name_error: string | null; subnet_error: string | null; suggestion: string | null; blocking_vms: string[] }
 
 export interface NetworkInfo {
   id: string;
@@ -90,6 +90,7 @@ export interface NetworkInfo {
   subnet: string;
   egress: string | null;
   dhcp: boolean;
+  allow_prefixes?: string[];
   created: number;
   bridge: string;
   domain: string;
@@ -337,10 +338,10 @@ export const api = {
     request<Task>("POST", `/nodes/local/pools/${enc(pool)}/downloads`, { url, name: name || undefined, sha256: sha256 || undefined }),
 
   networks: () => request<NetworkInfo[]>("GET", "/networks"),
-  createNetwork: (req: { name?: string; kind?: "nat" | "isolated"; subnet?: string; dhcp?: boolean } = {}) =>
+  createNetwork: (req: { name?: string; kind?: "nat" | "isolated"; subnet?: string; dhcp?: boolean; allow_prefixes?: string[] } = {}) =>
     request<NetworkInfo>("POST", "/networks", req),
   checkNetwork: (req: { id?: string; name?: string; subnet?: string }) => request<NetworkCheck>("POST", "/networks/check", req),
-  updateNetwork: (id: string, req: { name?: string; dhcp?: boolean }) => request<NetworkInfo>("PATCH", `/networks/${id}`, req),
+  updateNetwork: (id: string, req: { name?: string; dhcp?: boolean; subnet?: string; kind?: "nat" | "isolated"; allow_prefixes?: string[] }) => request<NetworkInfo>("PATCH", `/networks/${id}`, req),
   deleteNetwork: (id: string) => request<void>("DELETE", `/networks/${id}`),
 
   addDisk: (id: string, req: { pool: string; volume?: string; size_gib?: number; device: "disk" | "cdrom" }) =>

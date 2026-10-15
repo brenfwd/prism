@@ -159,7 +159,7 @@ impl Node {
 }
 
 /// Best-effort removal of volumes already copied to the destination.
-async fn cleanup_remote(
+pub(super) async fn cleanup_remote(
     node: &Node,
     cluster: &crate::cluster::Cluster,
     dst: &crate::cluster::model::MemberDoc,

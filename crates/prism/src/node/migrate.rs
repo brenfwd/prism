@@ -264,7 +264,13 @@ impl Node {
             .iter()
             .map(|t| TypedParam::string(mp::MIGRATE_DISKS, t.clone()))
             .collect();
-        let (cookie, xml) = c.migrate_begin3(&dom, &begin_params, flags).await?;
+        let (cookie, xml) = match c.migrate_begin3(&dom, &begin_params, flags).await {
+            Ok(r) => r,
+            Err(e) => {
+                super::moves::cleanup_remote(self, cluster, dst, &req.pool, &copied).await;
+                return Err(e.into());
+            }
+        };
 
         // 4–5. Begin opened a migration job on the source; if setup fails
         // before Perform, Confirm with `cancelled` closes it, or every later
@@ -295,6 +301,7 @@ impl Node {
                 {
                     tracing::warn!(vm = %spec.name, "cancelling the source job failed: {ce}");
                 }
+                super::moves::cleanup_remote(self, cluster, dst, &req.pool, &copied).await;
                 return Err(e);
             }
         };

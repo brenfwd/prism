@@ -216,7 +216,9 @@ impl StateDb {
     }
 
     pub fn delete_meta(&self, key: &str) -> anyhow::Result<()> {
-        self.db.conn().execute("DELETE FROM meta WHERE key = ?1", [key])?;
+        self.db
+            .conn()
+            .execute("DELETE FROM meta WHERE key = ?1", [key])?;
         Ok(())
     }
 
@@ -235,7 +237,8 @@ impl StateDb {
     /// Every document as `(collection, id, body)`, in a stable order.
     pub fn export(&self) -> anyhow::Result<Vec<(String, String, String)>> {
         let conn = self.db.conn();
-        let mut stmt = conn.prepare("SELECT collection, id, body FROM docs ORDER BY collection, id")?;
+        let mut stmt =
+            conn.prepare("SELECT collection, id, body FROM docs ORDER BY collection, id")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }

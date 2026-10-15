@@ -87,7 +87,10 @@ pub struct FinishResp {
 }
 
 fn to_params(pairs: &[(String, String)]) -> Vec<TypedParam> {
-    pairs.iter().map(|(k, v)| TypedParam::string(k.clone(), v.clone())).collect()
+    pairs
+        .iter()
+        .map(|(k, v)| TypedParam::string(k.clone(), v.clone()))
+        .collect()
 }
 
 /// The destination's view of the VM: disks in `pool`, CD-ROMs empty.
@@ -132,28 +135,34 @@ impl Node {
         }
         let resource = format!("/vms/{id}");
         if self.tasks.busy(&resource) {
-            return Err(NodeError::Conflict("another task is running on this VM".into()));
+            return Err(NodeError::Conflict(
+                "another task is running on this VM".into(),
+            ));
         }
         let node = Arc::clone(self);
-        Ok(self.tasks.spawn("vm.migrate", resource, move |ctx| async move {
-            let migration = ctx_id(&ctx);
-            let res = node.run_migration(&cluster, &spec, &dst, &req, migration, &ctx).await;
-            // Whatever happened, drop the intent and the socket directory.
-            let _ = std::fs::remove_dir_all(migration_dir(migration));
-            if let Err(e) = &res {
-                tracing::error!(vm = %spec.name, "migration failed: {e:#}");
-                if let Ok(mut cur) = node.spec(spec.id)
-                    && cur.migrating.is_some()
-                    && cur.node == node.id
-                {
-                    let base = cur.generation;
-                    cur.migrating = None;
-                    cur.generation += 1;
-                    let _ = node.put_spec(&cur, Some(base)).await;
+        Ok(self
+            .tasks
+            .spawn("vm.migrate", resource, move |ctx| async move {
+                let migration = ctx_id(&ctx);
+                let res = node
+                    .run_migration(&cluster, &spec, &dst, &req, migration, &ctx)
+                    .await;
+                // Whatever happened, drop the intent and the socket directory.
+                let _ = std::fs::remove_dir_all(migration_dir(migration));
+                if let Err(e) = &res {
+                    tracing::error!(vm = %spec.name, "migration failed: {e:#}");
+                    if let Ok(mut cur) = node.spec(spec.id)
+                        && cur.migrating.is_some()
+                        && cur.node == node.id
+                    {
+                        let base = cur.generation;
+                        cur.migrating = None;
+                        cur.generation += 1;
+                        let _ = node.put_spec(&cur, Some(base)).await;
+                    }
                 }
-            }
-            res
-        }))
+                res
+            }))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -174,7 +183,10 @@ impl Node {
 
         // 1. Intent: the VM may run on either node until this completes.
         let mut intent = spec.clone();
-        intent.migrating = Some(Migration { src: self.id, dst: dst.node_id });
+        intent.migrating = Some(Migration {
+            src: self.id,
+            dst: dst.node_id,
+        });
         intent.generation += 1;
         self.put_spec(&intent, Some(spec.generation)).await?;
 
@@ -198,7 +210,9 @@ impl Node {
             }
             let top = disk.volume.clone().unwrap_or_default();
             images.push(ImageReq {
-                format: pool.image_format(&top).unwrap_or_else(|| disk.format.clone()),
+                format: pool
+                    .image_format(&top)
+                    .unwrap_or_else(|| disk.format.clone()),
                 size: pool.volume(&top)?.size_bytes,
                 backing: disk.backing.last().cloned(),
                 name: top,
@@ -220,7 +234,10 @@ impl Node {
             .filter(|d| d.device == DiskDevice::Disk)
             .map(|d| d.target.clone())
             .collect();
-        let mut begin_params: Vec<TypedParam> = disks.iter().map(|t| TypedParam::string(mp::MIGRATE_DISKS, t.clone())).collect();
+        let mut begin_params: Vec<TypedParam> = disks
+            .iter()
+            .map(|t| TypedParam::string(mp::MIGRATE_DISKS, t.clone()))
+            .collect();
         let (cookie, xml) = c.migrate_begin3(&dom, &begin_params, flags).await?;
 
         // 4. Prepare on the destination (creates images, QEMU listens).
@@ -246,9 +263,17 @@ impl Node {
                 },
             )
             .await?;
-        let image_names: Vec<String> = images.iter().map(|i| i.name.clone()).chain(copied).collect();
+        let image_names: Vec<String> = images
+            .iter()
+            .map(|i| i.name.clone())
+            .chain(copied)
+            .collect();
         let mut params = to_params(&prep.params);
-        params.extend(disks.iter().map(|t| TypedParam::string(mp::MIGRATE_DISKS, t.clone())));
+        params.extend(
+            disks
+                .iter()
+                .map(|t| TypedParam::string(mp::MIGRATE_DISKS, t.clone())),
+        );
         begin_params.clear();
 
         // 5. Source-side sockets QEMU connects to, spliced to the destination.
@@ -279,12 +304,17 @@ impl Node {
             tokio::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(1)).await;
-                    let Ok((_, stats)) = c.job_stats(&dom, 0).await else { continue };
+                    let Ok((_, stats)) = c.job_stats(&dom, 0).await else {
+                        continue;
+                    };
                     let total = stats.u64("data_total").unwrap_or(0);
                     let done = stats.u64("data_processed").unwrap_or(0);
                     let iter = stats.u64("memory_iteration").unwrap_or(0);
                     if total > 0 {
-                        ctx.progress(Some(done as f64 / total as f64), format!("migrating (pass {iter})"));
+                        ctx.progress(
+                            Some(done as f64 / total as f64),
+                            format!("migrating (pass {iter})"),
+                        );
                     }
                 }
             })
@@ -402,7 +432,13 @@ impl Node {
         let mut created = Vec::new();
         for img in &req.images {
             match pool
-                .create_image(&self.cfg.libvirt.qemu_img, &img.name, &img.format, img.size, img.backing.as_deref())
+                .create_image(
+                    &self.cfg.libvirt.qemu_img,
+                    &img.name,
+                    &img.format,
+                    img.size,
+                    img.backing.as_deref(),
+                )
                 .await
             {
                 Ok(_) => created.push(img.name.clone()),
@@ -418,7 +454,8 @@ impl Node {
         let dir = migration_dir(migration);
         std::fs::create_dir_all(&dir).map_err(anyhow::Error::from)?;
         // QEMU (its own user) creates the listening sockets here.
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).map_err(anyhow::Error::from)?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
+            .map_err(anyhow::Error::from)?;
 
         // Point every source pool path at the destination pool, and the
         // seed ISO at the one just written.
@@ -520,7 +557,8 @@ async fn splice_loop(
                     .open(prism_proto::v1::OpenSession { purpose })
                     .await?
                     .into_inner();
-                let mut tcp = crate::cluster::dataplane::connect(dst.mesh_addr, &reply.session_id).await?;
+                let mut tcp =
+                    crate::cluster::dataplane::connect(dst.mesh_addr, &reply.session_id).await?;
                 tokio::io::copy_bidirectional(&mut unix, &mut tcp).await?;
                 Ok(())
             }

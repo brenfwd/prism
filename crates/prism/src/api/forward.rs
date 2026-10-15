@@ -25,7 +25,9 @@ fn owner(node: &Node, path: &str, query: Option<&str>) -> Option<Uuid> {
             .split('&')
             .find_map(|kv| kv.strip_prefix("node="))
             .and_then(|v| Uuid::parse_str(v).ok())?,
-        (Some("nodes"), Some(id)) if id != "local" && parts.next().is_some() => Uuid::parse_str(id).ok()?,
+        (Some("nodes"), Some(id)) if id != "local" && parts.next().is_some() => {
+            Uuid::parse_str(id).ok()?
+        }
         _ => return None,
     };
     (owner != node.id).then_some(owner)
@@ -61,14 +63,22 @@ pub async fn route(State(node): State<AppState>, req: Request, next: Next) -> Re
         Err(e) => return ApiError::from(e).into_response(),
     };
     let Some(member) = member else {
-        return ApiError::new(StatusCode::NOT_FOUND, "no_such_node", format!("node {owner} is not a member")).into_response();
+        return ApiError::new(
+            StatusCode::NOT_FOUND,
+            "no_such_node",
+            format!("node {owner} is not a member"),
+        )
+        .into_response();
     };
     match forward_http(cluster, &member, req).await {
         Ok(r) => r,
         Err(e) => ApiError::new(
             StatusCode::BAD_GATEWAY,
             "owner_unreachable",
-            format!("{} owns this resource and is unreachable: {e:#}", member.name),
+            format!(
+                "{} owns this resource and is unreachable: {e:#}",
+                member.name
+            ),
         )
         .into_response(),
     }

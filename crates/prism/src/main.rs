@@ -104,8 +104,12 @@ fn main() -> anyhow::Result<()> {
             tokio::runtime::Runtime::new()?.block_on(serve(&config, adopt))
         }
         Command::Doctor { config } => tokio::runtime::Runtime::new()?.block_on(doctor(&config)),
-        Command::Cluster { config, cmd } => tokio::runtime::Runtime::new()?.block_on(cli::cluster(&config, cmd)),
-        Command::Join { config, invite } => tokio::runtime::Runtime::new()?.block_on(cli::join(&config, &invite)),
+        Command::Cluster { config, cmd } => {
+            tokio::runtime::Runtime::new()?.block_on(cli::cluster(&config, cmd))
+        }
+        Command::Join { config, invite } => {
+            tokio::runtime::Runtime::new()?.block_on(cli::join(&config, &invite))
+        }
     }
 }
 
@@ -248,7 +252,8 @@ async fn serve(dir: &Path, adopt: bool) -> anyhow::Result<()> {
     );
     let app = api::router(Arc::clone(&node));
 
-    if let Some(mesh) = cluster::wg::mesh() {
+    {
+        let mesh = cluster::wg::mesh(dir);
         let c = cluster::Cluster::new(
             node_id,
             name,

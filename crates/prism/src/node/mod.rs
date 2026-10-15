@@ -333,7 +333,11 @@ impl Node {
             if existing.contains(&doc) {
                 continue;
             }
-            if let Err(e) = self.state.apply(Command::PutArchiveMember { member: doc }).await {
+            if let Err(e) = self
+                .state
+                .apply(Command::PutArchiveMember { member: doc })
+                .await
+            {
                 tracing::warn!(member = %name, "registering archive member: {e}");
             }
         }
@@ -421,7 +425,11 @@ impl Node {
 
     /// Updates the peer caches from one of a peer's own events.
     pub fn apply_remote_event(&self, ev: &crate::events::Event) {
-        let id = ev.resource.rsplit('/').next().and_then(|s| Uuid::parse_str(s).ok());
+        let id = ev
+            .resource
+            .rsplit('/')
+            .next()
+            .and_then(|s| Uuid::parse_str(s).ok());
         match (ev.ty.as_str(), id) {
             ("vm.state" | "vm.stats", Some(id)) => {
                 if let Ok(rt) = serde_json::from_value::<VmRuntime>(ev.payload.clone()) {
@@ -447,9 +455,15 @@ impl Node {
 
     pub(crate) fn vm_view(&self, mut spec: VmSpec) -> VmView {
         let status = if spec.node == self.id {
-            lock(&self.runtime).get(&spec.id).cloned().unwrap_or_default()
+            lock(&self.runtime)
+                .get(&spec.id)
+                .cloned()
+                .unwrap_or_default()
         } else {
-            lock(&self.remote_runtime).get(&spec.id).cloned().unwrap_or_default()
+            lock(&self.remote_runtime)
+                .get(&spec.id)
+                .cloned()
+                .unwrap_or_default()
         };
         // User-data may hold secrets; the API only shows a fingerprint.
         if let Some(ci) = &mut spec.cloud_init {
@@ -774,8 +788,13 @@ impl Node {
         if self.cluster.get().is_some_and(|c| c.is_degraded()) {
             return;
         }
-        for spec in specs.iter().filter(|s| s.node != self.id && !s.node.is_nil()) {
-            let Some(dom) = defined.get(spec.id.as_bytes()) else { continue };
+        for spec in specs
+            .iter()
+            .filter(|s| s.node != self.id && !s.node.is_nil())
+        {
+            let Some(dom) = defined.get(spec.id.as_bytes()) else {
+                continue;
+            };
             if self.migrating(spec.id) {
                 continue;
             }
@@ -832,7 +851,8 @@ impl Node {
                 // Everything may have changed: re-snapshot clients and
                 // reconcile this node's VMs.
                 Ok(Change::Reset) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                    self.bus.publish("reset", "/".into(), Op::Upsert, serde_json::Value::Null);
+                    self.bus
+                        .publish("reset", "/".into(), Op::Upsert, serde_json::Value::Null);
                     if let Ok(c) = self.client() {
                         self.reconcile(&c).await;
                     }
@@ -888,7 +908,12 @@ impl Node {
                 | Command::SetMemberState { .. }
                 | Command::SetVoter { .. }
                 | Command::RemoveMember { .. } => {
-                    self.bus.publish("cluster", "/cluster".into(), Op::Upsert, serde_json::Value::Null);
+                    self.bus.publish(
+                        "cluster",
+                        "/cluster".into(),
+                        Op::Upsert,
+                        serde_json::Value::Null,
+                    );
                 }
                 Command::PutBackup { backup } => {
                     self.bus.publish(
@@ -899,10 +924,20 @@ impl Node {
                     );
                 }
                 Command::DeleteBackup { id } => {
-                    self.bus.publish("backup", format!("/backups/{id}"), Op::Delete, serde_json::Value::Null);
+                    self.bus.publish(
+                        "backup",
+                        format!("/backups/{id}"),
+                        Op::Delete,
+                        serde_json::Value::Null,
+                    );
                 }
                 Command::PutArchivePool { .. } | Command::PutArchiveMember { .. } => {
-                    self.bus.publish("archive.pool", "/archive/pools".into(), Op::Upsert, serde_json::Value::Null);
+                    self.bus.publish(
+                        "archive.pool",
+                        "/archive/pools".into(),
+                        Op::Upsert,
+                        serde_json::Value::Null,
+                    );
                 }
                 Command::PutArchiveFile { file, .. } => {
                     self.bus.publish(
@@ -952,7 +987,7 @@ impl Node {
             }
             // Periodic full reconcile in a cluster (every 30 s).
             ticks += 1;
-            if ticks % 6 == 0 && self.state.clustered() {
+            if ticks.is_multiple_of(6) && self.state.clustered() {
                 self.reconcile(&c).await;
             }
         }

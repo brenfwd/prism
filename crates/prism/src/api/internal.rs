@@ -21,7 +21,8 @@ pub fn routes() -> Router<AppState> {
 
 async fn only_tunnelled(req: Request, next: Next) -> Response {
     if req.extensions().get::<Tunnelled>().is_none() {
-        return ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such endpoint").into_response();
+        return ApiError::new(StatusCode::NOT_FOUND, "not_found", "no such endpoint")
+            .into_response();
     }
     next.run(req).await
 }

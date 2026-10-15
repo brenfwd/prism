@@ -46,7 +46,9 @@ impl Node {
         }
         let resource = format!("/vms/{id}");
         if self.tasks.busy(&resource) {
-            return Err(NodeError::Conflict("another task is running on this VM".into()));
+            return Err(NodeError::Conflict(
+                "another task is running on this VM".into(),
+            ));
         }
         let node = Arc::clone(self);
         Ok(self.tasks.spawn("vm.move", resource, move |ctx| async move {
@@ -162,7 +164,10 @@ async fn cleanup_remote(
     for v in volumes {
         let req = axum::http::Request::builder()
             .method("DELETE")
-            .uri(format!("/api/v1/nodes/{}/pools/{pool}/volumes/{v}", dst.node_id))
+            .uri(format!(
+                "/api/v1/nodes/{}/pools/{pool}/volumes/{v}",
+                dst.node_id
+            ))
             .body(axum::body::Body::empty());
         if let Ok(req) = req
             && let Err(e) = crate::cluster::peers::forward_http(cluster, dst, req).await

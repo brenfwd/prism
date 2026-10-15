@@ -47,6 +47,7 @@ pub struct Sponsor {
 pub struct Invite {
     pub cluster_id: Uuid,
     pub cluster_name: String,
+    #[allow(clippy::struct_field_names)] // the protocol's name for it
     pub invite_id: [u8; 16],
     pub exp: i64,
     pub mesh_prefix: Ipv6Addr,
@@ -120,7 +121,9 @@ fn decode(blob: &str, prefix: &'static str) -> Result<BTreeMap<u64, Value>, Blob
             });
         }
     };
-    let raw = URL_SAFE_NO_PAD.decode(body).map_err(|_| BlobError::Damaged)?;
+    let raw = URL_SAFE_NO_PAD
+        .decode(body)
+        .map_err(|_| BlobError::Damaged)?;
     if raw.len() < 5 {
         return Err(BlobError::Damaged);
     }
@@ -128,7 +131,9 @@ fn decode(blob: &str, prefix: &'static str) -> Result<BTreeMap<u64, Value>, Blob
     if blake3::hash(cbor).as_bytes()[..4] != *sum {
         return Err(BlobError::Damaged);
     }
-    let Value::Map(entries) = ciborium::from_reader::<Value, _>(cbor).map_err(|_| BlobError::Damaged)? else {
+    let Value::Map(entries) =
+        ciborium::from_reader::<Value, _>(cbor).map_err(|_| BlobError::Damaged)?
+    else {
         return Err(BlobError::Damaged);
     };
     Ok(entries
@@ -205,7 +210,10 @@ impl Fields {
 }
 
 fn versions(feature_level: u32, version: &str, arch: Option<&str>) -> Value {
-    let mut v = vec![(int(0), int(u64::from(feature_level))), (int(1), text(version))];
+    let mut v = vec![
+        (int(0), int(u64::from(feature_level))),
+        (int(1), text(version)),
+    ];
     if let Some(a) = arch {
         v.push((int(2), text(a)));
     }
@@ -286,7 +294,10 @@ impl Reply {
                 (5, text(&self.name)),
                 (6, bytes(&self.wg_pubkey)),
                 (7, strings(&self.endpoints)),
-                (8, versions(self.feature_level, &self.version, Some(&self.arch))),
+                (
+                    8,
+                    versions(self.feature_level, &self.version, Some(&self.arch)),
+                ),
             ]),
         )
     }
@@ -355,7 +366,17 @@ mod tests {
         assert!(blob.len() < 400, "invite is {} chars", blob.len());
         assert_eq!(i.encode(), blob, "deterministic");
         // Pasted with line breaks and spaces.
-        let wrapped: String = blob.chars().enumerate().flat_map(|(n, c)| if n % 60 == 59 { vec![c, '\n', ' '] } else { vec![c] }).collect();
+        let wrapped: String = blob
+            .chars()
+            .enumerate()
+            .flat_map(|(n, c)| {
+                if n % 60 == 59 {
+                    vec![c, '\n', ' ']
+                } else {
+                    vec![c]
+                }
+            })
+            .collect();
         assert_eq!(Invite::decode(&wrapped).unwrap(), i);
     }
 
@@ -389,8 +410,14 @@ mod tests {
         if flipped != blob {
             assert_eq!(Invite::decode(&flipped), Err(BlobError::Damaged));
         }
-        assert_eq!(Invite::decode("prism-invite2.AAAA"), Err(BlobError::NewerVersion("prism-invite2".into())));
-        assert_eq!(Invite::decode("hello"), Err(BlobError::Unknown(INVITE_PREFIX)));
+        assert_eq!(
+            Invite::decode("prism-invite2.AAAA"),
+            Err(BlobError::NewerVersion("prism-invite2".into()))
+        );
+        assert_eq!(
+            Invite::decode("hello"),
+            Err(BlobError::Unknown(INVITE_PREFIX))
+        );
         assert_eq!(fingerprint(&[0; 32]), "AAAAAAAA");
     }
 }

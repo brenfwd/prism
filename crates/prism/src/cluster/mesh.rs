@@ -35,10 +35,13 @@ pub struct PeerStatus {
 pub trait Mesh: Send + Sync + 'static {
     /// Creates or updates `wg-prism` with `addr/64`, `mtu` and `port`, using
     /// the node's private key (generated on first use). Returns the public key.
-    fn ensure(&self, addr: Ipv6Addr, mtu: u16, port: u16) -> BoxFuture<'_, anyhow::Result<[u8; 32]>>;
+    fn ensure(
+        &self,
+        addr: Ipv6Addr,
+        mtu: u16,
+        port: u16,
+    ) -> BoxFuture<'_, anyhow::Result<[u8; 32]>>;
     /// Replaces the peer set atomically.
     fn set_peers(&self, peers: Vec<MeshPeer>) -> BoxFuture<'_, anyhow::Result<()>>;
     fn status(&self) -> BoxFuture<'_, anyhow::Result<Vec<PeerStatus>>>;
-    /// Removes `wg-prism` (leaving a cluster). The key is kept.
-    fn remove(&self) -> BoxFuture<'_, anyhow::Result<()>>;
 }

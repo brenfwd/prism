@@ -53,7 +53,12 @@ fn cookie(e: &mut Encoder, c: &[u8]) {
 
 impl Client {
     /// Source: `Begin3Params`. Returns `(cookie, domain XML)`.
-    pub async fn migrate_begin3(&self, dom: &Domain, p: &[TypedParam], flags: u32) -> Result<(Vec<u8>, String), Error> {
+    pub async fn migrate_begin3(
+        &self,
+        dom: &Domain,
+        p: &[TypedParam],
+        flags: u32,
+    ) -> Result<(Vec<u8>, String), Error> {
         let r = self
             .call_with(procs::BEGIN3_PARAMS, |e| {
                 dom.encode(e);

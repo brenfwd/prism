@@ -1,5 +1,5 @@
 //! Clustering: replicated membership, the copy-paste join protocol, and the
-//! runtime that ties raft, gRPC and the WireGuard mesh together.
+//! runtime that ties raft, gRPC and the `WireGuard` mesh together.
 
 pub mod blob;
 pub mod dataplane;

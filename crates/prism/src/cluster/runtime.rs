@@ -10,7 +10,9 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use futures::future::BoxFuture;
-use prism_cluster::{Channels, ClusterError, ClusterNode, GrpcNetwork, LogStore, PrismNode, RaftId};
+use prism_cluster::{
+    Channels, ClusterError, ClusterNode, GrpcNetwork, LogStore, PrismNode, RaftId,
+};
 use prism_proto::v1::WriteRequest;
 use prism_proto::v1::cluster_client::ClusterClient;
 use serde::{Deserialize, Serialize};
@@ -109,7 +111,9 @@ pub struct Cluster {
 
 impl std::fmt::Debug for Cluster {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Cluster").field("me", &self.me).finish_non_exhaustive()
+        f.debug_struct("Cluster")
+            .field("me", &self.me)
+            .finish_non_exhaustive()
     }
 }
 
@@ -164,7 +168,13 @@ struct BootstrapMembers {
 }
 
 impl Cluster {
-    pub fn new(me: Uuid, name: String, state: State, mesh: Arc<dyn Mesh>, cfg: ClusterConfig) -> anyhow::Result<Arc<Self>> {
+    pub fn new(
+        me: Uuid,
+        name: String,
+        state: State,
+        mesh: Arc<dyn Mesh>,
+        cfg: ClusterConfig,
+    ) -> anyhow::Result<Arc<Self>> {
         let local: Option<LocalMember> = state
             .db()
             .meta(META_LOCAL)?
@@ -186,11 +196,17 @@ impl Cluster {
     }
 
     fn raft(&self) -> Option<ClusterNode> {
-        self.raft.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        self.raft
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub fn local(&self) -> Option<LocalMember> {
-        self.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+        self.local
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn endpoints(&self) -> Vec<String> {
@@ -212,14 +228,22 @@ impl Cluster {
         if let Some(pending) = self.state.db().meta(META_PENDING)? {
             let pending: PendingJoin = serde_json::from_str(&pending)?;
             let invite = Invite::decode(&pending.invite)?;
-            self.mesh.ensure(invite.assigned_addr, invite.wg_mtu, self.cfg.wireguard_port).await?;
-            self.mesh.set_peers(vec![sponsor_peer(&invite.sponsor)]).await?;
+            self.mesh
+                .ensure(invite.assigned_addr, invite.wg_mtu, self.cfg.wireguard_port)
+                .await?;
+            self.mesh
+                .set_peers(vec![sponsor_peer(&invite.sponsor)])
+                .await?;
             self.start_raft(pending.raft_id).await?;
             tokio::spawn(Arc::clone(self).finish_join(pending));
             return Ok(());
         }
-        let Some(local) = self.local() else { return Ok(()) };
-        self.mesh.ensure(local.mesh_addr, local.wg_mtu, self.cfg.wireguard_port).await?;
+        let Some(local) = self.local() else {
+            return Ok(());
+        };
+        self.mesh
+            .ensure(local.mesh_addr, local.wg_mtu, self.cfg.wireguard_port)
+            .await?;
         self.reconcile_mesh().await;
         self.start_raft(local.raft_id).await?;
         tracing::info!(raft_id = local.raft_id, mesh = %local.mesh_addr, "cluster member resumed");
@@ -244,7 +268,10 @@ impl Cluster {
         tokio::spawn(super::grpc::serve(Arc::clone(self), node.raft.clone()));
         tokio::spawn(Arc::clone(self).serve_dataplane());
         tokio::spawn(super::peers::fan_in(Arc::clone(self)));
-        *self.raft.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(node);
+        *self
+            .raft
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(node);
         self.state.set_proposer(Arc::new(Proposer {
             cluster: Arc::clone(self),
         }));
@@ -312,9 +339,15 @@ impl Cluster {
     }
 
     /// Turns this standalone node into the hub of a new cluster.
-    pub async fn init(self: &Arc<Self>, cluster_name: &str, mode: ClusterMode) -> Result<ClusterStatus, ClusterOpError> {
+    pub async fn init(
+        self: &Arc<Self>,
+        cluster_name: &str,
+        mode: ClusterMode,
+    ) -> Result<ClusterStatus, ClusterOpError> {
         if self.raft().is_some() || self.state.db().meta(META_PENDING)?.is_some() {
-            return Err(ClusterOpError::Conflict("this node is already in a cluster".into()));
+            return Err(ClusterOpError::Conflict(
+                "this node is already in a cluster".into(),
+            ));
         }
         let id = Uuid::new_v4();
         let b = id.as_bytes();
@@ -340,17 +373,27 @@ impl Cluster {
         };
         let raft_id = 1;
         let mesh_addr = cluster.mesh_addr(raft_id);
-        let pubkey = self.mesh.ensure(mesh_addr, cluster.wg_mtu, self.cfg.wireguard_port).await?;
+        let pubkey = self
+            .mesh
+            .ensure(mesh_addr, cluster.wg_mtu, self.cfg.wireguard_port)
+            .await?;
         let local = LocalMember {
             cluster_id: cluster.cluster_id,
             raft_id,
             mesh_addr,
             wg_mtu: cluster.wg_mtu,
         };
-        self.state.db().set_meta(META_LOCAL, &serde_json::to_string(&local)?)?;
-        *self.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(local);
+        self.state
+            .db()
+            .set_meta(META_LOCAL, &serde_json::to_string(&local)?)?;
+        *self
+            .local
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(local);
         self.start_raft(raft_id).await?;
-        let raft = self.raft().ok_or_else(|| anyhow::anyhow!("raft did not start"))?;
+        let raft = self
+            .raft()
+            .ok_or_else(|| anyhow::anyhow!("raft did not start"))?;
         raft.initialize(PrismNode {
             node_id: self.me,
             name: self.name.clone(),
@@ -376,7 +419,9 @@ impl Cluster {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        self.state.apply(Command::InitCluster { cluster, hub }).await?;
+        self.state
+            .apply(Command::InitCluster { cluster, hub })
+            .await?;
         // Pre-cluster documents are not in the log: snapshot and purge so
         // every future member starts from a snapshot that includes them.
         let _ = raft.raft.trigger().snapshot().await;
@@ -404,11 +449,14 @@ impl Cluster {
     }
 
     /// Reserves a slot and returns the invite blob for a new node.
-    pub async fn invite(&self, name_hint: Option<String>, ttl: Duration) -> Result<InviteView, ClusterOpError> {
-        let cluster = self
-            .state
-            .cluster()?
-            .ok_or_else(|| ClusterOpError::Invalid("this node is not in a cluster; create one first".into()))?;
+    pub async fn invite(
+        &self,
+        name_hint: Option<String>,
+        ttl: Duration,
+    ) -> Result<InviteView, ClusterOpError> {
+        let cluster = self.state.cluster()?.ok_or_else(|| {
+            ClusterOpError::Invalid("this node is not in a cluster; create one first".into())
+        })?;
         let me = self
             .state
             .members()?
@@ -435,7 +483,11 @@ impl Cluster {
                 name_hint: name_hint.clone(),
                 consumed_by: None,
             };
-            match self.state.apply(Command::CreateInvite { invite: doc }).await {
+            match self
+                .state
+                .apply(Command::CreateInvite { invite: doc })
+                .await
+            {
                 Ok(()) => {
                     let inv = Invite {
                         cluster_id: cluster.cluster_id,
@@ -450,7 +502,11 @@ impl Cluster {
                             name: me.name.clone(),
                             wg_pubkey: decode_key(&me.wg_pubkey)?,
                             mesh_addr: me.mesh_addr,
-                            endpoints: if me.endpoints.is_empty() { self.endpoints() } else { me.endpoints.clone() },
+                            endpoints: if me.endpoints.is_empty() {
+                                self.endpoints()
+                            } else {
+                                me.endpoints.clone()
+                            },
                         },
                         feature_level: FEATURE_LEVEL,
                         version: env!("CARGO_PKG_VERSION").into(),
@@ -472,8 +528,13 @@ impl Cluster {
     }
 
     /// Checks a reply; with `confirm`, admits the node.
-    pub async fn accept(&self, reply_blob: &str, confirm: bool) -> Result<AcceptPreview, ClusterOpError> {
-        let reply = Reply::decode(reply_blob).map_err(|e| ClusterOpError::Invalid(e.to_string()))?;
+    pub async fn accept(
+        &self,
+        reply_blob: &str,
+        confirm: bool,
+    ) -> Result<AcceptPreview, ClusterOpError> {
+        let reply =
+            Reply::decode(reply_blob).map_err(|e| ClusterOpError::Invalid(e.to_string()))?;
         let cluster = self
             .state
             .cluster()?
@@ -534,9 +595,12 @@ impl Cluster {
 
     /// Starts joining a cluster from an invite blob; returns the reply blob.
     pub async fn join(self: &Arc<Self>, invite_blob: &str) -> Result<JoinReply, ClusterOpError> {
-        let invite = Invite::decode(invite_blob).map_err(|e| ClusterOpError::Invalid(e.to_string()))?;
+        let invite =
+            Invite::decode(invite_blob).map_err(|e| ClusterOpError::Invalid(e.to_string()))?;
         if self.raft().is_some() {
-            return Err(ClusterOpError::Conflict("this node is already in a cluster".into()));
+            return Err(ClusterOpError::Conflict(
+                "this node is already in a cluster".into(),
+            ));
         }
         if invite.exp < now() {
             tracing::warn!(
@@ -554,7 +618,9 @@ impl Cluster {
             .mesh
             .ensure(invite.assigned_addr, invite.wg_mtu, self.cfg.wireguard_port)
             .await?;
-        self.mesh.set_peers(vec![sponsor_peer(&invite.sponsor)]).await?;
+        self.mesh
+            .set_peers(vec![sponsor_peer(&invite.sponsor)])
+            .await?;
         let s = invite.assigned_addr.segments();
         let raft_id = (u64::from(s[5]) << 32) | (u64::from(s[6]) << 16) | u64::from(s[7]);
         let pending = PendingJoin {
@@ -562,7 +628,9 @@ impl Cluster {
             raft_id,
             sponsor_addr: invite.sponsor.mesh_addr,
         };
-        self.state.db().set_meta(META_PENDING, &serde_json::to_string(&pending)?)?;
+        self.state
+            .db()
+            .set_meta(META_PENDING, &serde_json::to_string(&pending)?)?;
         let reply = Reply {
             cluster_id: invite.cluster_id,
             invite_id: invite.invite_id,
@@ -615,7 +683,10 @@ impl Cluster {
         // Wait for the snapshot from the leader.
         loop {
             if self.state.cluster().ok().flatten().is_some()
-                && self.state.members().is_ok_and(|m| m.iter().any(|m| m.node_id == self.me))
+                && self
+                    .state
+                    .members()
+                    .is_ok_and(|m| m.iter().any(|m| m.node_id == self.me))
             {
                 break;
             }
@@ -628,12 +699,17 @@ impl Cluster {
             wg_mtu: boot.cluster.wg_mtu,
         };
         if let Err(e) = (|| -> anyhow::Result<()> {
-            self.state.db().set_meta(META_LOCAL, &serde_json::to_string(&local)?)?;
+            self.state
+                .db()
+                .set_meta(META_LOCAL, &serde_json::to_string(&local)?)?;
             self.state.db().delete_meta(META_PENDING)
         })() {
             tracing::error!("recording membership: {e:#}");
         }
-        *self.local.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(local);
+        *self
+            .local
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(local);
         for mut vm in own_vms {
             vm.node = self.me;
             if let Err(e) = self
@@ -664,7 +740,10 @@ impl Cluster {
     }
 
     pub(crate) fn bootstrap_members(&self) -> anyhow::Result<Vec<u8>> {
-        let cluster = self.state.cluster()?.ok_or_else(|| anyhow::anyhow!("not clustered"))?;
+        let cluster = self
+            .state
+            .cluster()?
+            .ok_or_else(|| anyhow::anyhow!("not clustered"))?;
         Ok(serde_json::to_vec(&BootstrapMembers {
             cluster,
             members: self.state.members()?,
@@ -673,11 +752,14 @@ impl Cluster {
 
     /// No hub/leader is known: configuration and ownership are frozen.
     pub fn is_degraded(&self) -> bool {
-        self.raft().is_some_and(|r| r.metrics().current_leader.is_none())
+        self.raft()
+            .is_some_and(|r| r.metrics().current_leader.is_none())
     }
 
     pub(crate) fn leader_raft_id(&self) -> u64 {
-        self.raft().and_then(|r| r.metrics().current_leader).unwrap_or(0)
+        self.raft()
+            .and_then(|r| r.metrics().current_leader)
+            .unwrap_or(0)
     }
 
     /// Proposes on this node if it leads. Used by `Cluster.ForwardWrite`.
@@ -690,7 +772,11 @@ impl Cluster {
 
     /// The member at mesh address `addr`, for caller checks.
     pub(crate) fn member_at(&self, addr: Ipv6Addr) -> Option<MemberDoc> {
-        self.state.members().ok()?.into_iter().find(|m| m.mesh_addr == addr)
+        self.state
+            .members()
+            .ok()?
+            .into_iter()
+            .find(|m| m.mesh_addr == addr)
     }
 
     pub(crate) fn pending_join(&self) -> bool {
@@ -699,7 +785,9 @@ impl Cluster {
 
     /// Mesh peers from committed membership.
     async fn reconcile_mesh(&self) {
-        let Ok(members) = self.state.members() else { return };
+        let Ok(members) = self.state.members() else {
+            return;
+        };
         let peers: Vec<MeshPeer> = members
             .iter()
             .filter(|m| m.node_id != self.me)
@@ -715,7 +803,9 @@ impl Cluster {
 
     /// The leader drives raft membership from committed member documents.
     async fn reconcile_membership(&self) -> anyhow::Result<()> {
-        let Some(raft) = self.raft() else { return Ok(()) };
+        let Some(raft) = self.raft() else {
+            return Ok(());
+        };
         if !raft.is_leader() {
             return Ok(());
         }
@@ -744,7 +834,11 @@ impl Cluster {
         let replication: BTreeMap<RaftId, u64> = metrics
             .replication
             .as_ref()
-            .map(|r| r.iter().map(|(id, l)| (*id, l.map_or(0, |l| l.index))).collect())
+            .map(|r| {
+                r.iter()
+                    .map(|(id, l)| (*id, l.map_or(0, |l| l.index)))
+                    .collect()
+            })
             .unwrap_or_default();
         for m in members.iter().filter(|m| m.state == MemberState::Joining) {
             if replication.get(&m.raft_id).is_some_and(|i| *i + 2 >= last) {
@@ -770,15 +864,16 @@ impl Cluster {
             .map(|m| m.raft_id)
             .collect();
         let voters: BTreeSet<RaftId> = membership.voter_ids().collect();
-        if !want_voters.is_empty()
-            && want_voters != voters
-            && cluster.is_some()
-        {
+        if !want_voters.is_empty() && want_voters != voters && cluster.is_some() {
             tracing::info!(?want_voters, "changing raft voters");
-            raft.set_voters(want_voters).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+            raft.set_voters(want_voters)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
         }
         if !gone.is_empty() {
-            raft.remove_nodes(gone).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+            raft.remove_nodes(gone)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
         }
         Ok(())
     }
@@ -791,7 +886,7 @@ impl Cluster {
                     if matches!(c, Err(broadcast::error::RecvError::Closed)) {
                         return;
                     }
-                    if matches!(c, Ok(Change::Applied(_)) | Ok(Change::Reset) | Err(_)) {
+                    if matches!(c, Ok(Change::Applied(_) | Change::Reset) | Err(_)) {
                         self.reconcile_mesh().await;
                     }
                 }
@@ -835,11 +930,9 @@ impl Proposer {
             match raft.write(command.clone()).await {
                 Ok((result, _)) => return Ok(result),
                 Err(ClusterError::ForwardToLeader(Some((_, leader)))) => {
-                    let ch = self
-                        .cluster
-                        .channels
-                        .get(&leader.addr)
-                        .map_err(|e| StateError::Degraded(format!("cannot reach the leader: {e}")))?;
+                    let ch = self.cluster.channels.get(&leader.addr).map_err(|e| {
+                        StateError::Degraded(format!("cannot reach the leader: {e}"))
+                    })?;
                     let mut req = tonic::Request::new(WriteRequest {
                         command: command.clone().into_bytes(),
                     });
@@ -850,21 +943,36 @@ impl Proposer {
                             raft.wait_applied(r.log_index, READ_YOUR_WRITES)
                                 .await
                                 .map_err(|e| StateError::Degraded(e.to_string()))?;
-                            return String::from_utf8(r.result).map_err(|e| StateError::Internal(e.into()));
+                            return String::from_utf8(r.result)
+                                .map_err(|e| StateError::Internal(e.into()));
                         }
                         // The leader moved; ask again.
                         Err(s) if s.code() == tonic::Code::FailedPrecondition => {}
-                        Err(s) if matches!(s.code(), tonic::Code::Unavailable | tonic::Code::DeadlineExceeded) => {
-                            return Err(StateError::Degraded(format!("the leader {} is unreachable", leader.name)));
+                        Err(s)
+                            if matches!(
+                                s.code(),
+                                tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+                            ) =>
+                        {
+                            return Err(StateError::Degraded(format!(
+                                "the leader {} is unreachable",
+                                leader.name
+                            )));
                         }
-                        Err(s) => return Err(StateError::Internal(anyhow::anyhow!("forwarding write: {s}"))),
+                        Err(s) => {
+                            return Err(StateError::Internal(anyhow::anyhow!(
+                                "forwarding write: {s}"
+                            )));
+                        }
                     }
                 }
                 Err(ClusterError::ForwardToLeader(None)) => {
                     return Err(StateError::Degraded("no hub or leader is reachable".into()));
                 }
                 Err(ClusterError::Degraded(m)) => return Err(StateError::Degraded(m)),
-                Err(ClusterError::Other(m)) => return Err(StateError::Internal(anyhow::anyhow!(m))),
+                Err(ClusterError::Other(m)) => {
+                    return Err(StateError::Internal(anyhow::anyhow!(m)));
+                }
             }
             tokio::time::sleep(Duration::from_millis(200)).await;
         }

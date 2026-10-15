@@ -11,7 +11,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use uuid::Uuid;
 
 use super::{ApiError, AppState, Json};
-use crate::archive::{ArchiveFileDoc, ArchiveMemberDoc, ArchivePoolDoc, FileKind, MemberCapacity, Replica, place, valid_path};
+use crate::archive::{
+    ArchiveFileDoc, ArchiveMemberDoc, ArchivePoolDoc, FileKind, MemberCapacity, Replica, place,
+    valid_path,
+};
 use crate::node::{Node, NodeError};
 use crate::state::Command;
 
@@ -21,7 +24,10 @@ pub fn routes() -> Router<AppState> {
         .route("/archive/pools/{pool}/files", get(list_files))
         .route(
             "/archive/pools/{pool}/files/{*path}",
-            get(download).put(upload).layer(DefaultBodyLimit::disable()).delete(delete_file),
+            get(download)
+                .put(upload)
+                .layer(DefaultBodyLimit::disable())
+                .delete(delete_file),
         )
 }
 
@@ -64,7 +70,9 @@ async fn list_pools(State(node): State<AppState>) -> Result<impl IntoResponse, A
                 .iter()
                 .filter(|m| m.pool == pool.name)
                 .map(|m| {
-                    let c = caps.iter().find(|(n, _, c)| *n == m.node && c.name == m.name);
+                    let c = caps
+                        .iter()
+                        .find(|(n, _, c)| *n == m.node && c.name == m.name);
                     MemberView {
                         doc: m.clone(),
                         node_name: c.map(|(_, n, _)| n.clone()).unwrap_or_default(),
@@ -92,7 +100,10 @@ fn one() -> u8 {
     1
 }
 
-async fn create_pool(State(node): State<AppState>, Json(req): Json<CreatePool>) -> Result<impl IntoResponse, ApiError> {
+async fn create_pool(
+    State(node): State<AppState>,
+    Json(req): Json<CreatePool>,
+) -> Result<impl IntoResponse, ApiError> {
     if !crate::storage::valid_name(&req.name) {
         return Err(ApiError::bad_request("invalid pool name"));
     }
@@ -148,19 +159,26 @@ async fn upload(
     req: Request,
 ) -> Result<impl IntoResponse, ApiError> {
     if !valid_path(&path) {
-        return Err(ApiError::bad_request("paths are /-separated names of [A-Za-z0-9._-]"));
+        return Err(ApiError::bad_request(
+            "paths are /-separated names of [A-Za-z0-9._-]",
+        ));
     }
     if node.state.archive_file(&pool, &path)?.is_some() {
-        return Err(ApiError::new(StatusCode::CONFLICT, "exists", format!("{path} already exists")));
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "exists",
+            format!("{path} already exists"),
+        ));
     }
     let size_hint = headers
         .get(header::CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
-    let member_name = match q.member {
-        Some(m) => m,
-        None => {
+    let member_name = if let Some(m) = q.member {
+        m
+    } else {
+        {
             let members = node.state.archive_members()?;
             let caps = capacities(&node);
             let cands: Vec<(&ArchiveMemberDoc, u64)> = members
@@ -176,11 +194,17 @@ async fn upload(
                 return Err(ApiError::new(
                     StatusCode::CONFLICT,
                     "no_members",
-                    format!("archive pool {pool} has no reachable member directories; add [archive_members] to a node's prism.toml"),
+                    format!(
+                        "archive pool {pool} has no reachable member directories; add [archive_members] to a node's prism.toml"
+                    ),
                 ));
             }
             let chosen = place(&cands, size_hint, Uuid::new_v4().as_u128()).ok_or_else(|| {
-                ApiError::new(StatusCode::INSUFFICIENT_STORAGE, "pool_full", format!("no member of {pool} has room"))
+                ApiError::new(
+                    StatusCode::INSUFFICIENT_STORAGE,
+                    "pool_full",
+                    format!("no member of {pool} has room"),
+                )
             })?;
             if chosen.node != node.id {
                 return forward_to(&node, chosen.node, req, Some(&chosen.name)).await;
@@ -192,8 +216,12 @@ async fn upload(
         .archive
         .member(&member_name)
         .filter(|m| m.pool == pool)
-        .ok_or_else(|| ApiError::not_found(format!("member {member_name} of {pool} on this node")))?;
-    let (size, blake3) = member.write(&path, req.into_body().into_data_stream()).await?;
+        .ok_or_else(|| {
+            ApiError::not_found(format!("member {member_name} of {pool} on this node"))
+        })?;
+    let (size, blake3) = member
+        .write(&path, req.into_body().into_data_stream())
+        .await?;
     let file = ArchiveFileDoc {
         pool: pool.clone(),
         path: path.clone(),
@@ -206,24 +234,45 @@ async fn upload(
             member: member.name.clone(),
         }],
     };
-    if let Err(e) = node.state.apply(Command::PutArchiveFile { file: file.clone(), create: true }).await {
+    if let Err(e) = node
+        .state
+        .apply(Command::PutArchiveFile {
+            file: file.clone(),
+            create: true,
+        })
+        .await
+    {
         let _ = member.delete(&path);
         return Err(NodeError::from(e).into());
     }
     Ok((StatusCode::CREATED, axum::Json(file)).into_response())
 }
 
-async fn forward_to(node: &Node, target: Uuid, req: Request, member: Option<&str>) -> Result<Response, ApiError> {
-    let cluster = node
-        .cluster
-        .get()
-        .ok_or_else(|| ApiError::new(StatusCode::BAD_GATEWAY, "not_clustered", "that member is on another node"))?;
+async fn forward_to(
+    node: &Node,
+    target: Uuid,
+    req: Request,
+    member: Option<&str>,
+) -> Result<Response, ApiError> {
+    let cluster = node.cluster.get().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::BAD_GATEWAY,
+            "not_clustered",
+            "that member is on another node",
+        )
+    })?;
     let m = node
         .state
         .members()?
         .into_iter()
         .find(|m| m.node_id == target)
-        .ok_or_else(|| ApiError::new(StatusCode::BAD_GATEWAY, "owner_unknown", "the member's node is not in the cluster"))?;
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "owner_unknown",
+                "the member's node is not in the cluster",
+            )
+        })?;
     let (mut parts, body) = req.into_parts();
     let path = parts.uri.path().to_string();
     let uri = match member {
@@ -233,7 +282,13 @@ async fn forward_to(node: &Node, target: Uuid, req: Request, member: Option<&str
     parts.uri = uri.parse().map_err(|_| ApiError::bad_request("bad path"))?;
     crate::cluster::peers::forward_http(cluster, &m, Request::from_parts(parts, body))
         .await
-        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, "replica_unavailable", format!("{}: {e:#}", m.name)))
+        .map_err(|e| {
+            ApiError::new(
+                StatusCode::BAD_GATEWAY,
+                "replica_unavailable",
+                format!("{}: {e:#}", m.name),
+            )
+        })
 }
 
 /// Parses `bytes=a-b`, `bytes=a-` or `bytes=-n` against `size`.
@@ -249,7 +304,10 @@ fn parse_range(v: &str, size: u64) -> Option<(u64, u64)> {
             (size.saturating_sub(n), size.checked_sub(1)?)
         }
         (a, "") => (a.parse().ok()?, size.checked_sub(1)?),
-        (a, b) => (a.parse().ok()?, b.parse::<u64>().ok()?.min(size.checked_sub(1)?)),
+        (a, b) => (
+            a.parse().ok()?,
+            b.parse::<u64>().ok()?.min(size.checked_sub(1)?),
+        ),
     };
     (start <= end && end < size).then_some((start, end))
 }
@@ -281,10 +339,13 @@ async fn download(
         if q.local.is_some() {
             return Err(ApiError::not_found("no replica on this node"));
         }
-        let holder = file
-            .replicas
-            .first()
-            .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "replica_unavailable", "no replicas"))?;
+        let holder = file.replicas.first().ok_or_else(|| {
+            ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "replica_unavailable",
+                "no replicas",
+            )
+        })?;
         return forward_to(&node, holder.node, req, None).await;
     };
     let mut f = tokio::fs::File::from_std(member.open_read(&path)?);
@@ -296,27 +357,45 @@ async fn download(
     let name = path.rsplit('/').next().unwrap_or("file").to_string();
     let mut res = match range {
         Some(None) => {
-            return Ok((StatusCode::RANGE_NOT_SATISFIABLE, [(header::CONTENT_RANGE, format!("bytes */{size}"))]).into_response());
+            return Ok((
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                [(header::CONTENT_RANGE, format!("bytes */{size}"))],
+            )
+                .into_response());
         }
         Some(Some((start, end))) => {
-            f.seek(std::io::SeekFrom::Start(start)).await.map_err(anyhow::Error::from)?;
+            f.seek(std::io::SeekFrom::Start(start))
+                .await
+                .map_err(anyhow::Error::from)?;
             let len = end - start + 1;
             let body = Body::from_stream(tokio_util::io::ReaderStream::new(f.take(len)));
             let mut r = (StatusCode::PARTIAL_CONTENT, body).into_response();
-            r.headers_mut().insert(header::CONTENT_RANGE, HeaderValue::from_str(&format!("bytes {start}-{end}/{size}")).map_err(anyhow::Error::from)?);
-            r.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from(len));
+            r.headers_mut().insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes {start}-{end}/{size}"))
+                    .map_err(anyhow::Error::from)?,
+            );
+            r.headers_mut()
+                .insert(header::CONTENT_LENGTH, HeaderValue::from(len));
             r
         }
         None => {
             let mut r = Body::from_stream(tokio_util::io::ReaderStream::new(f)).into_response();
-            r.headers_mut().insert(header::CONTENT_LENGTH, HeaderValue::from(size));
+            r.headers_mut()
+                .insert(header::CONTENT_LENGTH, HeaderValue::from(size));
             r
         }
     };
     let h = res.headers_mut();
     h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    h.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"));
-    h.insert(header::CONTENT_SECURITY_POLICY, HeaderValue::from_static("sandbox"));
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("sandbox"),
+    );
     if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")) {
         h.insert(header::CONTENT_DISPOSITION, v);
     }
@@ -344,7 +423,10 @@ async fn delete_file(
         return Ok(StatusCode::NO_CONTENT);
     }
     node.state
-        .apply(Command::DeleteArchiveFile { pool: pool.clone(), path: path.clone() })
+        .apply(Command::DeleteArchiveFile {
+            pool: pool.clone(),
+            path: path.clone(),
+        })
         .await
         .map_err(NodeError::from)?;
     for r in &file.replicas {
@@ -359,7 +441,11 @@ async fn delete_file(
                 .body(Body::empty())
                 .map_err(anyhow::Error::from)?;
             if let Err(e) = forward_to(&node, r.node, req, None).await {
-                tracing::warn!("removing replica of {pool}/{path} on {}: {}", r.node, e.detail());
+                tracing::warn!(
+                    "removing replica of {pool}/{path} on {}: {}",
+                    r.node,
+                    e.detail()
+                );
             }
         }
     }

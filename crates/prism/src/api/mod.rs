@@ -4,8 +4,8 @@ mod archive;
 mod cluster;
 mod console;
 mod forward;
-mod internal;
 mod hygiene;
+mod internal;
 mod pools;
 mod sse;
 mod tasks;
@@ -40,8 +40,14 @@ pub fn router(node: AppState) -> Router {
         .merge(archive::routes())
         .route("/events", get(sse::events))
         .fallback(|| async { ApiError::not_found("no such endpoint") })
-        .layer(axum::middleware::from_fn_with_state(Arc::clone(&node), forward::route))
-        .layer(axum::middleware::from_fn_with_state(Arc::clone(&node), forward::degraded));
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&node),
+            forward::route,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&node),
+            forward::degraded,
+        ));
 
     let hygiene = hygiene::Hygiene::new(&node.cfg.http, &node.name);
     Router::new()

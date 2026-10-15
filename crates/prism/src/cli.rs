@@ -59,7 +59,12 @@ fn api_addr(cfg: &Config) -> anyhow::Result<SocketAddr> {
 }
 
 /// One JSON request over HTTP/1.1 to the local daemon.
-async fn call(cfg: &Config, method: &str, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
+async fn call(
+    cfg: &Config,
+    method: &str,
+    path: &str,
+    body: Option<Value>,
+) -> anyhow::Result<Value> {
     let addr = api_addr(cfg)?;
     let mut sock = tokio::net::TcpStream::connect(addr)
         .await
@@ -73,22 +78,33 @@ async fn call(cfg: &Config, method: &str, path: &str, body: Option<Value>) -> an
     let mut raw = Vec::new();
     sock.read_to_end(&mut raw).await?;
     let text = String::from_utf8_lossy(&raw);
-    let (head, mut content) = text.split_once("\r\n\r\n").context("malformed HTTP response")?;
+    let (head, mut content) = text
+        .split_once("\r\n\r\n")
+        .context("malformed HTTP response")?;
     let status: u16 = head
         .split_whitespace()
         .nth(1)
         .and_then(|s| s.parse().ok())
         .context("malformed HTTP status")?;
     let decoded;
-    if head.to_ascii_lowercase().contains("transfer-encoding: chunked") {
+    if head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
         decoded = dechunk(content);
         content = &decoded;
     }
-    let value: Value = if content.trim().is_empty() { Value::Null } else { serde_json::from_str(content)? };
+    let value: Value = if content.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(content)?
+    };
     if status >= 400 {
         bail!(
             "{}",
-            value["detail"].as_str().map_or_else(|| format!("HTTP {status}"), str::to_string)
+            value["detail"]
+                .as_str()
+                .map_or_else(|| format!("HTTP {status}"), str::to_string)
         );
     }
     Ok(value)
@@ -98,7 +114,9 @@ fn dechunk(s: &str) -> String {
     let mut out = String::new();
     let mut rest = s;
     while let Some((len, tail)) = rest.split_once("\r\n") {
-        let Ok(n) = usize::from_str_radix(len.trim(), 16) else { break };
+        let Ok(n) = usize::from_str_radix(len.trim(), 16) else {
+            break;
+        };
         if n == 0 || tail.len() < n {
             break;
         }
@@ -120,13 +138,22 @@ pub async fn cluster(dir: &Path, cmd: ClusterCmd) -> anyhow::Result<()> {
     match cmd {
         ClusterCmd::Init { name, consensus } => {
             let mode = if consensus { "consensus" } else { "hub_spoke" };
-            let s = call(&cfg, "POST", "/cluster", Some(json!({"name": name, "mode": mode}))).await?;
+            let s = call(
+                &cfg,
+                "POST",
+                "/cluster",
+                Some(json!({"name": name, "mode": mode})),
+            )
+            .await?;
             println!(
                 "Created cluster {:?}; this node is the hub at {}.",
                 s["cluster"]["name"].as_str().unwrap_or_default(),
                 s["members"][0]["mesh_addr"].as_str().unwrap_or_default()
             );
-            println!("Next: `prism cluster invite --config {}` and paste the result into `prism join` on the new node.", dir.display());
+            println!(
+                "Next: `prism cluster invite --config {}` and paste the result into `prism join` on the new node.",
+                dir.display()
+            );
         }
         ClusterCmd::Status => {
             let s = call(&cfg, "GET", "/cluster", None).await?;
@@ -139,7 +166,11 @@ pub async fn cluster(dir: &Path, cmd: ClusterCmd) -> anyhow::Result<()> {
                 s["cluster"]["name"].as_str().unwrap_or_default(),
                 s["cluster"]["mode"].as_str().unwrap_or_default(),
                 s["role"].as_str().unwrap_or_default(),
-                if s["degraded"].as_bool().unwrap_or(false) { " — DEGRADED (read-only)" } else { "" }
+                if s["degraded"].as_bool().unwrap_or(false) {
+                    " — DEGRADED (read-only)"
+                } else {
+                    ""
+                }
             );
             for m in s["members"].as_array().into_iter().flatten() {
                 println!(
@@ -147,8 +178,16 @@ pub async fn cluster(dir: &Path, cmd: ClusterCmd) -> anyhow::Result<()> {
                     m["name"].as_str().unwrap_or_default(),
                     m["state"].as_str().unwrap_or_default(),
                     m["mesh_addr"].as_str().unwrap_or_default(),
-                    m["endpoints"].as_array().and_then(|e| e.first()).and_then(Value::as_str).unwrap_or("-"),
-                    if m["voter"].as_bool().unwrap_or(false) { "  (voter)" } else { "" }
+                    m["endpoints"]
+                        .as_array()
+                        .and_then(|e| e.first())
+                        .and_then(Value::as_str)
+                        .unwrap_or("-"),
+                    if m["voter"].as_bool().unwrap_or(false) {
+                        "  (voter)"
+                    } else {
+                        ""
+                    }
                 );
             }
         }
@@ -158,28 +197,60 @@ pub async fn cluster(dir: &Path, cmd: ClusterCmd) -> anyhow::Result<()> {
                 println!("Revoked invite {id}.");
                 return Ok(());
             }
-            let v = call(&cfg, "POST", "/cluster/invites", Some(json!({"name": name, "ttl_secs": ttl}))).await?;
+            let v = call(
+                &cfg,
+                "POST",
+                "/cluster/invites",
+                Some(json!({"name": name, "ttl_secs": ttl})),
+            )
+            .await?;
             println!("Run this on the new node:\n");
-            println!("  prism join --config <dir> {}\n", v["blob"].as_str().unwrap_or_default());
-            println!("The invite is valid for {} minutes.", ttl.unwrap_or(3600) / 60);
+            println!(
+                "  prism join --config <dir> {}\n",
+                v["blob"].as_str().unwrap_or_default()
+            );
+            println!(
+                "The invite is valid for {} minutes.",
+                ttl.unwrap_or(3600) / 60
+            );
         }
         ClusterCmd::Accept { reply, yes } => {
-            let p = call(&cfg, "POST", "/cluster/accept", Some(json!({"reply": reply, "confirm": false}))).await?;
+            let p = call(
+                &cfg,
+                "POST",
+                "/cluster/accept",
+                Some(json!({"reply": reply, "confirm": false})),
+            )
+            .await?;
             let endpoints = p["endpoints"].as_array().map(|e| {
-                e.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")
+                e.iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             });
             let question = format!(
                 "Admit {} ({}, key {})?",
                 p["name"].as_str().unwrap_or_default(),
-                endpoints.filter(|e| !e.is_empty()).unwrap_or_else(|| "behind NAT".into()),
+                endpoints
+                    .filter(|e| !e.is_empty())
+                    .unwrap_or_else(|| "behind NAT".into()),
                 p["fingerprint"].as_str().unwrap_or_default()
             );
             if !yes && !confirm(&question) {
                 println!("Not admitted.");
                 return Ok(());
             }
-            call(&cfg, "POST", "/cluster/accept", Some(json!({"reply": reply, "confirm": true}))).await?;
-            println!("Admitted {}. It finishes joining by itself.", p["name"].as_str().unwrap_or_default());
+            call(
+                &cfg,
+                "POST",
+                "/cluster/accept",
+                Some(json!({"reply": reply, "confirm": true})),
+            )
+            .await?;
+            println!(
+                "Admitted {}. It finishes joining by itself.",
+                p["name"].as_str().unwrap_or_default()
+            );
         }
         ClusterCmd::Remove { node } => {
             call(&cfg, "DELETE", &format!("/cluster/members/{node}"), None).await?;
@@ -191,7 +262,13 @@ pub async fn cluster(dir: &Path, cmd: ClusterCmd) -> anyhow::Result<()> {
 
 pub async fn join(dir: &Path, invite: &str) -> anyhow::Result<()> {
     let cfg = Config::load(dir)?;
-    let r = call(&cfg, "POST", "/cluster/join", Some(json!({"invite": invite}))).await?;
+    let r = call(
+        &cfg,
+        "POST",
+        "/cluster/join",
+        Some(json!({"invite": invite})),
+    )
+    .await?;
     println!(
         "Joining cluster {:?} via {}. Paste this into `prism cluster accept` on {} (or the Cluster page):\n",
         r["cluster_name"].as_str().unwrap_or_default(),
@@ -199,7 +276,10 @@ pub async fn join(dir: &Path, invite: &str) -> anyhow::Result<()> {
         r["sponsor"].as_str().unwrap_or_default()
     );
     println!("  {}\n", r["reply"].as_str().unwrap_or_default());
-    println!("Key fingerprint: {} — check it matches what the member shows.", r["fingerprint"].as_str().unwrap_or_default());
+    println!(
+        "Key fingerprint: {} — check it matches what the member shows.",
+        r["fingerprint"].as_str().unwrap_or_default()
+    );
     Ok(())
 }
 
@@ -207,6 +287,9 @@ pub async fn join(dir: &Path, invite: &str) -> anyhow::Result<()> {
 mod tests {
     #[test]
     fn dechunks() {
-        assert_eq!(super::dechunk("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"), "hello world");
+        assert_eq!(
+            super::dechunk("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"),
+            "hello world"
+        );
     }
 }

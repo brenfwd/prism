@@ -52,11 +52,6 @@ impl ClusterDoc {
             id as u16,
         )
     }
-
-    /// Whether `addr` is inside the cluster's mesh `/48`.
-    pub fn in_mesh(&self, addr: &Ipv6Addr) -> bool {
-        addr.segments()[..3] == self.mesh_prefix.segments()[..3]
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,7 +137,5 @@ mod tests {
         };
         assert_eq!(c.mesh_addr(1).to_string(), "fd12:3456:789a:1::1");
         assert_eq!(c.mesh_addr(0x1_0002).to_string(), "fd12:3456:789a:1::1:2");
-        assert!(c.in_mesh(&"fd12:3456:789a:1::5".parse().unwrap()));
-        assert!(!c.in_mesh(&"fd12:3456:789b:1::5".parse().unwrap()));
     }
 }

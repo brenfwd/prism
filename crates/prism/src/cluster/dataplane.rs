@@ -49,7 +49,10 @@ impl DataPlane {
     pub fn expect(&self, peer: Ipv6Addr) -> (SessionId, oneshot::Receiver<TcpStream>) {
         let id = *uuid::Uuid::new_v4().as_bytes();
         let (tx, rx) = oneshot::channel();
-        let mut s = self.sessions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut s = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let now = Instant::now();
         s.retain(|_, p| p.expires > now);
         s.insert(
@@ -76,7 +79,9 @@ impl DataPlane {
             };
             tracing::info!("data plane listening on {addr}");
             loop {
-                let Ok((mut stream, from)) = listener.accept().await else { break };
+                let Ok((mut stream, from)) = listener.accept().await else {
+                    break;
+                };
                 let dp = Arc::clone(&self);
                 tokio::spawn(async move {
                     use tokio::io::AsyncReadExt;
@@ -93,11 +98,17 @@ impl DataPlane {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .remove(&id);
                     match pending {
-                        Some(p) if IpAddr::V6(p.peer) == from.ip() && p.expires > Instant::now() => {
+                        Some(p)
+                            if IpAddr::V6(p.peer) == from.ip() && p.expires > Instant::now() =>
+                        {
                             let _ = stream.set_nodelay(true);
                             let _ = p.tx.send(stream);
                         }
-                        _ => tracing::warn!("data plane: unknown or misdirected session from {from}"),
+                        _ => {
+                            tracing::warn!(
+                                "data plane: unknown or misdirected session from {from}"
+                            );
+                        }
                     }
                 });
             }
@@ -121,7 +132,11 @@ fn hash_frame(h: &mut blake3::Hasher, offset: u64, data: &[u8]) {
 }
 
 /// Streams `file` sparsely over `out`. Blocking; run on a blocking thread.
-pub fn send_file(file: &std::fs::File, out: &mut impl Write, progress: &dyn Fn(u64, u64)) -> anyhow::Result<()> {
+pub fn send_file(
+    file: &std::fs::File,
+    out: &mut impl Write,
+    progress: &dyn Fn(u64, u64),
+) -> anyhow::Result<()> {
     use rustix::fs::SeekFrom;
     let size = file.metadata()?.len();
     out.write_all(&[0])?;
@@ -166,7 +181,11 @@ pub fn send_file(file: &std::fs::File, out: &mut impl Write, progress: &dyn Fn(u
 
 /// Receives a file into `file` (empty, writable), verifying the checksum.
 /// Blocking; run on a blocking thread.
-pub fn receive_file(input: &mut impl Read, file: &std::fs::File, progress: &dyn Fn(u64, u64)) -> anyhow::Result<u64> {
+pub fn receive_file(
+    input: &mut impl Read,
+    file: &std::fs::File,
+    progress: &dyn Fn(u64, u64),
+) -> anyhow::Result<u64> {
     let mut tag = [0u8; 1];
     let mut u64b = [0u8; 8];
     input.read_exact(&mut tag)?;
@@ -185,7 +204,10 @@ pub fn receive_file(input: &mut impl Read, file: &std::fs::File, progress: &dyn 
                 let mut lenb = [0u8; 4];
                 input.read_exact(&mut lenb)?;
                 let len = u32::from_be_bytes(lenb) as usize;
-                anyhow::ensure!(len <= CHUNK && off + len as u64 <= size, "data plane: bad extent");
+                anyhow::ensure!(
+                    len <= CHUNK && off + len as u64 <= size,
+                    "data plane: bad extent"
+                );
                 input.read_exact(&mut buf[..len])?;
                 file.write_all_at(&buf[..len], off)?;
                 hash_frame(&mut hasher, off, &buf[..len]);
@@ -194,7 +216,10 @@ pub fn receive_file(input: &mut impl Read, file: &std::fs::File, progress: &dyn 
             2 => {
                 let mut sum = [0u8; 32];
                 input.read_exact(&mut sum)?;
-                anyhow::ensure!(*hasher.finalize().as_bytes() == sum, "data plane: checksum mismatch");
+                anyhow::ensure!(
+                    *hasher.finalize().as_bytes() == sum,
+                    "data plane: checksum mismatch"
+                );
                 file.sync_all()?;
                 return Ok(size);
             }
@@ -210,7 +235,10 @@ pub enum Purpose {
     /// Receive a volume into a local pool (cold move, copy).
     ReceiveVolume { pool: String, volume: String },
     /// Splice to a local migration socket that QEMU listens on.
-    MigrationSocket { migration: uuid::Uuid, which: String },
+    MigrationSocket {
+        migration: uuid::Uuid,
+        which: String,
+    },
 }
 
 /// Directory of a migration's UNIX sockets on either node.
@@ -232,7 +260,9 @@ impl prism_proto::v1::data_plane_server::DataPlane for DataPlaneService {
     ) -> Result<tonic::Response<prism_proto::v1::SessionReply>, tonic::Status> {
         super::grpc::check_active(&self.cluster, req.remote_addr())?;
         let Some(IpAddr::V6(peer)) = req.remote_addr().map(|a| a.ip()) else {
-            return Err(tonic::Status::permission_denied("calls must come over the mesh"));
+            return Err(tonic::Status::permission_denied(
+                "calls must come over the mesh",
+            ));
         };
         let purpose: Purpose = serde_json::from_slice(&req.into_inner().purpose)
             .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
@@ -257,10 +287,14 @@ impl prism_proto::v1::data_plane_server::DataPlane for DataPlaneService {
                         let stream = tokio::time::timeout(SESSION_TTL, rx)
                             .await
                             .map_err(|_| anyhow::anyhow!("sender never connected"))??;
-                        let mut stream = stream.into_std()?;
+                        let stream = stream.into_std()?;
                         stream.set_nonblocking(false)?;
                         let result = tokio::task::spawn_blocking(move || {
-                            let r = receive_file(&mut std::io::BufReader::new(&stream), &file, &|_, _| {});
+                            let r = receive_file(
+                                &mut std::io::BufReader::new(&stream),
+                                &file,
+                                &|_, _| {},
+                            );
                             // One status byte back to the sender.
                             let _ = (&stream).write_all(&[u8::from(r.is_err())]);
                             r
@@ -329,7 +363,7 @@ pub async fn send_volume(
         .await?
         .into_inner();
     let stream = connect(member.mesh_addr, &reply.session_id).await?;
-    let mut stream = stream.into_std()?;
+    let stream = stream.into_std()?;
     stream.set_nonblocking(false)?;
     tokio::task::spawn_blocking(move || {
         let mut w = std::io::BufWriter::with_capacity(CHUNK, &stream);
@@ -354,17 +388,26 @@ mod tests {
         let src = std::fs::File::create(&src_path).unwrap();
         src.set_len(64 << 20).unwrap();
         src.write_all_at(b"hello", 4096).unwrap();
-        src.write_all_at(&[7u8; 3 << 20], 32 << 20).unwrap();
+        src.write_all_at(&vec![7u8; 3 << 20], 32 << 20).unwrap();
         drop(src);
         let src = std::fs::File::open(&src_path).unwrap();
         let mut wire = Vec::new();
         send_file(&src, &mut wire, &|_, _| {}).unwrap();
         // Holes are not sent: far less than 64 MiB on the wire.
         assert!(wire.len() < 8 << 20, "sent {} bytes", wire.len());
-        let dst = std::fs::OpenOptions::new().create(true).truncate(true).read(true).write(true).open(dir.path().join("dst")).unwrap();
+        let dst = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(dir.path().join("dst"))
+            .unwrap();
         let size = receive_file(&mut wire.as_slice(), &dst, &|_, _| {}).unwrap();
         assert_eq!(size, 64 << 20);
-        assert_eq!(std::fs::read(dir.path().join("src")).unwrap(), std::fs::read(dir.path().join("dst")).unwrap());
+        assert_eq!(
+            std::fs::read(dir.path().join("src")).unwrap(),
+            std::fs::read(dir.path().join("dst")).unwrap()
+        );
     }
 
     #[test]

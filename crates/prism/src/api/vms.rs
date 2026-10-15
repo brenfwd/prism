@@ -7,7 +7,9 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::{ApiError, AppState, Json};
-use crate::node::{Action, AddDisk, AddNic, CreateSnapshot, MigrateVm, MoveVm, SnapshotView, UpdateDisk, VmView};
+use crate::node::{
+    Action, AddDisk, AddNic, CreateSnapshot, MigrateVm, MoveVm, SnapshotView, UpdateDisk, VmView,
+};
 use crate::spec::{CreateVm, UpdateVm};
 use crate::tasks::Task;
 
@@ -217,7 +219,9 @@ async fn list_backups(
     Ok(axum::Json(node.backups(Some(parse_id(&id)?))?))
 }
 
-async fn all_backups(State(node): State<AppState>) -> Result<axum::Json<Vec<crate::node::BackupDoc>>, ApiError> {
+async fn all_backups(
+    State(node): State<AppState>,
+) -> Result<axum::Json<Vec<crate::node::BackupDoc>>, ApiError> {
     Ok(axum::Json(node.backups(None)?))
 }
 
@@ -236,7 +240,10 @@ async fn show_backup(
     Ok(axum::Json(node.backup(parse_sub(&id, "backup")?)?))
 }
 
-async fn delete_backup(State(node): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+async fn delete_backup(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
     node.delete_backup(parse_sub(&id, "backup")?).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -246,5 +253,7 @@ async fn restore_backup(
     Path(id): Path<String>,
     Json(req): Json<crate::node::RestoreBackup>,
 ) -> Result<impl IntoResponse, ApiError> {
-    Ok(accepted(node.restore_backup(parse_sub(&id, "backup")?, req)?))
+    Ok(accepted(
+        node.restore_backup(parse_sub(&id, "backup")?, req)?,
+    ))
 }

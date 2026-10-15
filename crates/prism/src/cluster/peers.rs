@@ -60,12 +60,16 @@ impl Events for EventsService {
     type SubscribeStream = BoxStream<EventMsg>;
 
     /// The runtime snapshot, then this node's own events as they happen.
-    async fn subscribe(&self, req: Request<SubscribeRequest>) -> Result<Response<Self::SubscribeStream>, Status> {
+    async fn subscribe(
+        &self,
+        req: Request<SubscribeRequest>,
+    ) -> Result<Response<Self::SubscribeStream>, Status> {
         super::grpc::check_active(&self.cluster, req.remote_addr())?;
         let node = node_of(&self.cluster)?;
         let me = node.bus.node().to_string();
         let (_, mut rx) = node.bus.subscribe(None);
-        let snapshot = serde_json::to_vec(&node.runtime_snapshot()).map_err(|e| Status::internal(e.to_string()))?;
+        let snapshot = serde_json::to_vec(&node.runtime_snapshot())
+            .map_err(|e| Status::internal(e.to_string()))?;
         let (tx, out) = mpsc::channel(512);
         tokio::spawn(async move {
             if tx
@@ -81,7 +85,9 @@ impl Events for EventsService {
             loop {
                 match rx.recv().await {
                     Ok(e) if e.event.origin_node == me => {
-                        let Ok(event) = serde_json::to_vec(&e.event) else { continue };
+                        let Ok(event) = serde_json::to_vec(&e.event) else {
+                            continue;
+                        };
                         if tx.send(Ok(EventMsg { id: e.id, event })).await.is_err() {
                             return;
                         }
@@ -139,7 +145,9 @@ async fn follow_peer(cluster: Arc<Cluster>, peer: MemberDoc) {
         let res: anyhow::Result<()> = async {
             let ch = cluster.channels.get(&grpc_addr(&peer))?;
             let mut stream = EventsClient::new(ch)
-                .subscribe(SubscribeRequest { since: String::new() })
+                .subscribe(SubscribeRequest {
+                    since: String::new(),
+                })
                 .await?
                 .into_inner();
             while let Some(msg) = stream.message().await? {
@@ -152,7 +160,9 @@ async fn follow_peer(cluster: Arc<Cluster>, peer: MemberDoc) {
                         "node.status",
                         format!("/nodes/{}", peer.node_id),
                         crate::events::Op::Upsert,
-                        serde_json::to_value(node.nodes().into_iter().find(|n| n.id == peer.node_id))?,
+                        serde_json::to_value(
+                            node.nodes().into_iter().find(|n| n.id == peer.node_id),
+                        )?,
                     );
                     continue;
                 }
@@ -183,7 +193,10 @@ impl HttpTunnel for TunnelService {
     type ForwardStream = BoxStream<HttpFrame>;
 
     /// Runs a forwarded request through this node's own HTTP API.
-    async fn forward(&self, req: Request<Streaming<HttpFrame>>) -> Result<Response<Self::ForwardStream>, Status> {
+    async fn forward(
+        &self,
+        req: Request<Streaming<HttpFrame>>,
+    ) -> Result<Response<Self::ForwardStream>, Status> {
         super::grpc::check_active(&self.cluster, req.remote_addr())?;
         let router = self
             .cluster
@@ -215,7 +228,9 @@ impl HttpTunnel for TunnelService {
         let body_stream = futures::stream::once(async move { Ok::<_, std::io::Error>(first) })
             .chain(rest)
             .filter(|b| futures::future::ready(b.as_ref().map_or(true, |b| !b.is_empty())));
-        let mut builder = axum::http::Request::builder().method(head.method.as_str()).uri(&head.path);
+        let mut builder = axum::http::Request::builder()
+            .method(head.method.as_str())
+            .uri(&head.path);
         for h in &head.headers {
             builder = builder.header(&h.name, h.value.as_slice());
         }
@@ -225,7 +240,7 @@ impl HttpTunnel for TunnelService {
         request.extensions_mut().insert(Tunnelled);
         let response = tower::ServiceExt::oneshot(router, request)
             .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .unwrap_or_else(|e| match e {});
         let (parts, body) = response.into_parts();
         let mut headers: Vec<HttpHeader> = parts
             .headers
@@ -273,7 +288,12 @@ pub async fn forward_http(
     let mut headers: Vec<HttpHeader> = parts
         .headers
         .iter()
-        .filter(|(k, _)| !matches!(k.as_str(), "connection" | "transfer-encoding" | "keep-alive" | "upgrade"))
+        .filter(|(k, _)| {
+            !matches!(
+                k.as_str(),
+                "connection" | "transfer-encoding" | "keep-alive" | "upgrade"
+            )
+        })
         .map(|(k, v)| HttpHeader {
             name: k.as_str().to_string(),
             value: v.as_bytes().to_vec(),
@@ -285,7 +305,10 @@ pub async fn forward_http(
     });
     let head = HttpFrame {
         method: parts.method.to_string(),
-        path: parts.uri.path_and_query().map_or_else(|| "/".into(), ToString::to_string),
+        path: parts
+            .uri
+            .path_and_query()
+            .map_or_else(|| "/".into(), ToString::to_string),
         headers,
         ..HttpFrame::default()
     };
@@ -311,7 +334,10 @@ pub async fn forward_http(
             }
         }));
     let ch = cluster.channels.get(&grpc_addr(member))?;
-    let mut inbound = HttpTunnelClient::new(ch).forward(outbound).await?.into_inner();
+    let mut inbound = HttpTunnelClient::new(ch)
+        .forward(outbound)
+        .await?
+        .into_inner();
     let head = inbound
         .message()
         .await?
@@ -340,7 +366,10 @@ impl Console for ConsoleService {
     type OpenStream = BoxStream<ConsoleFrame>;
 
     /// Bridges a peer to a local VM's VNC or serial console.
-    async fn open(&self, req: Request<Streaming<ConsoleFrame>>) -> Result<Response<Self::OpenStream>, Status> {
+    async fn open(
+        &self,
+        req: Request<Streaming<ConsoleFrame>>,
+    ) -> Result<Response<Self::OpenStream>, Status> {
         super::grpc::check_active(&self.cluster, req.remote_addr())?;
         let node = node_of(&self.cluster)?;
         let mut inbound = req.into_inner();
@@ -361,7 +390,10 @@ impl Console for ConsoleService {
         match first.kind.as_str() {
             "vnc" => {
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-                let path = node.vnc_socket(vm).await.map_err(|e| Status::failed_precondition(e.to_string()))?;
+                let path = node
+                    .vnc_socket(vm)
+                    .await
+                    .map_err(|e| Status::failed_precondition(e.to_string()))?;
                 let sock = tokio::net::UnixStream::connect(&path)
                     .await
                     .map_err(|e| Status::unavailable(e.to_string()))?;
@@ -416,7 +448,11 @@ impl Console for ConsoleService {
                     }
                 });
             }
-            k => return Err(Status::invalid_argument(format!("unknown console kind {k}"))),
+            k => {
+                return Err(Status::invalid_argument(format!(
+                    "unknown console kind {k}"
+                )));
+            }
         }
         Ok(Response::new(Box::pin(ReceiverStream::new(out))))
     }
@@ -436,10 +472,13 @@ pub async fn open_remote_console(
         kind: kind.into(),
         data: Vec::new(),
     };
-    let outbound = futures::stream::once(async move { first }).chain(ReceiverStream::new(rx).map(|data| ConsoleFrame {
-        data,
-        ..ConsoleFrame::default()
-    }));
+    let outbound =
+        futures::stream::once(async move { first }).chain(ReceiverStream::new(rx).map(|data| {
+            ConsoleFrame {
+                data,
+                ..ConsoleFrame::default()
+            }
+        }));
     let ch = cluster.channels.get(&grpc_addr(member))?;
     let inbound = ConsoleClient::new(ch).open(outbound).await?.into_inner();
     Ok((tx, inbound))

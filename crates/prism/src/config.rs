@@ -44,6 +44,7 @@ fn one() -> f64 {
 mod size_str {
     use serde::{Deserialize, Deserializer, Serializer};
 
+    #[allow(clippy::trivially_copy_pass_by_ref)] // serde's `with` signature
     pub fn serialize<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_u64(*v)
     }
@@ -65,7 +66,9 @@ mod size_str {
 /// Parses `123`, `10k`, `50GiB`, `1.5T` (binary units).
 pub fn parse_size(s: &str) -> Result<u64, String> {
     let s = s.trim();
-    let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+    let split = s
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(s.len());
     let (num, unit) = s.split_at(split);
     let n: f64 = num.parse().map_err(|_| format!("bad size {s:?}"))?;
     let mult: u64 = match unit.trim().to_ascii_lowercase().as_str() {
@@ -217,7 +220,7 @@ impl Config {
             if !m.path.is_absolute() {
                 bail!("archive member {name}: path must be absolute");
             }
-            if !(m.weight > 0.0) {
+            if m.weight.is_nan() || m.weight <= 0.0 {
                 bail!("archive member {name}: weight must be positive");
             }
         }
@@ -295,7 +298,10 @@ mod tests {
         assert_eq!(parse_size("1.5t").unwrap(), 3 << 39);
         assert_eq!(parse_size("4096").unwrap(), 4096);
         assert!(parse_size("5 parsecs").is_err());
-        let cfg: Config = toml::from_str("[archive_members.a]\npool = \"archive\"\npath = \"/srv/a\"\nreserve = \"10GiB\"\n").unwrap();
+        let cfg: Config = toml::from_str(
+            "[archive_members.a]\npool = \"archive\"\npath = \"/srv/a\"\nreserve = \"10GiB\"\n",
+        )
+        .unwrap();
         assert_eq!(cfg.archive_members["a"].reserve, 10 << 30);
         assert!((cfg.archive_members["a"].weight - 1.0).abs() < f64::EPSILON);
     }

@@ -81,7 +81,11 @@ fn header_str<'a>(h: &'a HeaderMap, name: &str) -> Option<&'a str> {
 
 pub async fn check(State(h): State<Hygiene>, req: Request, next: Next) -> Response {
     // Requests tunnelled from a peer were checked by the node that took them.
-    if req.extensions().get::<crate::cluster::peers::Tunnelled>().is_some() {
+    if req
+        .extensions()
+        .get::<crate::cluster::peers::Tunnelled>()
+        .is_some()
+    {
         return next.run(req).await;
     }
     match verdict(&h.0, req.method(), req.headers()) {

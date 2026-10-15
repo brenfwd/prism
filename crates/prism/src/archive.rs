@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::os::fd::OwnedFd;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -68,13 +68,14 @@ pub enum FileKind {
 
 impl FileKind {
     pub fn guess(path: &str) -> Self {
-        let lower = path.to_ascii_lowercase();
-        if lower.ends_with(".iso") {
-            Self::Iso
-        } else if [".qcow2", ".img", ".raw"].iter().any(|e| lower.ends_with(e)) {
-            Self::Disk
-        } else {
-            Self::Other
+        let ext = Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        match ext.as_deref() {
+            Some("iso") => Self::Iso,
+            Some("qcow2" | "img" | "raw") => Self::Disk,
+            _ => Self::Other,
         }
     }
 }
@@ -109,16 +110,25 @@ pub struct MemberCapacity {
 /// Validates an archive path: `/`-separated valid names, no `.` or `..`.
 pub fn valid_path(path: &str) -> bool {
     let parts: Vec<&str> = path.split('/').collect();
-    !path.is_empty() && path.len() <= 1024 && parts.len() <= MAX_DEPTH && parts.iter().all(|p| valid_name(p))
+    !path.is_empty()
+        && path.len() <= 1024
+        && parts.len() <= MAX_DEPTH
+        && parts.iter().all(|p| valid_name(p))
 }
 
 /// Picks a member for a new file: two weighted random choices, keeping the
 /// one with more weighted free space ("power of two choices"). Members at
 /// or below their reserve are skipped.
-pub fn place<'a>(candidates: &[(&'a ArchiveMemberDoc, u64)], size: u64, seed: u128) -> Option<&'a ArchiveMemberDoc> {
+pub fn place<'a>(
+    candidates: &[(&'a ArchiveMemberDoc, u64)],
+    size: u64,
+    seed: u128,
+) -> Option<&'a ArchiveMemberDoc> {
     let ok: Vec<(&ArchiveMemberDoc, f64)> = candidates
         .iter()
-        .filter(|(m, free)| m.state == MemberState::Active && *free > m.reserve.saturating_add(size))
+        .filter(|(m, free)| {
+            m.state == MemberState::Active && *free > m.reserve.saturating_add(size)
+        })
         .map(|(m, free)| (*m, m.weight * (*free - m.reserve) as f64))
         .collect();
     if ok.is_empty() {
@@ -136,12 +146,19 @@ pub fn place<'a>(candidates: &[(&'a ArchiveMemberDoc, u64)], size: u64, seed: u1
         ok[ok.len() - 1].0
     };
     let (a, b) = (pick(seed as u64), pick((seed >> 64) as u64));
-    let score = |m: &ArchiveMemberDoc| ok.iter().find(|(x, _)| x.key() == m.key()).map_or(0.0, |(_, w)| *w);
+    let score = |m: &ArchiveMemberDoc| {
+        ok.iter()
+            .find(|(x, _)| x.key() == m.key())
+            .map_or(0.0, |(_, w)| *w)
+    };
     Some(if score(a) >= score(b) { a } else { b })
 }
 
 fn resolve() -> ResolveFlags {
-    ResolveFlags::BENEATH | ResolveFlags::NO_SYMLINKS | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_XDEV
+    ResolveFlags::BENEATH
+        | ResolveFlags::NO_SYMLINKS
+        | ResolveFlags::NO_MAGICLINKS
+        | ResolveFlags::NO_XDEV
 }
 
 /// A member directory on this node, with confined file access.
@@ -149,24 +166,31 @@ fn resolve() -> ResolveFlags {
 pub struct LocalMember {
     pub name: String,
     pub pool: String,
-    pub path: PathBuf,
     root: OwnedFd,
 }
 
 impl LocalMember {
     pub fn open(name: &str, pool: &str, path: &Path) -> Result<Self, StorageError> {
         std::fs::create_dir_all(path)?;
-        let root = rustix::fs::open(path, OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())?;
+        let root = rustix::fs::open(
+            path,
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
         let m = Self {
             name: name.into(),
             pool: pool.into(),
-            path: path.into(),
             root,
         };
         let _ = rustix::fs::mkdirat(&m.root, PARTIAL_DIR, Mode::from_raw_mode(0o700));
         // Partial uploads left by a crash.
-        if let Ok(dir) = rustix::fs::openat2(&m.root, PARTIAL_DIR, OFlags::DIRECTORY | OFlags::RDONLY, Mode::empty(), resolve())
-            && let Ok(entries) = rustix::fs::Dir::read_from(&dir)
+        if let Ok(dir) = rustix::fs::openat2(
+            &m.root,
+            PARTIAL_DIR,
+            OFlags::DIRECTORY | OFlags::RDONLY,
+            Mode::empty(),
+            resolve(),
+        ) && let Ok(entries) = rustix::fs::Dir::read_from(&dir)
         {
             for e in entries.flatten() {
                 if let Ok(n) = e.file_name().to_str()
@@ -180,7 +204,9 @@ impl LocalMember {
     }
 
     pub fn capacity(&self) -> MemberCapacity {
-        let (total, free) = rustix::fs::fstatvfs(&self.root).map_or((0, 0), |s| (s.f_blocks * s.f_frsize, s.f_bavail * s.f_frsize));
+        let (total, free) = rustix::fs::fstatvfs(&self.root).map_or((0, 0), |s| {
+            (s.f_blocks * s.f_frsize, s.f_bavail * s.f_frsize)
+        });
         MemberCapacity {
             name: self.name.clone(),
             pool: self.pool.clone(),
@@ -190,7 +216,11 @@ impl LocalMember {
     }
 
     fn check(path: &str) -> Result<(), StorageError> {
-        if valid_path(path) { Ok(()) } else { Err(StorageError::InvalidName(path.into())) }
+        if valid_path(path) {
+            Ok(())
+        } else {
+            Err(StorageError::InvalidName(path.into()))
+        }
     }
 
     /// Creates the parent directories of `path`.
@@ -202,12 +232,20 @@ impl LocalMember {
                 dir.push('/');
             }
             dir.push_str(p);
-            match rustix::fs::openat2(&self.root, &dir, OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty(), resolve()) {
+            match rustix::fs::openat2(
+                &self.root,
+                &dir,
+                OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+                Mode::empty(),
+                resolve(),
+            ) {
                 Ok(_) => {}
-                Err(rustix::io::Errno::NOENT) => match rustix::fs::mkdirat(&self.root, &dir, Mode::from_raw_mode(0o700)) {
-                    Ok(()) | Err(rustix::io::Errno::EXIST) => {}
-                    Err(e) => return Err(e.into()),
-                },
+                Err(rustix::io::Errno::NOENT) => {
+                    match rustix::fs::mkdirat(&self.root, &dir, Mode::from_raw_mode(0o700)) {
+                        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                }
                 Err(e) => return Err(e.into()),
             }
         }
@@ -239,7 +277,8 @@ impl LocalMember {
         let mut size = 0u64;
         let res: Result<(), StorageError> = async {
             while let Some(chunk) = body.next().await {
-                let chunk = chunk.map_err(|e| StorageError::Invalid(format!("upload aborted: {e}")))?;
+                let chunk =
+                    chunk.map_err(|e| StorageError::Invalid(format!("upload aborted: {e}")))?;
                 hasher.update(&chunk);
                 size += chunk.len() as u64;
                 file.write_all(&chunk).await?;
@@ -253,7 +292,13 @@ impl LocalMember {
             let _ = rustix::fs::unlinkat(&self.root, &partial, AtFlags::empty());
             return Err(e);
         }
-        if let Err(e) = rustix::fs::renameat_with(&self.root, &partial, &self.root, path, RenameFlags::NOREPLACE) {
+        if let Err(e) = rustix::fs::renameat_with(
+            &self.root,
+            &partial,
+            &self.root,
+            path,
+            RenameFlags::NOREPLACE,
+        ) {
             let _ = rustix::fs::unlinkat(&self.root, &partial, AtFlags::empty());
             return Err(match e {
                 rustix::io::Errno::EXIST => StorageError::Exists(path.into()),
@@ -265,11 +310,17 @@ impl LocalMember {
 
     pub fn open_read(&self, path: &str) -> Result<std::fs::File, StorageError> {
         Self::check(path)?;
-        let fd = rustix::fs::openat2(&self.root, path, OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW, Mode::empty(), resolve())
-            .map_err(|e| match e {
-                rustix::io::Errno::NOENT => StorageError::NoVolume(path.into()),
-                e => e.into(),
-            })?;
+        let fd = rustix::fs::openat2(
+            &self.root,
+            path,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+            Mode::empty(),
+            resolve(),
+        )
+        .map_err(|e| match e {
+            rustix::io::Errno::NOENT => StorageError::NoVolume(path.into()),
+            e => e.into(),
+        })?;
         Ok(std::fs::File::from(fd))
     }
 
@@ -279,12 +330,6 @@ impl LocalMember {
             rustix::io::Errno::NOENT => StorageError::NoVolume(path.into()),
             e => e.into(),
         })
-    }
-
-    /// Absolute path of an archive file, for local consumers (restore).
-    pub fn full_path(&self, path: &str) -> Result<PathBuf, StorageError> {
-        Self::check(path)?;
-        Ok(self.path.join(path))
     }
 }
 
@@ -332,11 +377,18 @@ mod tests {
 
     #[test]
     fn placement_respects_reserve_and_prefers_free_space() {
-        let (a, b, c) = (member(1, "a", 1.0), member(2, "b", 1.0), member(3, "c", 1.0));
+        let (a, b, c) = (
+            member(1, "a", 1.0),
+            member(2, "b", 1.0),
+            member(3, "c", 1.0),
+        );
         let cands = [(&a, 15u64), (&b, 1_000_000), (&c, 5)];
         // `a` would drop below its reserve with a 10-byte file; `c` already is.
         for seed in 0..50u128 {
-            assert_eq!(place(&cands, 10, seed * 7919 + (seed << 64)).unwrap().name, "b");
+            assert_eq!(
+                place(&cands, 10, seed * 7919 + (seed << 64)).unwrap().name,
+                "b"
+            );
         }
         assert!(place(&[(&c, 5)], 1, 0).is_none());
     }
@@ -359,13 +411,18 @@ mod tests {
     async fn write_read_delete_nested() {
         let dir = tempfile::tempdir().unwrap();
         let m = LocalMember::open("m", "archive", dir.path()).unwrap();
-        let body = futures::stream::iter(vec![Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"hello"))]);
+        let body = futures::stream::iter(vec![Ok::<_, std::io::Error>(bytes::Bytes::from_static(
+            b"hello",
+        ))]);
         let (size, hash) = m.write("isos/a/b.iso", body).await.unwrap();
         assert_eq!(size, 5);
         assert_eq!(hash, blake3::hash(b"hello").to_hex().to_string());
         assert!(m.open_read("isos/a/b.iso").is_ok());
         let again = futures::stream::iter(vec![Ok::<_, std::io::Error>(bytes::Bytes::new())]);
-        assert!(matches!(m.write("isos/a/b.iso", again).await, Err(StorageError::Exists(_))));
+        assert!(matches!(
+            m.write("isos/a/b.iso", again).await,
+            Err(StorageError::Exists(_))
+        ));
         m.delete("isos/a/b.iso").unwrap();
         assert!(m.open_read("isos/a/b.iso").is_err());
         assert!(m.open_read("../x").is_err());

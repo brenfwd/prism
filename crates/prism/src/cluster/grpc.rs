@@ -13,7 +13,7 @@ use prism_proto::v1::cluster_server::{Cluster as ClusterRpc, ClusterServer};
 use prism_proto::v1::console_server::ConsoleServer;
 use prism_proto::v1::events_server::EventsServer;
 use prism_proto::v1::http_tunnel_server::HttpTunnelServer;
-use prism_proto::v1::raft_server::{Raft as _, RaftServer};
+use prism_proto::v1::raft_server::RaftServer;
 use prism_proto::v1::{BootstrapReply, Empty, StatusReply, WriteReply, WriteRequest};
 use tonic::{Request, Response, Status};
 
@@ -49,7 +49,9 @@ pub fn check_active(cluster: &Cluster, remote: Option<SocketAddr>) -> Result<(),
 fn require_active(cluster: &Cluster, remote: Option<SocketAddr>) -> Result<(), Status> {
     match caller(cluster, remote)? {
         Caller::Active | Caller::Unknown => Ok(()),
-        Caller::Joining => Err(Status::permission_denied("joining members may only bootstrap")),
+        Caller::Joining => Err(Status::permission_denied(
+            "joining members may only bootstrap",
+        )),
     }
 }
 
@@ -61,7 +63,10 @@ pub struct ClusterService {
 impl ClusterRpc for ClusterService {
     async fn status(&self, req: Request<Empty>) -> Result<Response<StatusReply>, Status> {
         caller(&self.cluster, req.remote_addr())?;
-        let s = self.cluster.status().map_err(|e| Status::internal(e.to_string()))?;
+        let s = self
+            .cluster
+            .status()
+            .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(StatusReply {
             status: serde_json::to_vec(&s).map_err(|e| Status::internal(e.to_string()))?,
         }))
@@ -78,7 +83,10 @@ impl ClusterRpc for ClusterService {
         }))
     }
 
-    async fn forward_write(&self, req: Request<WriteRequest>) -> Result<Response<WriteReply>, Status> {
+    async fn forward_write(
+        &self,
+        req: Request<WriteRequest>,
+    ) -> Result<Response<WriteReply>, Status> {
         require_active(&self.cluster, req.remote_addr())?;
         let command = String::from_utf8(req.into_inner().command)
             .map_err(|_| Status::invalid_argument("command is not UTF-8"))?;
@@ -87,7 +95,9 @@ impl ClusterRpc for ClusterService {
                 result: result.into_bytes(),
                 log_index,
             })),
-            Err(ClusterError::ForwardToLeader(_)) => Err(Status::failed_precondition("not the leader")),
+            Err(ClusterError::ForwardToLeader(_)) => {
+                Err(Status::failed_precondition("not the leader"))
+            }
             Err(ClusterError::Degraded(m)) => Err(Status::unavailable(m)),
             Err(ClusterError::Other(m)) => Err(Status::internal(m)),
         }
@@ -103,12 +113,18 @@ struct GuardedRaft {
 
 #[tonic::async_trait]
 impl prism_proto::v1::raft_server::Raft for GuardedRaft {
-    async fn append_entries(&self, req: Request<prism_proto::v1::Payload>) -> Result<Response<prism_proto::v1::Payload>, Status> {
+    async fn append_entries(
+        &self,
+        req: Request<prism_proto::v1::Payload>,
+    ) -> Result<Response<prism_proto::v1::Payload>, Status> {
         require_active(&self.cluster, req.remote_addr())?;
         self.inner.append_entries(req).await
     }
 
-    async fn vote(&self, req: Request<prism_proto::v1::Payload>) -> Result<Response<prism_proto::v1::Payload>, Status> {
+    async fn vote(
+        &self,
+        req: Request<prism_proto::v1::Payload>,
+    ) -> Result<Response<prism_proto::v1::Payload>, Status> {
         require_active(&self.cluster, req.remote_addr())?;
         self.inner.vote(req).await
     }

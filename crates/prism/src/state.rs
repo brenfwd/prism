@@ -14,9 +14,12 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use crate::archive::{ARCHIVE_FILES, ARCHIVE_MEMBERS, ARCHIVE_POOLS, ArchiveFileDoc, ArchiveMemberDoc, ArchivePoolDoc};
+use crate::archive::{
+    ARCHIVE_FILES, ARCHIVE_MEMBERS, ARCHIVE_POOLS, ArchiveFileDoc, ArchiveMemberDoc, ArchivePoolDoc,
+};
 use crate::cluster::model::{
-    AdmitError, CLUSTER, ClusterDoc, INVITES, InviteDoc, MEMBERS, MemberDoc, MemberState, TOMBSTONES, TombstoneDoc,
+    AdmitError, CLUSTER, ClusterDoc, INVITES, InviteDoc, MEMBERS, MemberDoc, MemberState,
+    TOMBSTONES, TombstoneDoc,
 };
 use crate::db::{Docs, StateDb};
 use crate::spec::VmSpec;
@@ -180,50 +183,60 @@ pub struct State {
 
 impl std::fmt::Debug for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("State").field("node", &self.node).finish_non_exhaustive()
+        f.debug_struct("State")
+            .field("node", &self.node)
+            .finish_non_exhaustive()
     }
-}
-
-fn reject(outcome: Outcome) -> anyhow::Result<Outcome> {
-    Ok(outcome)
 }
 
 /// Applies one command inside a transaction. Deterministic.
 fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow::Result<Outcome> {
     match cmd {
-        Command::PutVm { vm, expect_generation } => {
+        Command::PutVm {
+            vm,
+            expect_generation,
+        } => {
             let current: Option<VmSpec> = d.get(VMS, &vm.id.to_string())?;
             if let Some(expected) = expect_generation {
                 let actual = current.as_ref().map(|c| c.generation);
                 if actual != *expected {
-                    return reject(Outcome::Conflict(format!(
+                    return Ok(Outcome::Conflict(format!(
                         "vm {} changed concurrently (generation {actual:?}, expected {expected:?})",
                         vm.name
                     )));
                 }
             }
-            if d.list::<VmSpec>(VMS)?.iter().any(|o| o.name == vm.name && o.id != vm.id) {
-                return reject(Outcome::Conflict(format!("a VM named {} already exists", vm.name)));
+            if d.list::<VmSpec>(VMS)?
+                .iter()
+                .any(|o| o.name == vm.name && o.id != vm.id)
+            {
+                return Ok(Outcome::Conflict(format!(
+                    "a VM named {} already exists",
+                    vm.name
+                )));
             }
             d.put(VMS, &vm.id.to_string(), vm)?;
         }
         Command::DeleteVm { id } => {
             if !d.delete(VMS, &id.to_string())? {
-                return reject(Outcome::NotFound(format!("vm {id}")));
+                return Ok(Outcome::NotFound(format!("vm {id}")));
             }
         }
         Command::PutPool { pool } => {
             d.put(POOLS, &PoolDoc::key(pool.node, &pool.name), pool)?;
         }
         Command::DeletePool { node, name } => {
-            let removed = d.delete(POOLS, &PoolDoc::key(*node, name))? || (*node == local && d.delete(POOLS, name)?);
+            let removed = d.delete(POOLS, &PoolDoc::key(*node, name))?
+                || (*node == local && d.delete(POOLS, name)?);
             if !removed {
-                return reject(Outcome::NotFound(format!("pool {name}")));
+                return Ok(Outcome::NotFound(format!("pool {name}")));
             }
         }
         Command::InitCluster { cluster, hub } => {
             if d.get::<ClusterDoc>(CLUSTER, CLUSTER_ID)?.is_some() {
-                return reject(Outcome::Conflict("the cluster is already initialised".into()));
+                return Ok(Outcome::Conflict(
+                    "the cluster is already initialised".into(),
+                ));
             }
             d.put(CLUSTER, CLUSTER_ID, cluster)?;
             d.put(MEMBERS, &hub.node_id.to_string(), hub)?;
@@ -234,7 +247,11 @@ fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow::Result<Out
                     d.put(VMS, &vm.id.to_string(), &vm)?;
                 }
             }
-            for (key, mut pool) in d.list::<PoolDoc>(POOLS)?.into_iter().map(|p| (p.name.clone(), p)) {
+            for (key, mut pool) in d
+                .list::<PoolDoc>(POOLS)?
+                .into_iter()
+                .map(|p| (p.name.clone(), p))
+            {
                 if pool.node.is_nil() {
                     d.delete(POOLS, &key)?;
                     pool.node = hub.node_id;
@@ -243,44 +260,60 @@ fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow::Result<Out
             }
         }
         Command::CreateInvite { invite } => {
-            let taken = d.list::<MemberDoc>(MEMBERS)?.iter().any(|m| m.raft_id == invite.raft_id || m.mesh_addr == invite.assigned_addr)
-                || d.list::<InviteDoc>(INVITES)?.iter().any(|i| i.raft_id == invite.raft_id || i.assigned_addr == invite.assigned_addr)
-                || d.list::<TombstoneDoc>(TOMBSTONES)?.iter().any(|t| t.mesh_addr == invite.assigned_addr);
+            let taken = d
+                .list::<MemberDoc>(MEMBERS)?
+                .iter()
+                .any(|m| m.raft_id == invite.raft_id || m.mesh_addr == invite.assigned_addr)
+                || d.list::<InviteDoc>(INVITES)?.iter().any(|i| {
+                    i.raft_id == invite.raft_id || i.assigned_addr == invite.assigned_addr
+                })
+                || d.list::<TombstoneDoc>(TOMBSTONES)?
+                    .iter()
+                    .any(|t| t.mesh_addr == invite.assigned_addr);
             if taken {
-                return reject(Outcome::Conflict("that mesh address is already reserved; retry".into()));
+                return Ok(Outcome::Conflict(
+                    "that mesh address is already reserved; retry".into(),
+                ));
             }
             d.put(INVITES, &invite.invite_id, invite)?;
         }
         Command::RevokeInvite { invite_id } => {
             if !d.delete(INVITES, invite_id)? {
-                return reject(Outcome::NotFound(format!("invite {invite_id}")));
+                return Ok(Outcome::NotFound(format!("invite {invite_id}")));
             }
         }
-        Command::AddMember { member, invite_id, now } => {
+        Command::AddMember {
+            member,
+            invite_id,
+            now,
+        } => {
             if let Err(e) = admit(d, member, invite_id, *now)? {
-                return reject(Outcome::Conflict(e.to_string()));
+                return Ok(Outcome::Conflict(e.to_string()));
             }
         }
         Command::SetMemberState { node_id, state } => {
             let Some(mut m) = d.get::<MemberDoc>(MEMBERS, &node_id.to_string())? else {
-                return reject(Outcome::NotFound(format!("member {node_id}")));
+                return Ok(Outcome::NotFound(format!("member {node_id}")));
             };
             m.state = *state;
             d.put(MEMBERS, &node_id.to_string(), &m)?;
         }
         Command::SetVoter { node_id, voter } => {
             let Some(mut m) = d.get::<MemberDoc>(MEMBERS, &node_id.to_string())? else {
-                return reject(Outcome::NotFound(format!("member {node_id}")));
+                return Ok(Outcome::NotFound(format!("member {node_id}")));
             };
             m.voter = *voter;
             d.put(MEMBERS, &node_id.to_string(), &m)?;
         }
         Command::RemoveMember { node_id, now } => {
             let Some(m) = d.get::<MemberDoc>(MEMBERS, &node_id.to_string())? else {
-                return reject(Outcome::NotFound(format!("member {node_id}")));
+                return Ok(Outcome::NotFound(format!("member {node_id}")));
             };
             if d.list::<VmSpec>(VMS)?.iter().any(|v| v.node == *node_id) {
-                return reject(Outcome::Conflict(format!("{} still owns VMs; move or delete them first", m.name)));
+                return Ok(Outcome::Conflict(format!(
+                    "{} still owns VMs; move or delete them first",
+                    m.name
+                )));
             }
             d.delete(MEMBERS, &node_id.to_string())?;
             d.put(
@@ -293,7 +326,11 @@ fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow::Result<Out
                     removed: *now,
                 },
             )?;
-            for pool in d.list::<PoolDoc>(POOLS)?.into_iter().filter(|p| p.node == *node_id) {
+            for pool in d
+                .list::<PoolDoc>(POOLS)?
+                .into_iter()
+                .filter(|p| p.node == *node_id)
+            {
                 d.delete(POOLS, &PoolDoc::key(pool.node, &pool.name))?;
             }
         }
@@ -301,7 +338,9 @@ fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow::Result<Out
             d.put(ARCHIVE_POOLS, &pool.name, pool)?;
         }
         Command::PutArchiveMember { member } => {
-            if d.get::<ArchivePoolDoc>(ARCHIVE_POOLS, &member.pool)?.is_none() {
+            if d.get::<ArchivePoolDoc>(ARCHIVE_POOLS, &member.pool)?
+                .is_none()
+            {
                 d.put(
                     ARCHIVE_POOLS,
                     &member.pool,
@@ -314,18 +353,23 @@ fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow::Result<Out
             d.put(ARCHIVE_MEMBERS, &member.key(), member)?;
         }
         Command::PutArchiveFile { file, create } => {
-            if d.get::<ArchivePoolDoc>(ARCHIVE_POOLS, &file.pool)?.is_none() {
-                return reject(Outcome::NotFound(format!("archive pool {}", file.pool)));
+            if d.get::<ArchivePoolDoc>(ARCHIVE_POOLS, &file.pool)?
+                .is_none()
+            {
+                return Ok(Outcome::NotFound(format!("archive pool {}", file.pool)));
             }
             let key = ArchiveFileDoc::key(&file.pool, &file.path);
             if *create && d.get::<ArchiveFileDoc>(ARCHIVE_FILES, &key)?.is_some() {
-                return reject(Outcome::Conflict(format!("{} already exists in {}", file.path, file.pool)));
+                return Ok(Outcome::Conflict(format!(
+                    "{} already exists in {}",
+                    file.path, file.pool
+                )));
             }
             d.put(ARCHIVE_FILES, &key, file)?;
         }
         Command::DeleteArchiveFile { pool, path } => {
             if !d.delete(ARCHIVE_FILES, &ArchiveFileDoc::key(pool, path))? {
-                return reject(Outcome::NotFound(format!("{pool}/{path}")));
+                return Ok(Outcome::NotFound(format!("{pool}/{path}")));
             }
         }
         Command::PutBackup { backup } => {
@@ -333,7 +377,7 @@ fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow::Result<Out
         }
         Command::DeleteBackup { id } => {
             if !d.delete(crate::node::BACKUPS, &id.to_string())? {
-                return reject(Outcome::NotFound(format!("backup {id}")));
+                return Ok(Outcome::NotFound(format!("backup {id}")));
             }
         }
     }
@@ -342,7 +386,12 @@ fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow::Result<Out
 
 /// The admission checks from the join protocol. Replaying the same
 /// `AddMember` is a no-op success.
-fn admit(d: &Docs<'_>, member: &MemberDoc, invite_id: &str, now: i64) -> anyhow::Result<Result<(), AdmitError>> {
+fn admit(
+    d: &Docs<'_>,
+    member: &MemberDoc,
+    invite_id: &str,
+    now: i64,
+) -> anyhow::Result<Result<(), AdmitError>> {
     let Some(mut invite) = d.get::<InviteDoc>(INVITES, invite_id)? else {
         return Ok(Err(AdmitError::InviteNotFound));
     };
@@ -410,14 +459,16 @@ impl State {
     pub async fn apply(&self, cmd: Command) -> Result<(), StateError> {
         if let Some(p) = self.proposer.get() {
             let json = serde_json::to_string(&cmd).map_err(anyhow::Error::from)?;
-            let outcome: Outcome = serde_json::from_str(&p.propose(json).await?).map_err(anyhow::Error::from)?;
+            let outcome: Outcome =
+                serde_json::from_str(&p.propose(json).await?).map_err(anyhow::Error::from)?;
             return outcome.into_result();
         }
         let (db, node) = (Arc::clone(&self.db), self.node);
         let cmd2 = cmd.clone();
-        let outcome = tokio::task::spawn_blocking(move || db.transaction(|d| apply_command(d, node, &cmd2)))
-            .await
-            .map_err(|e| StateError::Internal(e.into()))??;
+        let outcome =
+            tokio::task::spawn_blocking(move || db.transaction(|d| apply_command(d, node, &cmd2)))
+                .await
+                .map_err(|e| StateError::Internal(e.into()))??;
         if outcome == Outcome::Ok {
             let _ = self.changes.send(Change::Applied(Arc::new(cmd)));
         }
@@ -426,7 +477,9 @@ impl State {
 
     /// The raft state machine backend over this state.
     pub fn backend(&self) -> StateBackend {
-        StateBackend { state: self.clone() }
+        StateBackend {
+            state: self.clone(),
+        }
     }
 
     fn resolve_vm(&self, mut vm: VmSpec) -> VmSpec {
@@ -443,7 +496,10 @@ impl State {
     }
 
     pub fn vm(&self, id: Uuid) -> anyhow::Result<Option<VmSpec>> {
-        Ok(self.db.get::<VmSpec>(VMS, &id.to_string())?.map(|v| self.resolve_vm(v)))
+        Ok(self
+            .db
+            .get::<VmSpec>(VMS, &id.to_string())?
+            .map(|v| self.resolve_vm(v)))
     }
 
     pub fn vm_by_name(&self, name: &str) -> anyhow::Result<Option<VmSpec>> {
@@ -521,7 +577,11 @@ struct SnapshotDoc {
 }
 
 impl prism_cluster::Backend for StateBackend {
-    fn apply(&self, command: Option<&str>, meta: &prism_cluster::AppliedMeta) -> anyhow::Result<String> {
+    fn apply(
+        &self,
+        command: Option<&str>,
+        meta: &prism_cluster::AppliedMeta,
+    ) -> anyhow::Result<String> {
         let meta_json = serde_json::to_string(meta)?;
         let s = &self.state;
         let Some(json) = command else {
@@ -535,7 +595,9 @@ impl prism_cluster::Backend for StateBackend {
                 // progress so the log keeps moving, and report it.
                 tracing::error!("unreadable replicated command (upgrade prism): {e}");
                 s.db.set_meta(APPLIED_META, &meta_json)?;
-                return Ok(serde_json::to_string(&Outcome::Conflict(format!("unreadable command: {e}")))?);
+                return Ok(serde_json::to_string(&Outcome::Conflict(format!(
+                    "unreadable command: {e}"
+                )))?);
             }
         };
         let outcome = s.db.transaction(|d| {
@@ -577,7 +639,11 @@ impl prism_cluster::Backend for StateBackend {
             .db
             .export()?
             .into_iter()
-            .map(|(collection, id, body)| SnapshotDoc { collection, id, body })
+            .map(|(collection, id, body)| SnapshotDoc {
+                collection,
+                id,
+                body,
+            })
             .collect();
         Ok(serde_json::to_vec(&docs)?)
     }
@@ -669,7 +735,9 @@ mod tests {
             node: Uuid::from_u128(1),
         };
         s.apply(Command::PutPool { pool }).await.unwrap();
-        assert!(matches!(rx.try_recv().unwrap(), Change::Applied(c) if matches!(*c, Command::PutPool { .. })));
+        assert!(
+            matches!(rx.try_recv().unwrap(), Change::Applied(c) if matches!(*c, Command::PutPool { .. }))
+        );
         assert_eq!(s.pools(Uuid::from_u128(1)).unwrap().len(), 1);
         assert_eq!(s.pools(Uuid::from_u128(2)).unwrap().len(), 0);
     }
@@ -707,10 +775,27 @@ mod tests {
         let c = cluster();
         let mut vm = sample_spec("legacy");
         vm.node = Uuid::nil();
-        s.apply(Command::PutVm { vm: Box::new(vm.clone()), expect_generation: None }).await.unwrap();
-        s.apply(Command::InitCluster { cluster: c.clone(), hub: member(&c, 1, 1) }).await.unwrap();
+        s.apply(Command::PutVm {
+            vm: Box::new(vm.clone()),
+            expect_generation: None,
+        })
+        .await
+        .unwrap();
+        s.apply(Command::InitCluster {
+            cluster: c.clone(),
+            hub: member(&c, 1, 1),
+        })
+        .await
+        .unwrap();
         // Pre-cluster VMs now explicitly belong to the hub.
-        assert_eq!(s.db().get::<VmSpec>(VMS, &vm.id.to_string()).unwrap().unwrap().node, Uuid::from_u128(1));
+        assert_eq!(
+            s.db()
+                .get::<VmSpec>(VMS, &vm.id.to_string())
+                .unwrap()
+                .unwrap()
+                .node,
+            Uuid::from_u128(1)
+        );
 
         let invite = InviteDoc {
             invite_id: "aa".into(),
@@ -721,24 +806,72 @@ mod tests {
             name_hint: None,
             consumed_by: None,
         };
-        s.apply(Command::CreateInvite { invite: invite.clone() }).await.unwrap();
-        let dup = InviteDoc { invite_id: "bb".into(), ..invite.clone() };
-        assert!(matches!(s.apply(Command::CreateInvite { invite: dup }).await, Err(StateError::Conflict(_))));
+        s.apply(Command::CreateInvite {
+            invite: invite.clone(),
+        })
+        .await
+        .unwrap();
+        let dup = InviteDoc {
+            invite_id: "bb".into(),
+            ..invite.clone()
+        };
+        assert!(matches!(
+            s.apply(Command::CreateInvite { invite: dup }).await,
+            Err(StateError::Conflict(_))
+        ));
 
         let new = member(&c, 2, 2);
-        let late = s.apply(Command::AddMember { member: new.clone(), invite_id: "aa".into(), now: 101 }).await;
+        let late = s
+            .apply(Command::AddMember {
+                member: new.clone(),
+                invite_id: "aa".into(),
+                now: 101,
+            })
+            .await;
         assert!(matches!(late, Err(StateError::Conflict(m)) if m.starts_with("invite_expired")));
-        let wrong = MemberDoc { mesh_addr: c.mesh_addr(7), ..new.clone() };
-        let r = s.apply(Command::AddMember { member: wrong, invite_id: "aa".into(), now: 50 }).await;
+        let wrong = MemberDoc {
+            mesh_addr: c.mesh_addr(7),
+            ..new.clone()
+        };
+        let r = s
+            .apply(Command::AddMember {
+                member: wrong,
+                invite_id: "aa".into(),
+                now: 50,
+            })
+            .await;
         assert!(matches!(r, Err(StateError::Conflict(m)) if m.starts_with("address_mismatch")));
-        s.apply(Command::AddMember { member: new.clone(), invite_id: "aa".into(), now: 50 }).await.unwrap();
+        s.apply(Command::AddMember {
+            member: new.clone(),
+            invite_id: "aa".into(),
+            now: 50,
+        })
+        .await
+        .unwrap();
         // Replaying the same reply is a no-op; another node is refused.
-        s.apply(Command::AddMember { member: new.clone(), invite_id: "aa".into(), now: 50 }).await.unwrap();
+        s.apply(Command::AddMember {
+            member: new.clone(),
+            invite_id: "aa".into(),
+            now: 50,
+        })
+        .await
+        .unwrap();
         let other = member(&c, 3, 2);
-        let r = s.apply(Command::AddMember { member: other, invite_id: "aa".into(), now: 50 }).await;
+        let r = s
+            .apply(Command::AddMember {
+                member: other,
+                invite_id: "aa".into(),
+                now: 50,
+            })
+            .await;
         assert!(matches!(r, Err(StateError::Conflict(m)) if m.starts_with("invite_consumed")));
 
-        s.apply(Command::RemoveMember { node_id: new.node_id, now: 60 }).await.unwrap();
+        s.apply(Command::RemoveMember {
+            node_id: new.node_id,
+            now: 60,
+        })
+        .await
+        .unwrap();
         assert_eq!(s.tombstones().unwrap().len(), 1);
         assert_eq!(s.members().unwrap().len(), 1);
     }
@@ -747,16 +880,37 @@ mod tests {
     fn backend_records_progress_for_rejected_commands_and_restores() {
         let s = state();
         let b = s.backend();
-        let mut meta = prism_cluster::AppliedMeta::default();
-        meta.last_applied = Some(openraft::LogId::new(openraft::CommittedLeaderId::new(1, 1), 5));
+        let mut meta = prism_cluster::AppliedMeta {
+            last_applied: None,
+            ..prism_cluster::AppliedMeta::default()
+        };
+        meta.last_applied = Some(openraft::LogId::new(
+            openraft::CommittedLeaderId::new(1, 1),
+            5,
+        ));
         let bad = serde_json::to_string(&Command::DeleteVm { id: Uuid::nil() }).unwrap();
         let out: Outcome = serde_json::from_str(&b.apply(Some(&bad), &meta).unwrap()).unwrap();
         assert!(matches!(out, Outcome::NotFound(_)));
-        assert_eq!(b.applied_meta().unwrap().unwrap().last_applied.unwrap().index, 5);
+        assert_eq!(
+            b.applied_meta()
+                .unwrap()
+                .unwrap()
+                .last_applied
+                .unwrap()
+                .index,
+            5
+        );
 
         let vm = sample_spec("x");
-        let put = serde_json::to_string(&Command::PutVm { vm: Box::new(vm.clone()), expect_generation: None }).unwrap();
-        meta.last_applied = Some(openraft::LogId::new(openraft::CommittedLeaderId::new(1, 1), 6));
+        let put = serde_json::to_string(&Command::PutVm {
+            vm: Box::new(vm.clone()),
+            expect_generation: None,
+        })
+        .unwrap();
+        meta.last_applied = Some(openraft::LogId::new(
+            openraft::CommittedLeaderId::new(1, 1),
+            6,
+        ));
         b.apply(Some(&put), &meta).unwrap();
         let snap = b.snapshot().unwrap();
 
@@ -764,6 +918,14 @@ mod tests {
         let b2 = s2.backend();
         b2.restore(&snap, &meta).unwrap();
         assert_eq!(s2.vm(vm.id).unwrap().unwrap().name, "x");
-        assert_eq!(b2.applied_meta().unwrap().unwrap().last_applied.unwrap().index, 6);
+        assert_eq!(
+            b2.applied_meta()
+                .unwrap()
+                .unwrap()
+                .last_applied
+                .unwrap()
+                .index,
+            6
+        );
     }
 }

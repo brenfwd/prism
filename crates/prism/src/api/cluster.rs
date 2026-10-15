@@ -40,9 +40,13 @@ impl From<ClusterOpError> for ApiError {
 }
 
 fn cluster(node: &crate::node::Node) -> Result<&std::sync::Arc<crate::cluster::Cluster>, ApiError> {
-    node.cluster
-        .get()
-        .ok_or_else(|| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "cluster_unavailable", "clustering is not available on this node"))
+    node.cluster.get().ok_or_else(|| {
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "cluster_unavailable",
+            "clustering is not available on this node",
+        )
+    })
 }
 
 async fn status(State(node): State<AppState>) -> Result<impl IntoResponse, ApiError> {
@@ -61,9 +65,14 @@ fn default_mode() -> ClusterMode {
     ClusterMode::HubSpoke
 }
 
-async fn create(State(node): State<AppState>, Json(req): Json<CreateCluster>) -> Result<impl IntoResponse, ApiError> {
+async fn create(
+    State(node): State<AppState>,
+    Json(req): Json<CreateCluster>,
+) -> Result<impl IntoResponse, ApiError> {
     if req.name.trim().is_empty() || req.name.len() > 64 {
-        return Err(ApiError::bad_request("cluster name must be 1-64 characters"));
+        return Err(ApiError::bad_request(
+            "cluster name must be 1-64 characters",
+        ));
     }
     let s = cluster(&node)?.init(req.name.trim(), req.mode).await?;
     Ok((StatusCode::CREATED, axum::Json(s)))
@@ -82,7 +91,10 @@ struct CreateInvite {
     ttl_secs: Option<u64>,
 }
 
-async fn invite(State(node): State<AppState>, Json(req): Json<CreateInvite>) -> Result<impl IntoResponse, ApiError> {
+async fn invite(
+    State(node): State<AppState>,
+    Json(req): Json<CreateInvite>,
+) -> Result<impl IntoResponse, ApiError> {
     let ttl = req.ttl_secs.map_or(DEFAULT_INVITE_TTL, Duration::from_secs);
     if ttl > Duration::from_secs(7 * 86_400) {
         return Err(ApiError::bad_request("invites last at most 7 days"));
@@ -91,7 +103,10 @@ async fn invite(State(node): State<AppState>, Json(req): Json<CreateInvite>) -> 
     Ok((StatusCode::CREATED, axum::Json(v)))
 }
 
-async fn revoke(State(node): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+async fn revoke(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
     node.state
         .apply(Command::RevokeInvite { invite_id: id })
         .await
@@ -109,8 +124,13 @@ struct Accept {
     confirm: bool,
 }
 
-async fn accept(State(node): State<AppState>, Json(req): Json<Accept>) -> Result<impl IntoResponse, ApiError> {
-    Ok(axum::Json(cluster(&node)?.accept(&req.reply, req.confirm).await?))
+async fn accept(
+    State(node): State<AppState>,
+    Json(req): Json<Accept>,
+) -> Result<impl IntoResponse, ApiError> {
+    Ok(axum::Json(
+        cluster(&node)?.accept(&req.reply, req.confirm).await?,
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -119,14 +139,22 @@ struct Join {
     invite: String,
 }
 
-async fn join(State(node): State<AppState>, Json(req): Json<Join>) -> Result<impl IntoResponse, ApiError> {
+async fn join(
+    State(node): State<AppState>,
+    Json(req): Json<Join>,
+) -> Result<impl IntoResponse, ApiError> {
     Ok(axum::Json(cluster(&node)?.join(&req.invite).await?))
 }
 
-async fn remove(State(node): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+async fn remove(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
     let node_id = Uuid::parse_str(&id).map_err(|_| ApiError::not_found(format!("member {id}")))?;
     if node_id == node.id {
-        return Err(ApiError::bad_request("remove this node from another member"));
+        return Err(ApiError::bad_request(
+            "remove this node from another member",
+        ));
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -155,16 +183,27 @@ async fn set_voter(
         return Err(ApiError::bad_request("not in a cluster"));
     };
     if doc.mode != ClusterMode::Consensus {
-        return Err(ApiError::bad_request("voters are chosen only in consensus mode; hub-spoke has one voter, the hub"));
+        return Err(ApiError::bad_request(
+            "voters are chosen only in consensus mode; hub-spoke has one voter, the hub",
+        ));
     }
-    let voters = c.state.members()?.iter().filter(|m| m.voter && m.node_id != node_id).count() + usize::from(req.voter);
+    let voters = c
+        .state
+        .members()?
+        .iter()
+        .filter(|m| m.voter && m.node_id != node_id)
+        .count()
+        + usize::from(req.voter);
     if !matches!(voters, 1 | 3 | 5) {
         return Err(ApiError::bad_request(format!(
             "that would leave {voters} voters; use 3 or 5 (or 1 while setting up)"
         )));
     }
     node.state
-        .apply(Command::SetVoter { node_id, voter: req.voter })
+        .apply(Command::SetVoter {
+            node_id,
+            voter: req.voter,
+        })
         .await
         .map_err(NodeError::from)?;
     Ok(StatusCode::NO_CONTENT)

@@ -461,8 +461,9 @@ table inet prism {
     }
     chain output {
         type filter hook output priority filter; policy accept;
-        ip6 daddr fd12:3456:789a::/48 meta skuid != 0 drop
         meta skuid 64055 ct state new drop
+        oifname "wg-prism" ip6 daddr fd12:3456:789a::/48 icmpv6 type echo-request accept
+        ip6 daddr fd12:3456:789a::/48 meta skuid != 0 drop
     }
     chain input {
         type filter hook input priority filter; policy accept;
@@ -482,6 +483,10 @@ table inet prism {
 
 const NAT_TEXT: &str = r#"
 table ip prism-nat {
+    chain prerouting {
+        type nat hook prerouting priority dstnat; policy accept;
+    }
+
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
         oifname "eth0" ip saddr 10.20.0.0/24 masquerade

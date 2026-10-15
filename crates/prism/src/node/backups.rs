@@ -142,7 +142,7 @@ impl Node {
                 .ok_or_else(|| anyhow::anyhow!("the VM has no disks"))?
                 .pool,
         )?;
-        let staged = |target: &str| format!(".prism-backup-{}-{target}.qcow2", backup_id.simple());
+        let staged = |target: &str| format!("prism-backup-{}-{target}.qcow2", backup_id.simple());
 
         // The newest earlier backup whose checkpoint libvirt still has.
         let parent = if req.full || !running {

@@ -566,6 +566,13 @@ mod tests {
     fn golden() {
         let seed = PathBuf::from("/var/lib/prism/pools/default/.prism-seed-x.iso");
         let xml = render(&spec(), &ctx(&pools, Some(&seed))).unwrap();
+        if std::env::var_os("UPDATE_GOLDEN").is_some() {
+            std::fs::write(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/basic.xml"),
+                &xml,
+            )
+            .unwrap();
+        }
         let golden = include_str!("../../tests/golden/basic.xml");
         assert_eq!(xml, golden, "rendered:\n{xml}");
     }

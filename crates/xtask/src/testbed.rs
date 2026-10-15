@@ -846,7 +846,7 @@ fn existing_nodes() -> anyhow::Result<Vec<NodeSpec>> {
 }
 
 fn node_ip(spec: &NodeSpec) -> Option<String> {
-    let out = virsh(&["domifaddr", &spec.domain(), "--source", "lease"]).ok()?;
+    let out = virsh(&["net-dhcp-leases", NET_NAT, "--mac", &spec.mgmt_mac()]).ok()?;
     virsh::lease_ipv4(&out, &spec.mgmt_mac())
 }
 

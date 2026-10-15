@@ -68,17 +68,27 @@ pub fn volume_names(out: &str) -> Vec<String> {
         .collect()
 }
 
-/// The first IPv4 address leased to `mac`, from `virsh domifaddr`.
+/// The IPv4 address most recently leased to `mac`, from
+/// `virsh net-dhcp-leases`.
+///
+/// A node holds two leases after every boot: the initramfs DHCP client
+/// (client ID `01:<mac>`) takes one, then the real OS (a DUID client ID)
+/// takes another. Only the newest one is live, so pick the lease with the
+/// latest expiry (timestamps sort lexically).
 pub fn lease_ipv4(out: &str, mac: &str) -> Option<String> {
-    out.lines().find_map(|l| {
-        let cols: Vec<_> = l.split_whitespace().collect();
-        match cols.as_slice() {
-            [_, m, "ipv4", addr] if m.eq_ignore_ascii_case(mac) => {
-                Some(addr.split('/').next().unwrap_or(addr).to_owned())
+    out.lines()
+        .filter_map(|l| {
+            let cols: Vec<_> = l.split_whitespace().collect();
+            match cols.as_slice() {
+                [date, time, m, "ipv4", addr, ..] if m.eq_ignore_ascii_case(mac) => {
+                    let ip = addr.split('/').next().unwrap_or(addr).to_owned();
+                    Some((format!("{date} {time}"), ip))
+                }
+                _ => None,
             }
-            _ => None,
-        }
-    })
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, ip)| ip)
 }
 
 #[cfg(test)]
@@ -86,17 +96,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_domifaddr() {
-        let out = " Name       MAC address          Protocol     Address
--------------------------------------------------------------------------------
- vnet3      52:54:00:7b:00:01    ipv4         192.168.122.57/24
- -          52:54:00:7b:00:01    ipv6         fe80::1/64
+    fn picks_newest_lease() {
+        let out = " Expiry Time           MAC address         Protocol   IP address         Hostname   Client ID or DUID
+-----------------------------------------------------------------------------------------------------
+ 2026-10-15 09:17:35   52:54:00:7b:00:01   ipv4       192.168.122.3/24   tb-1       ff:56:50
+ 2026-10-15 09:17:31   52:54:00:7b:00:01   ipv4       192.168.122.5/24   -          01:52:54:00:7b:00:01
+ 2026-10-15 09:05:58   52:54:00:7b:00:02   ipv4       192.168.122.4/24   tb-2       ff:56:50
 ";
         assert_eq!(
             lease_ipv4(out, "52:54:00:7B:00:01").as_deref(),
-            Some("192.168.122.57")
+            Some("192.168.122.3")
         );
-        assert_eq!(lease_ipv4(out, "52:54:00:7b:00:02"), None);
+        assert_eq!(lease_ipv4(out, "52:54:00:7b:00:03"), None);
     }
 
     #[test]

@@ -56,9 +56,9 @@ impl Node {
             .spawn("vm.move", resource, move |ctx| async move {
                 let _guard = node.ops.lock().await;
                 let c = node.client()?;
-                let snapshot_xml = node.export_snapshots(&spec).await?;
+                let (snapshot_xml, memory) = node.export_snapshots(&spec).await?;
                 // Every file of every disk chain, base first.
-                let files: Vec<(String, String)> = spec
+                let mut files: Vec<(String, String)> = spec
                     .disks
                     .iter()
                     .filter(|d| d.device == DiskDevice::Disk)
@@ -70,6 +70,7 @@ impl Node {
                             .collect::<Vec<_>>()
                     })
                     .collect();
+                files.extend(memory);
                 let total: u64 = files
                     .iter()
                     .filter_map(|(p, v)| node.storage.get(p).ok()?.volume(v).ok())

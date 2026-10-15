@@ -11,26 +11,34 @@ use quick_xml::escape::escape;
 use uuid::Uuid;
 
 use super::{Node, Result, domain_ref};
-use crate::spec::VmSpec;
+use crate::spec::{DiskDevice, VmSpec};
 
 impl Node {
-    /// Snapshot XML for `spec`, parents first. Fails for memory snapshots,
-    /// whose RAM image is not part of the disk chain.
-    pub(super) async fn export_snapshots(&self, spec: &VmSpec) -> anyhow::Result<Vec<String>> {
+    /// Snapshot XML for `spec`, parents first, plus the saved-memory images
+    /// (`(pool, volume)`) that must travel with the disk chain.
+    pub(super) async fn export_snapshots(
+        &self,
+        spec: &VmSpec,
+    ) -> anyhow::Result<(Vec<String>, Vec<(String, String)>)> {
         let c = self.client()?;
         let mut all = Vec::new();
+        let mut memory = Vec::new();
         for snap in c.snapshots(&domain_ref(spec)).await? {
             let xml = c.snapshot_xml(&snap, op::SNAPSHOT_XML_SECURE).await?;
-            if has_memory(&xml) {
-                anyhow::bail!(
-                    "{} has a snapshot with saved memory; delete it before moving",
-                    spec.name
-                );
+            if let Some(file) = super::snapshots::memory_file(&xml) {
+                let base = file.file_name().and_then(|f| f.to_str());
+                let pool = spec.disks.iter().find(|d| d.device == DiskDevice::Disk);
+                let (Some(base), Some(pool)) = (base, pool) else {
+                    anyhow::bail!("{}: cannot locate a snapshot memory image", spec.name);
+                };
+                memory.push((pool.pool.clone(), base.to_string()));
+            } else if has_memory(&xml) {
+                anyhow::bail!("{}: snapshot memory image has no file", spec.name);
             }
             all.push((created(&xml), xml));
         }
         all.sort_by_key(|(t, _)| *t);
-        Ok(all.into_iter().map(|(_, x)| x).collect())
+        Ok((all.into_iter().map(|(_, x)| x).collect(), memory))
     }
 
     /// Redefines `xmls` on this node's (already defined) domain for `spec`,

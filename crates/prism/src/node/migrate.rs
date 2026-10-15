@@ -183,7 +183,7 @@ impl Node {
     ) -> anyhow::Result<serde_json::Value> {
         let c = self.client()?;
         let dom = domain_ref(spec);
-        let snapshot_xml = self.export_snapshots(spec).await?;
+        let (snapshot_xml, memory) = self.export_snapshots(spec).await?;
 
         // 1. Intent: the VM may run on either node until this completes.
         let mut intent = spec.clone();
@@ -221,6 +221,21 @@ impl Node {
                 backing: disk.backing.last().cloned(),
                 name: top,
             });
+        }
+
+        // Saved-memory images of snapshots travel with the chain.
+        for (mpool, mem) in &memory {
+            ctx.progress(Some(0.0), format!("copying {mem} to {}", dst.name));
+            crate::cluster::dataplane::send_volume(
+                cluster,
+                dst,
+                self.storage.get(mpool)?.open_read(mem)?,
+                &req.pool,
+                mem,
+                Arc::new(|_, _| {}),
+            )
+            .await?;
+            copied.push(mem.clone());
         }
 
         // 3. Begin on the source.
@@ -379,6 +394,11 @@ impl Node {
                 for f in disk.backing.iter().chain(disk.volume.iter()) {
                     let _ = pool.delete_volume(f);
                 }
+            }
+        }
+        for (mpool, mem) in &memory {
+            if let Ok(pool) = self.storage.get(mpool) {
+                let _ = pool.delete_volume(mem);
             }
         }
         self.remove_seed_iso(spec);

@@ -463,7 +463,7 @@ fn relative_to(path: &Path, dir: &Path) -> Option<String> {
     valid_name(name).then(|| name.to_string())
 }
 
-fn memory_file(snapshot_xml: &str) -> Option<std::path::PathBuf> {
+pub(super) fn memory_file(snapshot_xml: &str) -> Option<std::path::PathBuf> {
     use quick_xml::Reader;
     use quick_xml::events::Event;
 

@@ -150,9 +150,16 @@ impl Node {
             .tasks
             .spawn("vm.migrate", resource, move |ctx| async move {
                 let migration = ctx_id(&ctx);
+                let detached = std::sync::Mutex::new(None);
                 let res = node
-                    .run_migration(&cluster, &spec, &dst, &req, migration, &ctx)
+                    .run_migration(&cluster, &spec, &dst, &req, &ctx, &detached)
                     .await;
+                // The source domain lost its snapshot metadata for the
+                // migration; a failed attempt gives it back.
+                let stash = super::lock(&detached).take();
+                if let (Err(_), Some(xmls)) = (&res, stash) {
+                    node.restore_snapshots(&spec, &xmls).await;
+                }
                 // Whatever happened, drop the intent and the socket directory.
                 let _ = std::fs::remove_dir_all(migration_dir(migration));
                 if let Err(e) = &res {
@@ -178,9 +185,10 @@ impl Node {
         spec: &VmSpec,
         dst: &MemberDoc,
         req: &MigrateVm,
-        migration: Uuid,
         ctx: &crate::tasks::TaskCtx,
+        detached: &std::sync::Mutex<Option<Vec<String>>>,
     ) -> anyhow::Result<serde_json::Value> {
+        let migration = ctx_id(ctx);
         let c = self.client()?;
         let dom = domain_ref(spec);
         let (snapshot_xml, memory) = self.export_snapshots(spec).await?;
@@ -239,16 +247,9 @@ impl Node {
         }
 
         // 3. Begin on the source.
-        // libvirt refuses to migrate with UNDEFINE_SOURCE while the domain
-        // has snapshots; the source is undefined here after the hand-over.
-        let undefine_here = !snapshot_xml.is_empty();
         let flags = mf::LIVE
             | mf::PERSIST_DEST
-            | if undefine_here {
-                0
-            } else {
-                mf::UNDEFINE_SOURCE
-            }
+            | mf::UNDEFINE_SOURCE
             | mf::NON_SHARED_INC
             | mf::AUTO_CONVERGE
             | mf::ABORT_ON_ERROR
@@ -264,6 +265,12 @@ impl Node {
             .iter()
             .map(|t| TypedParam::string(mp::MIGRATE_DISKS, t.clone()))
             .collect();
+        // libvirt refuses to migrate a domain that has snapshots. Their XML
+        // travels in the request and is redefined on the destination.
+        if !snapshot_xml.is_empty() {
+            self.detach_snapshots(spec).await?;
+            *super::lock(detached) = Some(snapshot_xml.clone());
+        }
         let (cookie, xml) = match c.migrate_begin3(&dom, &begin_params, flags).await {
             Ok(r) => r,
             Err(e) => {
@@ -394,10 +401,6 @@ impl Node {
                     .or(fin.error)
                     .unwrap_or_else(|| "unknown error".into())
             );
-        }
-
-        if undefine_here && let Err(e) = c.undefine(&dom, super::libvirt::undefine_flags()).await {
-            tracing::warn!(vm = %spec.name, "undefining the migrated domain: {e}");
         }
 
         // 9. Ownership moves to the destination.

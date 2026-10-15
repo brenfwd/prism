@@ -124,6 +124,28 @@ impl Node {
         Ok(())
     }
 
+    /// Drops the snapshot metadata of `spec`'s domain (files stay), which
+    /// libvirt requires before a live migration.
+    pub(super) async fn detach_snapshots(&self, spec: &VmSpec) -> anyhow::Result<()> {
+        let c = self.client()?;
+        for snap in c.snapshots(&domain_ref(spec)).await? {
+            c.snapshot_delete(&snap, op::SNAPSHOT_DELETE_METADATA_ONLY)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Redefines metadata removed by [`Self::detach_snapshots`] after a
+    /// migration that did not happen.
+    pub(super) async fn restore_snapshots(&self, spec: &VmSpec, xmls: &[String]) {
+        let Some(dir) = spec.disks.first().and_then(|d| self.pool_dir(&d.pool)) else {
+            return;
+        };
+        if let Err(e) = self.import_snapshots(spec, xmls, &dir).await {
+            tracing::error!(vm = %spec.name, "restoring snapshot metadata: {e}");
+        }
+    }
+
     /// Redefines snapshots carried in a freshly adopted spec, then clears them.
     pub(super) async fn adopt_snapshots(&self, spec: &VmSpec) {
         if spec.snapshot_xml.is_empty() {

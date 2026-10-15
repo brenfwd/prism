@@ -29,9 +29,6 @@ pub struct RenderCtx<'a> {
 }
 
 pub const METADATA_NS: &str = "urn:prism:1";
-/// Target of the cloud-init seed CD-ROM; never assigned to user disks
-/// because those are named from `sda` upwards.
-pub const SEED_TARGET: &str = "sdzz";
 /// Empty PCI Express root ports so disks and NICs can be hot-plugged on `q35`.
 const SPARE_ROOT_PORTS: usize = 6;
 
@@ -126,10 +123,14 @@ pub fn nic_xml(nic: &NicSpec, indent: &str) -> String {
 }
 
 /// The seed CD-ROM, as a `<disk>` element.
-pub fn seed_xml(path: &Path, indent: &str) -> String {
+///
+/// It takes the lowest SATA name not used by the VM's CD-ROMs: libvirt
+/// derives the controller index from the name, so a high name like `sdzz`
+/// would make it create a controller for every slot below it.
+pub fn seed_xml(path: &Path, target: &str, indent: &str) -> String {
     format!(
         "{indent}<disk type='file' device='cdrom'>\n{indent}  <driver name='qemu' type='raw'/>\n\
-         {indent}  <source file='{}'/>\n{indent}  <target dev='{SEED_TARGET}' bus='sata'/>\n\
+         {indent}  <source file='{}'/>\n{indent}  <target dev='{target}' bus='sata'/>\n\
          {indent}  <readonly/>\n{indent}  <alias name='ua-cloud-init'/>\n{indent}</disk>\n",
         esc(&path.to_string_lossy())
     )
@@ -220,7 +221,7 @@ pub fn render(spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<String, String> {
         w.push_str(&disk_xml(disk, ctx, "    ")?);
     }
     if let Some(seed) = ctx.seed_iso {
-        w.push_str(&seed_xml(seed, "    "));
+        w.push_str(&seed_xml(seed, &seed_target(spec), "    "));
     }
     for nic in &spec.nics {
         w.push_str(&nic_xml(nic, "    "));
@@ -265,6 +266,14 @@ pub fn render(spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<String, String> {
     let _ = writeln!(w, "  </devices>");
     let _ = writeln!(w, "</domain>");
     Ok(x)
+}
+
+/// The SATA name for the cloud-init seed CD-ROM.
+pub fn seed_target(spec: &VmSpec) -> String {
+    (0..26 * 27)
+        .map(|i| crate::spec::disk_target("sd", i))
+        .find(|t| !spec.disks.iter().any(|d| d.target == *t))
+        .unwrap_or_default()
 }
 
 /// `(target, source file)` for each `<disk>` in domain XML, in document order.

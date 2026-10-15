@@ -48,7 +48,7 @@
     <disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
       <source file='/var/lib/prism/pools/default/.prism-seed-x.iso'/>
-      <target dev='sdzz' bus='sata'/>
+      <target dev='sdc' bus='sata'/>
       <readonly/>
       <alias name='ua-cloud-init'/>
     </disk>

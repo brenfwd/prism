@@ -32,7 +32,23 @@ pub struct RenderCtx<'a> {
 
 pub const METADATA_NS: &str = "urn:prism:1";
 /// Empty PCI Express root ports so disks and NICs can be hot-plugged on `q35`.
+/// libvirt puts the VM's own devices on the declared ports first, so these
+/// come on top of the ports those devices take (see `root_ports`).
 const SPARE_ROOT_PORTS: usize = 6;
+/// Devices libvirt adds on its own that sit behind a root port: balloon,
+/// RNG, the guest-agent serial controller and the USB controller.
+const BUILTIN_PORT_DEVICES: usize = 5;
+
+/// Root ports to declare: one per disk and NIC, the built-in devices and the
+/// hot-plug spares.
+fn root_ports(spec: &VmSpec) -> usize {
+    let disks = spec
+        .disks
+        .iter()
+        .filter(|d| d.device == DiskDevice::Disk)
+        .count();
+    disks + spec.nics.len() + BUILTIN_PORT_DEVICES + SPARE_ROOT_PORTS
+}
 
 fn esc(s: &str) -> std::borrow::Cow<'_, str> {
     escape(s)
@@ -258,7 +274,7 @@ pub fn render(spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<String, String> {
         w,
         "    <controller type='pci' index='0' model='pcie-root'/>"
     );
-    for _ in 0..SPARE_ROOT_PORTS {
+    for _ in 0..root_ports(spec) {
         let _ = writeln!(w, "    <controller type='pci' model='pcie-root-port'/>");
     }
     let _ = writeln!(

@@ -115,6 +115,12 @@ pub enum Command {
         pool: String,
         path: String,
     },
+    PutBackup {
+        backup: Box<crate::node::BackupDoc>,
+    },
+    DeleteBackup {
+        id: Uuid,
+    },
 }
 
 /// A command's outcome as it travels through the log.
@@ -320,6 +326,14 @@ fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow::Result<Out
         Command::DeleteArchiveFile { pool, path } => {
             if !d.delete(ARCHIVE_FILES, &ArchiveFileDoc::key(pool, path))? {
                 return reject(Outcome::NotFound(format!("{pool}/{path}")));
+            }
+        }
+        Command::PutBackup { backup } => {
+            d.put(crate::node::BACKUPS, &backup.id.to_string(), backup)?;
+        }
+        Command::DeleteBackup { id } => {
+            if !d.delete(crate::node::BACKUPS, &id.to_string())? {
+                return reject(Outcome::NotFound(format!("backup {id}")));
             }
         }
     }

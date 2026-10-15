@@ -201,3 +201,50 @@ async fn action(
     let action: Action = action.parse()?;
     Ok(axum::Json(node.action(parse_id(&id)?, action).await?))
 }
+
+pub fn backup_routes() -> Router<AppState> {
+    Router::new()
+        .route("/vms/{id}/backups", get(list_backups).post(create_backup))
+        .route("/backups", get(all_backups))
+        .route("/backups/{id}", get(show_backup).delete(delete_backup))
+        .route("/backups/{id}/restore", post(restore_backup))
+}
+
+async fn list_backups(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<axum::Json<Vec<crate::node::BackupDoc>>, ApiError> {
+    Ok(axum::Json(node.backups(Some(parse_id(&id)?))?))
+}
+
+async fn all_backups(State(node): State<AppState>) -> Result<axum::Json<Vec<crate::node::BackupDoc>>, ApiError> {
+    Ok(axum::Json(node.backups(None)?))
+}
+
+async fn create_backup(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::node::CreateBackup>,
+) -> Result<impl IntoResponse, ApiError> {
+    Ok(accepted(node.create_backup(parse_id(&id)?, req)?))
+}
+
+async fn show_backup(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<axum::Json<crate::node::BackupDoc>, ApiError> {
+    Ok(axum::Json(node.backup(parse_sub(&id, "backup")?)?))
+}
+
+async fn delete_backup(State(node): State<AppState>, Path(id): Path<String>) -> Result<StatusCode, ApiError> {
+    node.delete_backup(parse_sub(&id, "backup")?).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn restore_backup(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::node::RestoreBackup>,
+) -> Result<impl IntoResponse, ApiError> {
+    Ok(accepted(node.restore_backup(parse_sub(&id, "backup")?, req)?))
+}

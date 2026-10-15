@@ -1,6 +1,7 @@
 //! The local node: libvirt connection supervision, VM runtime state and the
 //! operations that act on this node's VMs.
 
+mod backups;
 mod balloon;
 mod devices;
 mod migrate;
@@ -26,6 +27,7 @@ use crate::state::{Change, Command, State, StateError};
 use crate::storage::{Storage, StorageError};
 use crate::tasks::Tasks;
 
+pub use backups::{BACKUPS, BackupDoc, CreateBackup, RestoreBackup};
 pub use balloon::BalloonStatus;
 pub use devices::{AddDisk, AddNic, UpdateDisk};
 pub use migrate::{FinishReq, MigrateVm, PrepareReq};
@@ -887,6 +889,17 @@ impl Node {
                 | Command::SetVoter { .. }
                 | Command::RemoveMember { .. } => {
                     self.bus.publish("cluster", "/cluster".into(), Op::Upsert, serde_json::Value::Null);
+                }
+                Command::PutBackup { backup } => {
+                    self.bus.publish(
+                        "backup",
+                        format!("/backups/{}", backup.id),
+                        Op::Upsert,
+                        serde_json::to_value(backup).unwrap_or_default(),
+                    );
+                }
+                Command::DeleteBackup { id } => {
+                    self.bus.publish("backup", format!("/backups/{id}"), Op::Delete, serde_json::Value::Null);
                 }
                 Command::PutArchivePool { .. } | Command::PutArchiveMember { .. } => {
                     self.bus.publish("archive.pool", "/archive/pools".into(), Op::Upsert, serde_json::Value::Null);

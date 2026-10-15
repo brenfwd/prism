@@ -349,6 +349,46 @@ impl Pool {
         self.volume(name)
     }
 
+    /// Copies `src` with its whole backing chain flattened into a new
+    /// qcow2 `dst` (our own VM disks; not for untrusted imports).
+    pub async fn copy_volume_flatten(&self, qemu_img: &Path, src: &str, dst: &str) -> Result<(), StorageError> {
+        let fmt = self.image_format(src).ok_or_else(|| StorageError::NoVolume(src.into()))?;
+        // Every backing layer must be inside this pool.
+        self.backing_chain(src)?;
+        drop(self.create_exclusive(dst)?);
+        let res = run_qemu_img(qemu_img, &["convert", "-q", "-f", &fmt, "-O", "qcow2"], &[self.path.join(src), self.path.join(dst)]).await;
+        if let Err(e) = res {
+            let _ = rustix::fs::unlinkat(&self.root, dst, AtFlags::empty());
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Builds `dst` from backup layers (hidden partial files, base first):
+    /// each incremental is linked onto the one before, then the top is
+    /// flattened into a fresh image.
+    pub async fn flatten_layers(&self, qemu_img: &Path, layers: &[String], dst: &str, format: &str) -> Result<Volume, StorageError> {
+        Self::check(dst)?;
+        let (first, rest) = layers.split_first().ok_or_else(|| StorageError::Invalid("no backup layers".into()))?;
+        let mut below = first.clone();
+        for layer in rest {
+            run_qemu_img(
+                qemu_img,
+                &["rebase", "-q", "-u", "-f", "qcow2", "-F", "qcow2", "-b", &self.path.join(&below).to_string_lossy()],
+                &[self.path.join(layer)],
+            )
+            .await?;
+            below.clone_from(layer);
+        }
+        drop(self.create_exclusive(dst)?);
+        let res = run_qemu_img(qemu_img, &["convert", "-q", "-f", "qcow2", "-O", format], &[self.path.join(&below), self.path.join(dst)]).await;
+        if let Err(e) = res {
+            let _ = rustix::fs::unlinkat(&self.root, dst, AtFlags::empty());
+            return Err(e);
+        }
+        self.volume(dst)
+    }
+
     /// Grows a volume to `size` bytes. Shrinking is refused.
     pub async fn resize_volume(
         &self,

@@ -31,6 +31,7 @@ pub fn router(node: AppState) -> Router {
         .route("/nodes", get(list_nodes))
         .route("/nodes/{node}", get(get_node))
         .merge(vms::routes())
+        .merge(vms::backup_routes())
         .merge(pools::routes())
         .merge(console::routes())
         .merge(tasks::routes())

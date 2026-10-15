@@ -97,6 +97,23 @@ fn volume_kind(name: &str) -> &'static str {
     }
 }
 
+/// Creates `path` and any missing parents as root-owned `0711`: the qemu
+/// uid can reach image files (which libvirt relabels) but cannot list or
+/// write the directories. Explicit because Prism runs with `umask 077`.
+fn create_traversable(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let missing: Vec<&Path> = path.ancestors().take_while(|p| !p.exists()).collect();
+    for dir in missing.into_iter().rev() {
+        match std::fs::create_dir(dir) {
+            Ok(()) => std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o711))?,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 /// Reads the virtual size from a qcow2 header. Display only: image
 /// metadata is untrusted and never used to make decisions.
 fn qcow2_virtual_size(fd: &OwnedFd) -> Option<u64> {
@@ -113,7 +130,7 @@ impl Pool {
         format: &str,
         static_config: bool,
     ) -> Result<Self, StorageError> {
-        std::fs::create_dir_all(path)?;
+        create_traversable(path)?;
         let root = rustix::fs::open(
             path,
             OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
@@ -450,6 +467,18 @@ mod tests {
         assert_eq!(pool.volumes().unwrap().len(), 1);
         pool.delete_volume("a.iso").unwrap();
         assert!(pool.volumes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn new_pool_dirs_are_traversable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a/b");
+        Pool::open("p", &path, "qcow2", true).unwrap();
+        for p in [dir.path().join("a"), path] {
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o711, "{}", p.display());
+        }
     }
 
     #[test]

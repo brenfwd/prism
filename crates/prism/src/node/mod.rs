@@ -255,7 +255,13 @@ pub struct Node {
 pub struct RuntimeSnapshot {
     pub node: NodeView,
     pub vms: HashMap<Uuid, VmRuntime>,
+    /// Recent tasks; absent from peers that predate cluster-wide tasks.
+    #[serde(default)]
+    pub tasks: Vec<crate::tasks::Task>,
 }
+
+/// How many recent tasks a runtime snapshot carries.
+const SNAPSHOT_TASKS: usize = 500;
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -403,6 +409,7 @@ impl Node {
         RuntimeSnapshot {
             node: self.view(),
             vms: lock(&self.runtime).clone(),
+            tasks: self.tasks.list(SNAPSHOT_TASKS).unwrap_or_default(),
         }
     }
 
@@ -422,6 +429,7 @@ impl Node {
         }
         rt.extend(snap.vms);
         drop(rt);
+        self.tasks.apply_remote_snapshot(node, snap.tasks);
         lock(&self.remote_nodes).insert(node, snap.node);
     }
 
@@ -443,6 +451,11 @@ impl Node {
             ("node.status", Some(id)) if id != self.id => {
                 if let Ok(v) = serde_json::from_value::<NodeView>(ev.payload.clone()) {
                     lock(&self.remote_nodes).insert(id, v);
+                }
+            }
+            ("task.progress", _) => {
+                if let Ok(t) = serde_json::from_value(ev.payload.clone()) {
+                    self.tasks.apply_remote_event(t);
                 }
             }
             _ => {}

@@ -33,7 +33,8 @@ async fn list(
     State(node): State<AppState>,
     Query(q): Query<ListQuery>,
 ) -> Result<axum::Json<Vec<Task>>, ApiError> {
-    Ok(axum::Json(node.tasks.list(q.limit.min(1000))?))
+    // Every node's tasks: peers' come from their event streams.
+    Ok(axum::Json(node.tasks.list_cluster(q.limit.min(1000))?))
 }
 
 async fn show(

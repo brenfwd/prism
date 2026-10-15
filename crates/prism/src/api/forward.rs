@@ -25,6 +25,8 @@ fn owner(node: &Node, path: &str, query: Option<&str>) -> Option<Uuid> {
             .split('&')
             .find_map(|kv| kv.strip_prefix("node="))
             .and_then(|v| Uuid::parse_str(v).ok())?,
+        // A peer's task, known from its event stream.
+        (Some("tasks"), Some(id)) => node.tasks.remote_owner(Uuid::parse_str(id).ok()?)?,
         (Some("nodes"), Some(id)) if id != "local" && parts.next().is_some() => {
             Uuid::parse_str(id).ok()?
         }

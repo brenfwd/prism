@@ -13,6 +13,10 @@ use uuid::Uuid;
 use crate::db::NodeDb;
 use crate::events::{Bus, Op, rfc3339};
 
+mod remote;
+
+use remote::RemoteTasks;
+
 /// Finished tasks are kept this long.
 const RETENTION: Duration = Duration::from_secs(7 * 86_400);
 /// Progress events are rate-limited to this interval per task.
@@ -51,6 +55,8 @@ struct Inner {
     bus: Arc<Bus>,
     node: Uuid,
     running: Mutex<HashMap<Uuid, CancellationToken>>,
+    /// Other nodes' tasks, from their event streams.
+    remote: RemoteTasks,
 }
 
 /// The node's task registry.
@@ -100,6 +106,7 @@ impl Tasks {
             bus,
             node,
             running: Mutex::default(),
+            remote: RemoteTasks::default(),
         });
         if let Ok(tasks) = inner.db.tasks::<Task>(1000) {
             for mut t in tasks.into_iter().filter(|t| t.state == TaskState::Running) {
@@ -121,6 +128,39 @@ impl Tasks {
 
     pub fn get(&self, id: Uuid) -> anyhow::Result<Option<Task>> {
         self.inner.db.task(&id.to_string())
+    }
+
+    /// The newest `limit` tasks across the cluster: this node's, plus every
+    /// peer's as last heard from its event stream.
+    pub fn list_cluster(&self, limit: usize) -> anyhow::Result<Vec<Task>> {
+        let mut all = self.list(limit)?;
+        all.extend(self.inner.remote.all());
+        all.sort_unstable_by(|a, b| (&b.created, b.id).cmp(&(&a.created, a.id)));
+        all.truncate(limit);
+        Ok(all)
+    }
+
+    /// The peer that runs task `id`, if it is known and not this node.
+    pub fn remote_owner(&self, id: Uuid) -> Option<Uuid> {
+        self.inner
+            .remote
+            .get(id)
+            .map(|t| t.node)
+            .filter(|&n| n != self.inner.node)
+    }
+
+    /// Replaces the cached tasks of peer `node` with its snapshot.
+    pub fn apply_remote_snapshot(&self, node: Uuid, tasks: Vec<Task>) {
+        if node != self.inner.node {
+            self.inner.remote.replace(node, tasks);
+        }
+    }
+
+    /// Caches a peer's task from its `task.progress` event.
+    pub fn apply_remote_event(&self, task: Task) {
+        if task.node != self.inner.node {
+            self.inner.remote.upsert(task);
+        }
     }
 
     /// Requests cancellation. Returns false if the task is not running here.
@@ -293,5 +333,31 @@ mod tests {
         assert!(t.cancel(task.id));
         assert_eq!(wait(&t, task.id).await.state, TaskState::Cancelled);
         assert!(!t.cancel(task.id));
+    }
+
+    #[tokio::test]
+    async fn cluster_view() {
+        let t = tasks();
+        let local = t.spawn("x", "/r".into(), |_| async { Ok(serde_json::Value::Null) });
+        wait(&t, local.id).await;
+        let peer = Uuid::from_u128(7);
+        let remote = Task {
+            id: Uuid::now_v7(),
+            node: peer,
+            created: "9999-01-01T00:00:00Z".into(),
+            ..local.clone()
+        };
+        t.apply_remote_snapshot(peer, vec![remote.clone()]);
+        // Our own tasks are never cached as remote.
+        t.apply_remote_event(Task {
+            id: Uuid::now_v7(),
+            ..local.clone()
+        });
+
+        assert_eq!(t.remote_owner(remote.id), Some(peer));
+        assert_eq!(t.remote_owner(local.id), None);
+        let ids: Vec<Uuid> = t.list_cluster(10).unwrap().iter().map(|t| t.id).collect();
+        assert_eq!(ids, [remote.id, local.id]);
+        assert_eq!(t.list_cluster(1).unwrap().len(), 1);
     }
 }

@@ -119,6 +119,8 @@ async fn apply_switch(nl: &Netlink, sw: &SwitchPlan) -> anyhow::Result<()> {
     if let Some(a) = sw.address {
         nl.ensure_address(&sw.bridge, IpNet::V4(a)).await?;
     }
+    nl.prune_v4_addresses(&sw.bridge, sw.address.map(IpNet::V4))
+        .await?;
     if let Some(v) = &sw.vxlan {
         nl.ensure_vxlan(
             &v.name,

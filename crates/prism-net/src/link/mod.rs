@@ -304,4 +304,38 @@ impl Netlink {
             .await
             .map_err(|e| Error::rtnl(format!("add address {addr} to {name}"), e))
     }
+
+    /// Removes every IPv4 address on a link except `keep`, so a re-addressed bridge drops its old gateway.
+    pub async fn prune_v4_addresses(&self, name: &str, keep: Option<IpNet>) -> Result<()> {
+        use netlink_packet_route::address::AddressAttribute;
+        let index = self.link_index(name).await?;
+        let msgs: Vec<_> = self
+            .route
+            .address()
+            .get()
+            .set_link_index_filter(index)
+            .execute()
+            .try_collect()
+            .await
+            .map_err(|e| Error::rtnl(format!("list addresses of {name}"), e))?;
+        for msg in msgs {
+            let addr = msg.attributes.iter().find_map(|a| match a {
+                AddressAttribute::Address(ip) if ip.is_ipv4() => Some(*ip),
+                _ => None,
+            });
+            let Some(ip) = addr else { continue };
+            let wanted =
+                keep.is_some_and(|k| k.addr() == ip && k.prefix_len() == msg.header.prefix_len);
+            if wanted {
+                continue;
+            }
+            self.route
+                .address()
+                .del(msg)
+                .execute()
+                .await
+                .map_err(|e| Error::rtnl(format!("delete address {ip} from {name}"), e))?;
+        }
+        Ok(())
+    }
 }

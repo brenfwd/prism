@@ -409,10 +409,26 @@ impl Node {
                 }
             }
         }
-        if report.failed == 0 {
-            self.archive_set_member_state(node, name, MemberState::Disabled)
-                .await?;
+        if report.failed > 0 {
+            // The member stays draining; running the drain again retries.
+            anyhow::bail!(
+                "drain incomplete: {} file(s) could not be moved off {name} ({} moved); \
+                 the member stays draining, fix the cause and drain again",
+                report.failed,
+                report.copied
+            );
         }
+        let left = self
+            .state
+            .archive_files(&pool, "")?
+            .iter()
+            .filter(|f| f.replicas.contains(&here))
+            .count();
+        if left > 0 {
+            anyhow::bail!("drain incomplete: {left} file(s) still have a replica on {name}");
+        }
+        self.archive_set_member_state(node, name, MemberState::Disabled)
+            .await?;
         Ok(report)
     }
 

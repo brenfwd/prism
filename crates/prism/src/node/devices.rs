@@ -70,9 +70,18 @@ fn valid_mac(mac: &str) -> bool {
 }
 
 impl Node {
+    fn nic_xml(&self, nic: &crate::spec::NicSpec) -> Result<String> {
+        render::nic_xml(nic, &self.network_bridges(), "").map_err(NodeError::Invalid)
+    }
+
     fn device_xml(&self, disk: &DiskSpec) -> Result<String> {
         let pool = |p: &str| self.pool_loc(p);
-        render::disk_xml(disk, &self.render_ctx(&pool, None), "").map_err(NodeError::Invalid)
+        render::disk_xml(
+            disk,
+            &self.render_ctx(&pool, None, &self.network_bridges()),
+            "",
+        )
+        .map_err(NodeError::Invalid)
     }
 
     /// Persists `spec` and, when the VM runs, applies `live` to it.
@@ -322,7 +331,7 @@ impl Node {
         };
         let mut spec = old.clone();
         spec.nics.push(nic.clone());
-        let xml = render::nic_xml(&nic, "");
+        let xml = self.nic_xml(&nic)?;
         self.change_devices(&old, spec, |c, dom| async move {
             c.attach_device(&dom, &xml, op::AFFECT_LIVE).await?;
             Ok(true)
@@ -341,7 +350,7 @@ impl Node {
             .ok_or_else(|| NodeError::NotFound(format!("nic {nic_id}")))?;
         let mut spec = old.clone();
         spec.nics.retain(|n| n.id != nic_id);
-        let xml = render::nic_xml(&nic, "");
+        let xml = self.nic_xml(&nic)?;
         let mut events = self.subscribe_domain_events();
         let alias = format!("ua-{nic_id}");
         self.change_devices(&old, spec, |c, dom| async move {

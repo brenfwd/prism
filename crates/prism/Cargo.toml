@@ -18,7 +18,7 @@ bytes = "1.12.1"
 ciborium = "0.2.2"
 clap = { version = "4.6.7", features = ["derive"] }
 futures = "0.3.34"
-ipnet = "2.12.2"
+ipnet = { version = "2.12.2", features = ["serde"] }
 mime_guess = "2.0.5"
 openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 prism-cluster = { version = "0.1.0", path = "../prism-cluster" }

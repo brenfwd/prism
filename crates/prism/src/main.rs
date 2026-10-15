@@ -7,6 +7,7 @@ mod cluster;
 mod config;
 mod db;
 mod events;
+mod network;
 mod node;
 mod render;
 mod spec;

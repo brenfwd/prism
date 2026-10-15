@@ -32,7 +32,7 @@ pub fn mesh(dir: &Path) -> Arc<dyn Mesh> {
 
 /// The uid QEMU runs as, so the boundary rules can stop it opening
 /// connections into the mesh.
-fn qemu_uid() -> Option<u32> {
+pub(crate) fn qemu_uid() -> Option<u32> {
     let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
     passwd.lines().find_map(|l| {
         let f: Vec<&str> = l.split(':').collect();

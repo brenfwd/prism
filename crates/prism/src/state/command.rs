@@ -6,6 +6,7 @@ use uuid::Uuid;
 use super::{PoolDoc, StateError};
 use crate::archive::{ArchiveFileDoc, ArchiveMemberDoc, ArchivePoolDoc};
 use crate::cluster::model::{ClusterDoc, InviteDoc, MemberDoc, MemberState};
+use crate::network::NetworkDoc;
 use crate::spec::VmSpec;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -81,6 +82,17 @@ pub enum Command {
     },
     DeleteBackup {
         id: Uuid,
+    },
+    /// Creates or updates a network. A new one gets a VNI and a gateway on
+    /// every member.
+    PutNetwork {
+        network: Box<NetworkDoc>,
+        now: i64,
+    },
+    /// Deletes an unused network; its VNI cools down before reuse.
+    DeleteNetwork {
+        id: Uuid,
+        now: i64,
     },
 }
 

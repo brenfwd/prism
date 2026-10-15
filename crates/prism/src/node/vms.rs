@@ -10,8 +10,8 @@ use super::{
 };
 use crate::render;
 use crate::spec::{
-    BalloonMode, CpuSpec, CreateVm, DiskDevice, DiskSpec, MAX_VCPUS, MemorySpec, NicNetwork,
-    NicSpec, UpdateVm, VmSpec, random_mac,
+    BalloonMode, CpuSpec, CreateVm, DiskDevice, DiskSpec, MAX_VCPUS, MemorySpec, NicSpec, UpdateVm,
+    VmSpec, random_mac,
 };
 
 impl Node {
@@ -93,7 +93,7 @@ impl Node {
             nics: vec![NicSpec {
                 id: Uuid::new_v4(),
                 mac: random_mac(),
-                network: req.network.unwrap_or(NicNetwork::User),
+                network: self.default_nic_network(req.network),
                 boot_order: None,
             }],
             node: self.id,
@@ -111,7 +111,12 @@ impl Node {
             if let Some(m) = render::machine_type(&xml) {
                 spec.machine = m;
             }
-            self.put_spec(&spec, None).await
+            self.put_spec(&spec, None).await?;
+            // The state machine assigned the NIC leases.
+            if let Some(stored) = self.state.vm(spec.id)? {
+                spec = stored;
+            }
+            Ok(())
         }
         .await;
         if let Err(e) = res {

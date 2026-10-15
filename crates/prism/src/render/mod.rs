@@ -26,6 +26,8 @@ pub struct RenderCtx<'a> {
     pub pool: &'a dyn Fn(&str) -> Option<PoolLoc>,
     /// A cloud-init seed ISO to attach as an extra read-only CD-ROM.
     pub seed_iso: Option<&'a Path>,
+    /// The bridge of each Prism network, for NICs on one.
+    pub bridges: &'a std::collections::HashMap<uuid::Uuid, String>,
 }
 
 pub const METADATA_NS: &str = "urn:prism:1";
@@ -95,18 +97,29 @@ pub fn disk_xml(disk: &DiskSpec, ctx: &RenderCtx<'_>, indent: &str) -> Result<St
 }
 
 /// The `<interface>` element for one NIC.
-pub fn nic_xml(nic: &NicSpec, indent: &str) -> String {
+pub fn nic_xml(
+    nic: &NicSpec,
+    bridges: &std::collections::HashMap<uuid::Uuid, String>,
+    indent: &str,
+) -> Result<String, String> {
     let mut x = String::new();
     let w = &mut x;
+    let tap = |w: &mut String, bridge: &str| {
+        let _ = writeln!(w, "{indent}<interface type='bridge'>");
+        let _ = writeln!(w, "{indent}  <source bridge='{}'/>", esc(bridge));
+        let _ = writeln!(
+            w,
+            "{indent}  <target dev='pn{}'/>",
+            &nic.id.simple().to_string()[..8]
+        );
+    };
     match &nic.network {
-        NicNetwork::Bridge { bridge } => {
-            let _ = writeln!(w, "{indent}<interface type='bridge'>");
-            let _ = writeln!(w, "{indent}  <source bridge='{}'/>", esc(bridge));
-            let _ = writeln!(
-                w,
-                "{indent}  <target dev='pn{}'/>",
-                &nic.id.simple().to_string()[..8]
-            );
+        NicNetwork::Bridge { bridge } => tap(w, bridge),
+        NicNetwork::Network { network, .. } => {
+            let bridge = bridges
+                .get(network)
+                .ok_or_else(|| format!("unknown network {network}"))?;
+            tap(w, bridge);
         }
         NicNetwork::User => {
             let _ = writeln!(w, "{indent}<interface type='user'>");
@@ -119,7 +132,7 @@ pub fn nic_xml(nic: &NicSpec, indent: &str) -> String {
     }
     let _ = writeln!(w, "{indent}  <alias name='ua-{}'/>", nic.id);
     let _ = writeln!(w, "{indent}</interface>");
-    x
+    Ok(x)
 }
 
 /// The seed CD-ROM, as a `<disk>` element.
@@ -224,7 +237,7 @@ pub fn render(spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<String, String> {
         w.push_str(&seed_xml(seed, &seed_target(spec), "    "));
     }
     for nic in &spec.nics {
-        w.push_str(&nic_xml(nic, "    "));
+        w.push_str(&nic_xml(nic, ctx.bridges, "    ")?);
     }
     // Declared first so libvirt numbers the spare ports from 1.
     let _ = writeln!(
@@ -511,14 +524,18 @@ mod tests {
             uefi_loader: None,
             pool: f,
             seed_iso: seed,
+            bridges: &NO_BRIDGES,
         }
     }
+
+    static NO_BRIDGES: std::sync::LazyLock<std::collections::HashMap<uuid::Uuid, String>> =
+        std::sync::LazyLock::new(Default::default);
 
     #[test]
     fn golden() {
         let seed = PathBuf::from("/var/lib/prism/pools/default/.prism-seed-x.iso");
         let xml = render(&spec(), &ctx(&pools, Some(&seed))).unwrap();
-        let golden = include_str!("../tests/golden/basic.xml");
+        let golden = include_str!("../../tests/golden/basic.xml");
         assert_eq!(xml, golden, "rendered:\n{xml}");
     }
 

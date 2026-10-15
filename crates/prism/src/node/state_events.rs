@@ -98,6 +98,22 @@ impl Node {
                         serde_json::Value::Null,
                     );
                 }
+                Command::PutNetwork { network, .. } => {
+                    self.bus.publish(
+                        "network",
+                        format!("/networks/{}", network.id),
+                        Op::Upsert,
+                        serde_json::Value::Null,
+                    );
+                }
+                Command::DeleteNetwork { id, .. } => {
+                    self.bus.publish(
+                        "network",
+                        format!("/networks/{id}"),
+                        Op::Delete,
+                        serde_json::Value::Null,
+                    );
+                }
                 Command::PutArchivePool { .. } | Command::PutArchiveMember { .. } => {
                     self.bus.publish(
                         "archive.pool",

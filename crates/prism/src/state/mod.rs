@@ -9,6 +9,7 @@
 mod apply;
 mod backend;
 mod command;
+mod networks;
 #[cfg(test)]
 mod tests;
 
@@ -30,6 +31,7 @@ use crate::cluster::model::{
     CLUSTER, ClusterDoc, INVITES, InviteDoc, MEMBERS, MemberDoc, TOMBSTONES, TombstoneDoc,
 };
 use crate::db::StateDb;
+use crate::network::{NETWORKS, NetworkDoc, RELEASED_VNIS, ReleasedVni};
 use crate::spec::VmSpec;
 use apply::apply_command;
 
@@ -237,5 +239,18 @@ impl State {
             .into_iter()
             .filter(|f| f.pool == pool && f.path.starts_with(prefix))
             .collect())
+    }
+
+    pub fn networks(&self) -> anyhow::Result<Vec<NetworkDoc>> {
+        let mut n: Vec<NetworkDoc> = self.db.list(NETWORKS)?;
+        n.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(n)
+    }
+
+    /// Whether networks were ever created here (any exist, or one was
+    /// deleted recently), so the default network is seeded only once.
+    pub fn networks_used(&self) -> anyhow::Result<bool> {
+        Ok(!self.db.list::<NetworkDoc>(NETWORKS)?.is_empty()
+            || !self.db.list::<ReleasedVni>(RELEASED_VNIS)?.is_empty())
     }
 }

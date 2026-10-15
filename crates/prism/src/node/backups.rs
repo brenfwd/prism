@@ -351,6 +351,7 @@ impl Node {
                 spec.migrating = None;
                 for nic in &mut spec.nics {
                     nic.mac = random_mac();
+                    nic.network.clear_lease();
                 }
                 for d in &mut spec.disks {
                     d.pool.clone_from(&req.pool);

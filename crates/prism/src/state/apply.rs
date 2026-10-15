@@ -2,6 +2,7 @@
 
 use uuid::Uuid;
 
+use super::networks;
 use super::{CLUSTER_ID, Command, Outcome, POOLS, PoolDoc, VMS};
 use crate::archive::{
     ARCHIVE_FILES, ARCHIVE_MEMBERS, ARCHIVE_POOLS, ArchiveFileDoc, ArchivePoolDoc,
@@ -39,7 +40,11 @@ pub(super) fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow:
                     vm.name
                 )));
             }
-            d.put(VMS, &vm.id.to_string(), vm)?;
+            let mut vm = vm.clone();
+            if let Err(e) = networks::assign_leases(d, &mut vm)? {
+                return Ok(Outcome::Conflict(e));
+            }
+            d.put(VMS, &vm.id.to_string(), &vm)?;
         }
         Command::DeleteVm { id } => {
             if !d.delete(VMS, &id.to_string())? {
@@ -114,6 +119,7 @@ pub(super) fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow:
             if let Err(e) = admit(d, member, invite_id, *now)? {
                 return Ok(Outcome::Conflict(e.to_string()));
             }
+            networks::add_gateways(d, member.node_id)?;
         }
         Command::SetMemberState { node_id, state } => {
             let Some(mut m) = d.get::<MemberDoc>(MEMBERS, &node_id.to_string())? else {
@@ -157,6 +163,7 @@ pub(super) fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow:
             {
                 d.delete(POOLS, &PoolDoc::key(pool.node, &pool.name))?;
             }
+            networks::remove_gateways(d, *node_id)?;
         }
         Command::PutArchivePool { pool } => {
             d.put(ARCHIVE_POOLS, &pool.name, pool)?;
@@ -204,6 +211,10 @@ pub(super) fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow:
                 return Ok(Outcome::NotFound(format!("backup {id}")));
             }
         }
+        Command::PutNetwork { network, now } => {
+            return networks::put_network(d, local, network, *now);
+        }
+        Command::DeleteNetwork { id, now } => return networks::delete_network(d, *id, *now),
     }
     Ok(Outcome::Ok)
 }

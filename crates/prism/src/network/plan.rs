@@ -1,0 +1,365 @@
+//! What one node's data plane should look like, computed from replicated
+//! state. Pure, so it is tested without netlink.
+
+use std::collections::{BTreeMap, HashMap};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::time::Duration;
+
+use ipnet::Ipv4Net;
+use prism_net::MacAddr;
+use prism_net::dhcp::Lease;
+use prism_net::link::VxlanFdb;
+use uuid::Uuid;
+
+use super::firewall::GuestRules;
+use super::{NetworkDoc, NetworkKind, switch_mtu};
+use crate::cluster::model::MemberDoc;
+use crate::spec::{NicNetwork, VmSpec};
+
+const LEASE_TIME: Duration = Duration::from_secs(12 * 3600);
+
+/// Everything the plan depends on.
+#[derive(Debug, Clone)]
+pub struct PlanInput<'a> {
+    pub node: Uuid,
+    pub networks: &'a [NetworkDoc],
+    pub vms: &'a [VmSpec],
+    pub members: &'a [MemberDoc],
+    /// The cluster's `wg-prism` MTU; `None` while standalone.
+    pub wg_mtu: Option<u16>,
+    /// This node's uplink (default-route interface), for masquerade.
+    pub uplink: Option<String>,
+}
+
+/// One network on this node.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SwitchPlan {
+    pub network: Uuid,
+    pub bridge: String,
+    pub mtu: u32,
+    /// This node's address on the bridge, with the subnet's prefix.
+    pub address: Option<Ipv4Net>,
+    /// The VXLAN device and its peers; `None` while standalone.
+    pub vxlan: Option<VxlanPlan>,
+    /// DHCP leases for NICs of VMs on this node (empty when DHCP is off).
+    pub leases: HashMap<MacAddr, Lease>,
+    pub dhcp: bool,
+    /// The zone origin, `<network>.prism`.
+    pub domain: String,
+    /// Every VM on the network, by name.
+    pub hosts: HashMap<String, Vec<IpAddr>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VxlanPlan {
+    pub name: String,
+    pub vni: u32,
+    pub local: Ipv6Addr,
+    pub fdb: VxlanFdb,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NodePlan {
+    pub switches: Vec<SwitchPlan>,
+    pub firewall: GuestRules,
+    /// Some network masquerades here, so IPv4 forwarding must be on.
+    pub forwarding: bool,
+}
+
+/// Whether `vm` is (or is about to be) running on `node`.
+fn runs_on(vm: &VmSpec, node: Uuid) -> bool {
+    vm.node == node || vm.migrating.is_some_and(|m| m.dst == node)
+}
+
+/// The tap libvirt creates for a NIC (see `render`).
+pub fn tap_name(nic: Uuid) -> String {
+    format!("pn{}", &nic.simple().to_string()[..8])
+}
+
+pub fn plan(input: &PlanInput<'_>) -> NodePlan {
+    let mesh: BTreeMap<Uuid, Ipv6Addr> = input
+        .members
+        .iter()
+        .map(|m| (m.node_id, m.mesh_addr))
+        .collect();
+    let local_mesh = mesh.get(&input.node).copied();
+    let mtu = switch_mtu(input.wg_mtu);
+    let mut out = NodePlan::default();
+    for net in input.networks {
+        let gateway = net.gateways.get(&input.node).copied();
+        let address = gateway.map(|g| Ipv4Net::new_assert(g, net.subnet.prefix_len()));
+        let vxlan = local_mesh.map(|local| VxlanPlan {
+            name: net.vxlan(),
+            vni: net.vni,
+            local,
+            fdb: VxlanFdb {
+                flood: mesh
+                    .iter()
+                    .filter(|(n, _)| **n != input.node)
+                    .map(|(_, a)| IpAddr::V6(*a))
+                    .collect(),
+                macs: BTreeMap::new(),
+            },
+        });
+        let mut sw = SwitchPlan {
+            network: net.id,
+            bridge: net.bridge(),
+            mtu,
+            address,
+            vxlan,
+            leases: HashMap::new(),
+            dhcp: net.dhcp,
+            domain: net.domain(),
+            hosts: HashMap::new(),
+        };
+        for vm in input.vms {
+            for nic in &vm.nics {
+                let NicNetwork::Network {
+                    network,
+                    ipv4,
+                    egress,
+                } = &nic.network
+                else {
+                    continue;
+                };
+                if *network != net.id {
+                    continue;
+                }
+                let Ok(mac) = nic.mac.parse::<MacAddr>() else {
+                    continue;
+                };
+                if let Some(ip) = ipv4 {
+                    sw.hosts
+                        .entry(vm.name.clone())
+                        .or_default()
+                        .push(IpAddr::V4(*ip));
+                }
+                if runs_on(vm, input.node) {
+                    out.firewall.ports.push(prism_net::nft::GuestPort {
+                        tap: tap_name(nic.id),
+                        mac,
+                        ipv4: *ipv4,
+                    });
+                    if let (Some(ip), true) = (ipv4, net.dhcp) {
+                        sw.leases
+                            .insert(mac, lease(net, vm, *ip, *egress, gateway, mtu));
+                    }
+                } else if let (Some(v), Some(addr)) = (&mut sw.vxlan, mesh.get(&vm.node)) {
+                    v.fdb.macs.insert(mac, IpAddr::V6(*addr));
+                }
+            }
+        }
+        if let Some(g) = gateway {
+            out.firewall.switches.push(prism_net::nft::SwitchServices {
+                bridge: sw.bridge.clone(),
+                vip: g,
+            });
+        }
+        match (net.kind, &input.uplink) {
+            (NetworkKind::Nat, Some(uplink)) => {
+                out.forwarding = true;
+                out.firewall.nat.push(prism_net::nft::NatRule {
+                    source: net.subnet,
+                    egress: uplink.clone(),
+                });
+                out.firewall
+                    .routed
+                    .push((sw.bridge.clone(), Some(uplink.clone())));
+            }
+            _ => out.firewall.routed.push((sw.bridge.clone(), None)),
+        }
+        out.switches.push(sw);
+    }
+    out.firewall.blocked = blocked_destinations(input.members);
+    out
+}
+
+fn lease(
+    net: &NetworkDoc,
+    vm: &VmSpec,
+    ip: Ipv4Addr,
+    egress: Option<Uuid>,
+    gateway: Option<Ipv4Addr>,
+    mtu: u32,
+) -> Lease {
+    Lease {
+        ip,
+        prefix_len: net.subnet.prefix_len(),
+        router: net.router_for(vm.node, egress),
+        dns: gateway.into_iter().collect(),
+        domain: Some(net.domain()),
+        hostname: Some(vm.name.clone()),
+        mtu: u16::try_from(mtu).ok(),
+        routes: Vec::new(),
+        lease_time: LEASE_TIME,
+    }
+}
+
+/// Guests never reach the tailnet or another member's underlay addresses
+/// through masquerade.
+fn blocked_destinations(members: &[MemberDoc]) -> Vec<Ipv4Net> {
+    let mut out = vec![super::ipam::CGNAT];
+    for m in members {
+        for ep in &m.endpoints {
+            let host = ep.rsplit_once(':').map_or(ep.as_str(), |(h, _)| h);
+            if let Ok(ip) = host.parse::<Ipv4Addr>()
+                && !out.iter().any(|n| n.contains(&ip))
+            {
+                out.push(Ipv4Net::from(ip));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cluster::model::MemberState;
+    use crate::spec::NicSpec;
+    use crate::spec::tests::sample_spec;
+
+    const A: Uuid = Uuid::from_u128(1);
+    const B: Uuid = Uuid::from_u128(2);
+
+    fn net() -> NetworkDoc {
+        NetworkDoc {
+            id: Uuid::from_u128(10),
+            name: "lab".into(),
+            kind: NetworkKind::Nat,
+            vni: 100_000,
+            subnet: "10.88.0.0/24".parse().unwrap(),
+            gateways: BTreeMap::from([
+                (A, Ipv4Addr::new(10, 88, 0, 1)),
+                (B, Ipv4Addr::new(10, 88, 0, 2)),
+            ]),
+            egress: None,
+            dhcp: true,
+            created: 0,
+        }
+    }
+
+    fn member(id: Uuid, raft: u64) -> MemberDoc {
+        MemberDoc {
+            node_id: id,
+            raft_id: raft,
+            name: format!("n{raft}"),
+            wg_pubkey: String::new(),
+            mesh_addr: format!("fd00::{raft}").parse().unwrap(),
+            endpoints: vec![format!("192.168.1.{raft}:51820")],
+            state: MemberState::Active,
+            voter: raft == 1,
+            version: String::new(),
+            joined: 0,
+        }
+    }
+
+    fn vm(name: &str, node: Uuid, mac: &str, ip: u8, egress: Option<Uuid>) -> VmSpec {
+        let mut v = sample_spec(name);
+        v.node = node;
+        v.nics = vec![NicSpec {
+            id: Uuid::new_v4(),
+            mac: mac.into(),
+            network: NicNetwork::Network {
+                network: Uuid::from_u128(10),
+                ipv4: Some(Ipv4Addr::new(10, 88, 0, ip)),
+                egress,
+            },
+            boot_order: None,
+        }];
+        v
+    }
+
+    #[test]
+    fn standalone() {
+        let nets = [net()];
+        let vms = [vm("web", A, "52:54:00:00:00:01", 3, None)];
+        let p = plan(&PlanInput {
+            node: A,
+            networks: &nets,
+            vms: &vms,
+            members: &[],
+            wg_mtu: None,
+            uplink: Some("eth0".into()),
+        });
+        assert!(p.forwarding);
+        let sw = &p.switches[0];
+        assert_eq!(sw.bridge, "ps100000");
+        assert_eq!(sw.mtu, 1500);
+        assert_eq!(sw.address, Some("10.88.0.1/24".parse().unwrap()));
+        assert!(sw.vxlan.is_none());
+        let lease = &sw.leases[&"52:54:00:00:00:01".parse().unwrap()];
+        assert_eq!(lease.ip, Ipv4Addr::new(10, 88, 0, 3));
+        assert_eq!(lease.router, Some(Ipv4Addr::new(10, 88, 0, 1)));
+        assert_eq!(lease.dns, vec![Ipv4Addr::new(10, 88, 0, 1)]);
+        assert_eq!(lease.domain.as_deref(), Some("lab.prism"));
+        assert_eq!(lease.mtu, Some(1500));
+        assert_eq!(
+            sw.hosts["web"],
+            vec![IpAddr::V4(Ipv4Addr::new(10, 88, 0, 3))]
+        );
+        assert_eq!(p.firewall.nat[0].egress, "eth0");
+        assert_eq!(p.firewall.ports[0].tap, tap_name(vms[0].nics[0].id));
+        assert_eq!(p.firewall.switches[0].vip, Ipv4Addr::new(10, 88, 0, 1));
+    }
+
+    #[test]
+    fn clustered_fdb_and_egress() {
+        let nets = [net()];
+        let members = [member(A, 1), member(B, 2)];
+        let vms = [
+            vm("here", A, "52:54:00:00:00:01", 3, Some(B)),
+            vm("there", B, "52:54:00:00:00:02", 4, None),
+        ];
+        let p = plan(&PlanInput {
+            node: A,
+            networks: &nets,
+            vms: &vms,
+            members: &members,
+            wg_mtu: Some(1420),
+            uplink: None,
+        });
+        let sw = &p.switches[0];
+        assert_eq!(sw.mtu, 1350);
+        let vx = sw.vxlan.as_ref().unwrap();
+        assert_eq!(vx.local, "fd00::1".parse::<Ipv6Addr>().unwrap());
+        assert_eq!(
+            vx.fdb.flood.iter().copied().collect::<Vec<_>>(),
+            vec!["fd00::2".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(
+            vx.fdb.macs[&"52:54:00:00:00:02".parse().unwrap()],
+            "fd00::2".parse::<IpAddr>().unwrap()
+        );
+        // Only local VMs get leases; the override routes through B.
+        assert_eq!(sw.leases.len(), 1);
+        let lease = sw.leases.values().next().unwrap();
+        assert_eq!(lease.router, Some(Ipv4Addr::new(10, 88, 0, 2)));
+        assert_eq!(sw.hosts.len(), 2);
+        assert!(!p.forwarding, "no uplink, no masquerade");
+        assert!(
+            p.firewall
+                .blocked
+                .contains(&"192.168.1.2/32".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn isolated_has_no_router() {
+        let mut n = net();
+        n.kind = NetworkKind::Isolated;
+        let nets = [n];
+        let vms = [vm("a", A, "52:54:00:00:00:01", 3, None)];
+        let p = plan(&PlanInput {
+            node: A,
+            networks: &nets,
+            vms: &vms,
+            members: &[],
+            wg_mtu: None,
+            uplink: Some("eth0".into()),
+        });
+        assert_eq!(p.firewall.nat, vec![]);
+        assert!(!p.forwarding);
+        assert_eq!(p.switches[0].leases.values().next().unwrap().router, None);
+    }
+}

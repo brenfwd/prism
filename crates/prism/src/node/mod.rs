@@ -11,6 +11,7 @@ mod migrate;
 mod migrate_setup;
 mod model;
 mod moves;
+mod networks;
 mod remote;
 mod runtime;
 mod snapshots;
@@ -39,6 +40,7 @@ pub use devices::{AddDisk, AddNic, UpdateDisk};
 pub use migrate::{FinishReq, MigrateVm, PrepareReq};
 pub use model::{Action, HostInfo, MemoryStats, NodeView, VmRuntime, VmState, VmView};
 pub use moves::MoveVm;
+pub use networks::NetworkView;
 
 pub(crate) use libvirt::undefine_flags;
 pub use snapshots::{CreateSnapshot, SnapshotView};
@@ -196,6 +198,8 @@ impl Node {
         tokio::spawn(Arc::clone(self).watch_state());
         tokio::spawn(Arc::clone(self).stats_loop());
         tokio::spawn(Arc::clone(self).balloon_loop());
+        tokio::spawn(crate::network::Agent::new(self.id, self.state.clone()).run());
+        tokio::spawn(Arc::clone(self).seed_default_network());
     }
 
     pub(crate) fn client(&self) -> Result<Client> {
@@ -310,6 +314,7 @@ impl Node {
         &'a self,
         pool: &'a dyn Fn(&str) -> Option<PoolLoc>,
         seed: Option<&'a std::path::Path>,
+        bridges: &'a HashMap<Uuid, String>,
     ) -> RenderCtx<'a> {
         RenderCtx {
             domain_type: self.cfg.domain_type(),
@@ -317,13 +322,15 @@ impl Node {
             uefi_loader: self.cfg.libvirt.uefi_loader.as_deref(),
             pool,
             seed_iso: seed,
+            bridges,
         }
     }
 
     pub(crate) async fn define(&self, c: &Client, spec: &VmSpec) -> Result<Domain> {
         let seed = self.seed_iso(spec)?;
         let pool = |p: &str| self.pool_loc(p);
-        let xml = render::render(spec, &self.render_ctx(&pool, seed.as_deref()))
+        let bridges = self.network_bridges();
+        let xml = render::render(spec, &self.render_ctx(&pool, seed.as_deref(), &bridges))
             .map_err(NodeError::Invalid)?;
         Ok(c.define_xml(&xml, flags::DOMAIN_DEFINE_VALIDATE).await?)
     }

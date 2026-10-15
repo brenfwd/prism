@@ -1,5 +1,7 @@
 //! `VmSpec`: the desired state of a VM.
 
+use std::net::Ipv4Addr;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -135,6 +137,33 @@ pub enum NicNetwork {
     Bridge { bridge: String },
     /// QEMU user-mode networking; no host setup needed.
     User,
+    /// A Prism network (switch).
+    Network {
+        network: Uuid,
+        /// The IPAM lease; assigned when the VM is stored if absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ipv4: Option<Ipv4Addr>,
+        /// Egress node override; `None` uses the network's egress.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        egress: Option<Uuid>,
+    },
+}
+
+impl NicNetwork {
+    /// The Prism network this NIC is on, if any.
+    pub fn network_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Network { network, .. } => Some(*network),
+            _ => None,
+        }
+    }
+
+    /// Forgets the IPAM lease, for copies of a NIC (restores, clones).
+    pub fn clear_lease(&mut self) {
+        if let Self::Network { ipv4, .. } = self {
+            *ipv4 = None;
+        }
+    }
 }
 
 /// `POST /api/v1/vms` body.
@@ -159,6 +188,7 @@ pub struct CreateVm {
     /// Existing volume in `pool` attached as a CD-ROM.
     #[serde(default)]
     pub iso: Option<String>,
+    /// Omit to join the default network (or user networking without one).
     #[serde(default)]
     pub network: Option<NicNetwork>,
     /// Copy this volume (in `pool`) as the boot disk, for example a cloud

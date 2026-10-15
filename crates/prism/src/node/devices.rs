@@ -134,6 +134,8 @@ impl Node {
             }
         }
         self.refresh(&spec).await;
+        // The stored spec carries what applying assigned, such as IP leases.
+        let spec = self.state.vm(spec.id).ok().flatten().unwrap_or(spec);
         let mut view = self.vm_view(spec);
         view.hotplug = Some(result);
         Ok(view)

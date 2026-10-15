@@ -28,19 +28,24 @@ backups, migration and auto-ballooning are not implemented yet.
   WebSockets. The server listens on loopback by default.
 - Web UI (React, Tailwind, TanStack): overview, VM list, a create dialog, VM detail with a
   balloon slider, VNC console, serial console, settings, and storage with upload.
-  The VNC console uses noVNC for now; the WASM/WebGL2 decoder comes later.
+  The VNC console decodes RFB in a Web Worker with `prism-rfb-wasm` (Rust → WebAssembly)
+  and draws with WebGL2 on an OffscreenCanvas, falling back to main-thread WebGL2, then Canvas2D.
 
 ## Build
 
-Requires Rust (stable or nightly) and [Bun](https://bun.sh).
+Requires Rust (stable or nightly) with the `wasm32-unknown-unknown` target, and
+[Bun](https://bun.sh).
 
 ```sh
+rustup target add wasm32-unknown-unknown
 cargo build --release
 ```
 
-The UI is the `prism-web` crate (`web/`). Its `build.rs` runs `bun install --frozen-lockfile`
-and `bun run build` into `OUT_DIR`, and the output is embedded into the binary. Cargo reruns it
-only when files in `web/` change.
+The UI is the `prism-web` crate (`web/`). Its `build.rs` first builds the console decoder
+(`crates/prism-rfb-wasm`) for `wasm32-unknown-unknown` with a nested cargo using its own target
+directory under `OUT_DIR`, then runs `bun install --frozen-lockfile` and `bun run build` into
+`OUT_DIR`; the output is embedded into the binary. Cargo reruns it only when files in `web/` or
+the decoder change.
 
 - `BUN=/path/to/bun` picks a specific Bun. Otherwise `bun` on `PATH`, then `~/.bun/bin/bun`.
 - `PRISM_SKIP_WEB=1` skips the UI and embeds a placeholder page. Useful for Rust-only checks
@@ -114,6 +119,7 @@ domain_type = "qemu"
 Pool directories must support `O_DIRECT` (disks use `cache=none,io=native`), so tmpfs won't work.
 
 For UI work, run `bun run dev` in `web/` for hot reload. It proxies `/api` to `127.0.0.1:8080`.
+Run `bun run wasm` once first (and after decoder changes) to build the console decoder.
 
 ## Testbed
 
@@ -152,4 +158,12 @@ Every subcommand is idempotent. Running `up` again starts stopped nodes and adds
 ```sh
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 (cd web && bun run typecheck)
+```
+
+The console decoder has an end-to-end test against a live QEMU VNC server, skipped unless
+`PRISM_RFB_TEST_SOCKET` is set:
+
+```sh
+qemu-system-x86_64 -display none -vnc unix:/tmp/vnc.sock -m 256 -cdrom some.iso &
+PRISM_RFB_TEST_SOCKET=/tmp/vnc.sock cargo test --release -p prism-rfb-wasm --test qemu -- --nocapture
 ```

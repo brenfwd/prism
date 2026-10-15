@@ -1264,6 +1264,8 @@ flowchart LR
 ```
 
 - **Decoder:** `prism-rfb-wasm`, written in Rust, satisfies the all-Rust rule for non-UI code. It is written from the RFB spec, not copied from noVNC (MPL-2.0). Streaming zlib uses `miniz_oxide`.
+  - It is a sans-IO state machine: bytes in, actions out (send, dirty rectangle, resize, cursor, image to decode, bell). JPEG and PNG rectangles pause input until the worker hands back decoded pixels, so later CopyRects see them.
+  - It exports a small hand-written ABI (`#[unsafe(no_mangle)]` functions, no `unsafe` blocks), so the worker needs no generated glue. `web/build.rs` builds it with a nested cargo into its own target directory.
 - **Encodings, in preference order:** Tight (JPEG via `createImageBitmap` in the worker), TightPNG, ZRLE, Hextile, Raw.
 - **Pseudo-encodings:** ExtendedDesktopSize, Cursor, QEMU ExtendedKeyEvent, LED state. Quality and compression levels adapt to measured bandwidth.
 - **Rendering:**

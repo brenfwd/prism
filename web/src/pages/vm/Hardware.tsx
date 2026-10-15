@@ -166,7 +166,7 @@ export function HardwareTab({ vm }: { vm: Vm }) {
                     badge={n.boot_order != null ? <Badge tone="indigo">boot #{n.boot_order}</Badge> : undefined}
                     actions={
                       <>
-                      {n.network.type === "user" && <IconButton icon="link" label="Port forwards" size="xs" onClick={() => setModal({ kind: "forwards", nic: n })} />}
+                      {(n.network.type === "user" || n.network.type === "network") && <IconButton icon="link" label="Port forwards" size="xs" onClick={() => setModal({ kind: "forwards", nic: n })} />}
                       <IconButton
                         icon="trash"
                         label="Remove adapter"

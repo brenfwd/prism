@@ -17,7 +17,8 @@ export function NicSub({ vm, nic }: { vm: Vm; nic: Nic }) {
   }).data;
   const mine = live ? guest?.interfaces.find((i) => i.mac?.toLowerCase() === nic.mac.toLowerCase()) : undefined;
   const ips = (mine?.addrs ?? []).filter((a) => !a.addr.startsWith("fe80:"));
-  const forwards = nic.network.type === "user" ? (nic.network.forwards ?? []) : [];
+  const forwards = nic.network.type === "user" || nic.network.type === "network" ? (nic.network.forwards ?? []) : [];
+  const anyHost = nic.network.type === "network" ? "*" : "127.0.0.1";
   return (
     <span className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
       <span className="font-mono">{nic.mac}</span>
@@ -29,7 +30,7 @@ export function NicSub({ vm, nic }: { vm: Vm; nic: Nic }) {
       ))}
       {forwards.length > 0 && (
         <span className="text-zinc-500">
-          {forwards.map((f) => `${f.host_addr ?? "127.0.0.1"}:${f.host_port} → ${f.guest_port}/${f.proto}`).join(", ")}
+          {forwards.map((f) => `${f.host_addr ?? anyHost}:${f.host_port} → ${f.guest_port}/${f.proto}`).join(", ")}
         </span>
       )}
     </span>
@@ -38,22 +39,23 @@ export function NicSub({ vm, nic }: { vm: Vm; nic: Nic }) {
 
 const blank = (): PortForward => ({ proto: "tcp", host_port: 2222, guest_port: 22 });
 
-/** Edits the host-to-guest port forwards of a private-NAT adapter. */
+/** Edits the host-to-guest port forwards of a Prism network or private-NAT adapter. */
 export function Forwards({ vm, nic, onClose }: { vm: Vm; nic: Nic; onClose: () => void }) {
   const qc = useQueryClient();
-  const [rows, setRows] = useState<PortForward[]>(nic.network.type === "user" ? (nic.network.forwards ?? []) : []);
+  const [rows, setRows] = useState<PortForward[]>(nic.network.type === "user" || nic.network.type === "network" ? (nic.network.forwards ?? []) : []);
+  const viaNetwork = nic.network.type === "network";
   const set = (i: number, patch: Partial<PortForward>) => setRows((r) => r.map((x, j) => (j === i ? { ...x, ...patch } : x)));
   const passt = useQuery({ queryKey: ["prereqs"], queryFn: api.prereqs }).data?.find((p) => p.id === "passt");
-  const missing = passt && !passt.ok;
+  const missing = !viaNetwork && passt && !passt.ok;
   const valid = rows.every((r) => r.host_port > 0 && r.host_port < 65536 && r.guest_port > 0 && r.guest_port < 65536);
   const save = useMutation({
     mutationFn: () => api.setForwards(vm.id, nic.id, rows),
     onSuccess: (view) => {
       putVm(qc, view);
       toast({
-        tone: isOn(view) ? "warning" : "success",
+        tone: isOn(view) && !viaNetwork ? "warning" : "success",
         title: "Port forwards saved",
-        body: isOn(view) ? "They take effect the next time the machine starts." : undefined,
+        body: isOn(view) && !viaNetwork ? "They take effect the next time the machine starts." : undefined,
       });
       onClose();
     },
@@ -62,7 +64,7 @@ export function Forwards({ vm, nic, onClose }: { vm: Vm; nic: Nic; onClose: () =
   return (
     <Modal
       title="Port forwards"
-      description="Reach a service in this machine from the host. By default the host port listens on loopback only."
+      description={viaNetwork ? "Reach a service in this machine through this host's addresses. Applied by the network, on whichever node runs the machine, and it follows the machine when it moves." : "Reach a service in this machine from the host. By default the host port listens on loopback only."}
       onClose={onClose}
       footer={
         <>
@@ -77,7 +79,7 @@ export function Forwards({ vm, nic, onClose }: { vm: Vm; nic: Nic; onClose: () =
             Port forwarding needs <span className="font-mono">passt</span> on this host, and it isn't installed. {passt?.hint}
           </p>
         )}
-        {isOn(vm) && !missing && (
+        {isOn(vm) && !missing && !viaNetwork && (
           <p className="text-[13px] text-zinc-500">This machine is running, so changes apply the next time it starts.</p>
         )}
         {rows.length === 0 && <p className="text-[13px] text-zinc-500">Nothing is forwarded. Add SSH to get started.</p>}
@@ -90,10 +92,14 @@ export function Forwards({ vm, nic, onClose }: { vm: Vm; nic: Nic; onClose: () =
             <Input aria-label="Host port" type="number" min={1} max={65535} value={r.host_port} onChange={(e) => set(i, { host_port: +e.target.value })} className="w-24 font-mono" />
             <span className="text-zinc-400">→</span>
             <Input aria-label="Guest port" type="number" min={1} max={65535} value={r.guest_port} onChange={(e) => set(i, { guest_port: +e.target.value })} className="w-24 font-mono" />
-            <label className="flex items-center gap-1.5 text-xs text-zinc-500">
-              <input type="checkbox" checked={!!r.host_addr} onChange={(e) => set(i, { host_addr: e.target.checked ? "0.0.0.0" : null })} />
-              all interfaces
-            </label>
+            {viaNetwork ? (
+              <Input aria-label="Host address" placeholder="any address" value={r.host_addr ?? ""} onChange={(e) => set(i, { host_addr: e.target.value.trim() || null })} className="w-36 font-mono" />
+            ) : (
+              <label className="flex items-center gap-1.5 text-xs text-zinc-500">
+                <input type="checkbox" checked={!!r.host_addr} onChange={(e) => set(i, { host_addr: e.target.checked ? "0.0.0.0" : null })} />
+                all interfaces
+              </label>
+            )}
             <Button size="xs" variant="ghost" onClick={() => setRows((x) => x.filter((_, j) => j !== i))}>Remove</Button>
           </div>
         ))}

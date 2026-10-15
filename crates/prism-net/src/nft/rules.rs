@@ -155,9 +155,40 @@ pub struct NatRule {
     pub egress: String,
 }
 
-/// The `ip prism-nat` table with one masquerade rule per entry.
-pub fn nat_ruleset(rules: &[NatRule]) -> Table {
+/// A host port forwarded to a guest by destination NAT.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DnatRule {
+    /// UDP when set, TCP otherwise.
+    pub udp: bool,
+    /// Host address to match; any local address when absent.
+    pub host_addr: Option<Ipv4Addr>,
+    pub host_port: u16,
+    pub guest: Ipv4Addr,
+    pub guest_port: u16,
+}
+
+/// The `ip prism-nat` table: port-forward DNAT in `prerouting`, then one masquerade rule per
+/// entry in `postrouting`.
+pub fn nat_ruleset(rules: &[NatRule], forwards: &[DnatRule]) -> Table {
     let mut t = Table::new(Family::Ip, NAT_TABLE);
+    let pre = t.chain(Chain::base(
+        "prerouting",
+        ChainType::Nat,
+        Hook::Prerouting,
+        priority::DSTNAT,
+    ));
+    for f in forwards {
+        let mut r = Rule::new(Family::Ip);
+        if let Some(a) = f.host_addr {
+            r = r.ip_daddr_eq(a);
+        }
+        r = if f.udp {
+            r.udp_dport(f.host_port)
+        } else {
+            r.tcp_dport(f.host_port)
+        };
+        pre.push(r.dnat(f.guest, f.guest_port));
+    }
     let c = t.chain(Chain::base(
         "postrouting",
         ChainType::Nat,

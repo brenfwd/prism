@@ -158,6 +158,9 @@ pub enum NicNetwork {
         /// a segment only with NICs on the same VLAN, not the gateway.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         vlan: Option<u16>,
+        /// Host ports forwarded to this NIC's lease by destination NAT.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        forwards: Vec<PortForward>,
     },
 }
 
@@ -177,7 +180,9 @@ impl Proto {
     }
 }
 
-/// One host port forwarded to a guest port on a user-mode NIC.
+/// One host port forwarded to a guest port. On a Prism network NIC it is
+/// destination NAT on the owning node (any host address when `host_addr` is
+/// absent); on a user-mode NIC it is passt (loopback when absent).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortForward {
@@ -221,6 +226,22 @@ impl NicNetwork {
     pub fn user() -> Self {
         Self::User {
             forwards: Vec::new(),
+        }
+    }
+
+    /// The port forwards configured on this NIC.
+    pub fn forwards(&self) -> &[PortForward] {
+        match self {
+            Self::User { forwards } | Self::Network { forwards, .. } => forwards,
+            Self::Bridge { .. } => &[],
+        }
+    }
+
+    /// Mutable access to the forwards, if this kind of NIC can have any.
+    pub fn forwards_mut(&mut self) -> Option<&mut Vec<PortForward>> {
+        match self {
+            Self::User { forwards } | Self::Network { forwards, .. } => Some(forwards),
+            Self::Bridge { .. } => None,
         }
     }
 

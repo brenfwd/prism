@@ -14,7 +14,7 @@ use uuid::Uuid;
 use super::firewall::{GuestRules, Routed};
 use super::{NetworkDoc, NetworkKind, VLAN_OVERHEAD, switch_mtu};
 use crate::cluster::model::MemberDoc;
-use crate::spec::{NicNetwork, VmSpec};
+use crate::spec::{NicNetwork, Proto, VmSpec};
 
 const LEASE_TIME: Duration = Duration::from_secs(12 * 3600);
 
@@ -133,6 +133,7 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                     ipv4,
                     egress,
                     vlan,
+                    forwards,
                 } = &nic.network
                 else {
                     continue;
@@ -158,6 +159,24 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                         mac,
                         ipv4: *ipv4,
                     });
+                    // Forwards need this node to route into the network.
+                    if let (Some(ip), Some(_)) = (ipv4, gateway) {
+                        for f in forwards {
+                            let host_addr = match f.host_addr {
+                                Some(IpAddr::V4(a)) => Some(a),
+                                Some(IpAddr::V6(_)) => continue,
+                                None => None,
+                            };
+                            out.forwarding = true;
+                            out.firewall.dnat.push(prism_net::nft::DnatRule {
+                                udp: f.proto == Proto::Udp,
+                                host_addr,
+                                host_port: f.host_port,
+                                guest: *ip,
+                                guest_port: f.guest_port,
+                            });
+                        }
+                    }
                     if let (Some(ip), true) = (ipv4, net.dhcp) {
                         sw.leases
                             .insert(mac, lease(net, vm, *ip, *egress, gateway, mtu));
@@ -306,10 +325,46 @@ mod tests {
                 ipv4: Some(Ipv4Addr::new(10, 88, 0, ip)),
                 egress,
                 vlan: None,
+                forwards: Vec::new(),
             },
             boot_order: None,
         }];
         v
+    }
+
+    fn forward_plan(node: Uuid, net: &NetworkDoc, vm: &VmSpec) -> NodePlan {
+        plan(&PlanInput {
+            node,
+            networks: std::slice::from_ref(net),
+            vms: std::slice::from_ref(vm),
+            members: &[],
+            wg_mtu: None,
+            uplink: Some("eth0".into()),
+        })
+    }
+
+    #[test]
+    fn forwards_follow_the_running_node() {
+        let (src, dst) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let mut guest = vm("a", src, "52:54:00:00:00:01", 5, None);
+        if let NicNetwork::Network { forwards, .. } = &mut guest.nics[0].network {
+            forwards.push(crate::spec::PortForward {
+                proto: Proto::Tcp,
+                host_addr: None,
+                host_port: 2222,
+                guest_port: 22,
+            });
+        }
+        let mut doc = net();
+        doc.gateways.insert(src, Ipv4Addr::new(10, 88, 0, 1));
+        doc.gateways.insert(dst, Ipv4Addr::new(10, 88, 0, 2));
+        let p = forward_plan(src, &doc, &guest);
+        assert_eq!(p.firewall.dnat.len(), 1);
+        assert_eq!(p.firewall.dnat[0].guest, Ipv4Addr::new(10, 88, 0, 5));
+        assert!(p.forwarding);
+        assert_eq!(forward_plan(dst, &doc, &guest).firewall.dnat.len(), 0);
+        guest.migrating = Some(crate::spec::Migration { src, dst });
+        assert_eq!(forward_plan(dst, &doc, &guest).firewall.dnat.len(), 1);
     }
 
     #[test]

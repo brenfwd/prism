@@ -57,23 +57,23 @@ pub fn passt() -> Prereq {
     let blocked = found.is_some() && passt_blocked_by_apparmor();
     Prereq {
         id: "passt",
-        label: "passt (port forwarding)",
+        label: "passt (opt-in user-mode networking)",
         ok: found.is_some() && !blocked,
         required: false,
         detail: match (&found, blocked) {
-            (None, _) => "not installed; port forwards are unavailable".into(),
+            (None, _) => "not installed; user-mode port forwards are unavailable".into(),
             (Some(p), true) => format!(
                 "{} is installed, but libvirt's AppArmor profile for passt breaks it \
-                 on this host; port forwards are unavailable",
+                 on this host; user-mode port forwards are unavailable",
                 p.display()
             ),
             (Some(p), false) => p.display().to_string(),
         },
         hint: Some(if blocked {
             "libvirt's AppArmor passt sub-profile is broken on this distribution. \
-             Reach the VM through a Prism network instead, or update libvirt/apparmor."
+             Forward ports on a Prism network NIC instead (nftables, no passt needed), or update libvirt/apparmor."
         } else {
-            "Install the \"passt\" package (apt install passt), then forward ports again."
+            "Only needed for user-mode NICs; ports forwarded on Prism networks use nftables. Install the \"passt\" package (apt install passt) to opt in."
         }),
     }
 }

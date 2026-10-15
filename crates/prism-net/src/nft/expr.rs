@@ -102,5 +102,10 @@ pub enum Expr {
     CtState,
     Counter,
     Masquerade,
+    /// `dnat to <addr>:<port>` (IPv4 nat prerouting chains).
+    Dnat {
+        addr: std::net::Ipv4Addr,
+        port: u16,
+    },
     Verdict(Verdict),
 }

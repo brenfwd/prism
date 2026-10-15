@@ -16,8 +16,8 @@ mod wire;
 pub use expr::{CmpOp, CtState, Expr, MetaKey, PayloadBase, Verdict};
 pub use rule::Rule;
 pub use rules::{
-    BoundaryConfig, GuestPort, NatRule, SwitchServices, boundary_ruleset, bridge_guard_ruleset,
-    guest_input_chain, nat_ruleset,
+    BoundaryConfig, DnatRule, GuestPort, NatRule, SwitchServices, boundary_ruleset,
+    bridge_guard_ruleset, guest_input_chain, nat_ruleset,
 };
 pub use wire::Nft;
 

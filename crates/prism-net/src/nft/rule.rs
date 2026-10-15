@@ -313,6 +313,11 @@ impl Rule {
         self.expr(Expr::Verdict(Verdict::Drop))
     }
 
+    /// Ends the rule with `dnat to <addr>:<port>`.
+    pub fn dnat(self, addr: Ipv4Addr, port: u16) -> Self {
+        self.expr(Expr::Dnat { addr, port })
+    }
+
     /// Ends the rule with `masquerade` (nat chains only).
     pub fn masquerade(self) -> Self {
         self.expr(Expr::Masquerade)

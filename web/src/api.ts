@@ -36,11 +36,11 @@ export type Firmware = "bios" | "uefi";
 export type NicNetwork =
   | { type: "user"; forwards?: PortForward[] }
   | { type: "bridge"; bridge: string }
-  | { type: "network"; network: string; ipv4?: string | null; egress?: string | null; vlan?: number | null };
+  | { type: "network"; network: string; ipv4?: string | null; egress?: string | null; vlan?: number | null; forwards?: PortForward[] };
 
 export interface PortForward {
   proto: "tcp" | "udp";
-  /** Host address to listen on; loopback when absent. */
+  /** Host address to listen on; every address on a Prism network, loopback on a user-mode NIC, when absent. */
   host_addr?: string | null;
   host_port: number;
   guest_port: number;

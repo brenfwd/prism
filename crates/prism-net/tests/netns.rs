@@ -531,7 +531,7 @@ async fn nft_tables_match_cli() {
     }]));
     assert_same_as_cli(&mine, &Ns::new("pnt-nft-r1"), &inet, BOUNDARY_TEXT);
 
-    let nat = nat_ruleset(&nat_rules());
+    let nat = nat_ruleset(&nat_rules(), &[]);
     assert_same_as_cli(&mine, &Ns::new("pnt-nft-r2"), &nat, NAT_TEXT);
 
     let bridge = bridge_guard_ruleset(&[GuestPort {

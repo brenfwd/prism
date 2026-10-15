@@ -3,8 +3,9 @@
 
 use ipnet::{Ipv4Net, Ipv6Net};
 use prism_net::nft::{
-    BoundaryConfig, Chain, ChainType, Family, GuestPort, Hook, NatRule, Nft, Rule, SwitchServices,
-    Table, boundary_ruleset, bridge_guard_ruleset, guest_input_chain, nat_ruleset, priority,
+    BoundaryConfig, Chain, ChainType, DnatRule, Family, GuestPort, Hook, NatRule, Nft, Rule,
+    SwitchServices, Table, boundary_ruleset, bridge_guard_ruleset, guest_input_chain, nat_ruleset,
+    priority,
 };
 
 /// What the firewall should enforce for guests on this node.
@@ -16,6 +17,8 @@ pub struct GuestRules {
     pub switches: Vec<SwitchServices>,
     /// Masquerade, one rule per NAT network.
     pub nat: Vec<NatRule>,
+    /// Port forwards to local guests, as destination NAT.
+    pub dnat: Vec<DnatRule>,
     /// Destinations guests never reach through the host (the tailnet and
     /// other members' underlay addresses).
     pub blocked: Vec<Ipv4Net>,
@@ -92,7 +95,7 @@ impl Firewall {
         }
         vec![
             inet,
-            nat_ruleset(&rules.nat),
+            nat_ruleset(&rules.nat, &rules.dnat),
             bridge_guard_ruleset(&rules.ports),
         ]
     }

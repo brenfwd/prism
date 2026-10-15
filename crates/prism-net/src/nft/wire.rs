@@ -129,7 +129,37 @@ fn data_value(m: &mut Msg, kind: u16, value: &[u8]) {
     m.begin(kind).attr(NFTA_DATA_VALUE, value).end();
 }
 
+/// A DNAT is three expressions: the address and port go into registers, then
+/// the `nat` expression reads them.
+fn dnat(m: &mut Msg, addr: std::net::Ipv4Addr, port: u16) {
+    for (reg, value) in [
+        (NFT_REG_1, &addr.octets()[..]),
+        (2, &port.to_be_bytes()[..]),
+    ] {
+        m.begin(NFTA_LIST_ELEM)
+            .str(NFTA_EXPR_NAME, "immediate")
+            .begin(NFTA_EXPR_DATA);
+        m.be32(1, reg);
+        data_value(m, 2, value);
+        m.end().end();
+    }
+    m.begin(NFTA_LIST_ELEM)
+        .str(NFTA_EXPR_NAME, "nat")
+        .begin(NFTA_EXPR_DATA);
+    m.be32(1, 1) // NFT_NAT_DNAT
+        .be32(2, 2) // NFPROTO_IPV4
+        .be32(3, NFT_REG_1) // address min
+        .be32(5, 2) // proto min
+        .be32(7, 3) // MAP_IPS | PROTO_SPECIFIED
+        .end()
+        .end();
+}
+
 fn expr(m: &mut Msg, e: &Expr) {
+    if let Expr::Dnat { addr, port } = e {
+        dnat(m, *addr, *port);
+        return;
+    }
     m.begin(NFTA_LIST_ELEM);
     match e {
         Expr::Meta { key } => {
@@ -185,27 +215,7 @@ fn expr(m: &mut Msg, e: &Expr) {
         Expr::Masquerade => {
             m.str(NFTA_EXPR_NAME, "masq");
         }
-        Expr::Dnat { addr, port } => {
-            // Address in register 1, port in register 2, then the nat expression.
-            for (reg, value) in [
-                (NFT_REG_1, &addr.octets()[..]),
-                (2, &port.to_be_bytes()[..]),
-            ] {
-                m.begin(NFTA_LIST_ELEM)
-                    .str(NFTA_EXPR_NAME, "immediate")
-                    .begin(NFTA_EXPR_DATA);
-                m.be32(1, reg);
-                data_value(m, 2, value);
-                m.end().end();
-            }
-            m.str(NFTA_EXPR_NAME, "nat").begin(NFTA_EXPR_DATA);
-            m.be32(1, 1) // NFT_NAT_DNAT
-                .be32(2, 2) // NFPROTO_IPV4
-                .be32(3, NFT_REG_1)
-                .be32(5, 2)
-                .be32(7, 3) // MAP_IPS | PROTO_SPECIFIED
-                .end();
-        }
+        Expr::Dnat { .. } => unreachable!("handled above"),
         Expr::Verdict(v) => {
             let (code, chain) = match v {
                 Verdict::Accept => (NF_ACCEPT, None),

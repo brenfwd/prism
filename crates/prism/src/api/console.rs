@@ -1,8 +1,10 @@
 //! WebSocket consoles: raw RFB to QEMU's VNC socket, and the serial console.
+//! Consoles of VMs on other nodes are tunnelled to their owner.
 
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::get;
 use futures::{SinkExt, StreamExt};
@@ -11,6 +13,8 @@ use tokio::net::UnixStream;
 use uuid::Uuid;
 
 use super::{ApiError, AppState};
+use crate::cluster::peers::open_remote_console;
+use crate::node::Node;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -22,22 +26,70 @@ fn parse_id(id: &str) -> Result<Uuid, ApiError> {
     Uuid::parse_str(id).map_err(|_| ApiError::not_found(format!("vm {id}")))
 }
 
-async fn vnc(
-    State(node): State<AppState>,
-    Path(id): Path<String>,
-    ws: WebSocketUpgrade,
-) -> Result<Response, ApiError> {
-    let path = node.vnc_socket(parse_id(&id)?).await?;
-    let sock = UnixStream::connect(&path).await.map_err(|e| {
-        ApiError::new(
-            axum::http::StatusCode::BAD_GATEWAY,
-            "console_unavailable",
-            e.to_string(),
-        )
-    })?;
-    Ok(ws
-        .protocols(["binary"])
-        .on_upgrade(move |ws| pump_unix(ws, sock)))
+/// The owner's member document when the VM runs on another node.
+fn remote_owner(node: &Node, id: Uuid) -> Result<Option<crate::cluster::model::MemberDoc>, ApiError> {
+    let spec = node.spec(id)?;
+    if spec.node == node.id {
+        return Ok(None);
+    }
+    let member = node
+        .state
+        .members()?
+        .into_iter()
+        .find(|m| m.node_id == spec.node)
+        .ok_or_else(|| ApiError::new(StatusCode::BAD_GATEWAY, "owner_unknown", "the VM's node is not a member"))?;
+    Ok(Some(member))
+}
+
+async fn tunnel(node: AppState, member: crate::cluster::model::MemberDoc, id: Uuid, kind: &'static str, ws: WebSocket) {
+    let Some(cluster) = node.cluster.get() else { return };
+    let (tx, mut inbound) = match open_remote_console(cluster, &member, id, kind).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(vm = %id, "console tunnel to {}: {e:#}", member.name);
+            return;
+        }
+    };
+    let (mut ws_tx, mut ws_rx) = ws.split();
+    let down = async {
+        while let Ok(Some(f)) = inbound.message().await {
+            if ws_tx.send(Message::Binary(f.data.into())).await.is_err() {
+                break;
+            }
+        }
+        let _ = ws_tx.close().await;
+    };
+    let up = async {
+        while let Some(Ok(msg)) = ws_rx.next().await {
+            let data = match msg {
+                Message::Binary(b) => b.to_vec(),
+                Message::Text(t) => t.as_bytes().to_vec(),
+                Message::Close(_) => break,
+                Message::Ping(_) | Message::Pong(_) => continue,
+            };
+            if tx.send(data).await.is_err() {
+                break;
+            }
+        }
+    };
+    tokio::select! {
+        () = down => {}
+        () = up => {}
+    }
+}
+
+async fn vnc(State(node): State<AppState>, Path(id): Path<String>, ws: WebSocketUpgrade) -> Result<Response, ApiError> {
+    let id = parse_id(&id)?;
+    if let Some(member) = remote_owner(&node, id)? {
+        return Ok(ws
+            .protocols(["binary"])
+            .on_upgrade(move |ws| tunnel(node, member, id, "vnc", ws)));
+    }
+    let path = node.vnc_socket(id).await?;
+    let sock = UnixStream::connect(&path)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, "console_unavailable", e.to_string()))?;
+    Ok(ws.protocols(["binary"]).on_upgrade(move |ws| pump_unix(ws, sock)))
 }
 
 async fn pump_unix(ws: WebSocket, sock: UnixStream) {
@@ -49,11 +101,7 @@ async fn pump_unix(ws: WebSocket, sock: UnixStream) {
             match rd.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if ws_tx
-                        .send(Message::Binary(buf[..n].to_vec().into()))
-                        .await
-                        .is_err()
-                    {
+                    if ws_tx.send(Message::Binary(buf[..n].to_vec().into())).await.is_err() {
                         break;
                     }
                 }
@@ -81,12 +129,12 @@ async fn pump_unix(ws: WebSocket, sock: UnixStream) {
     }
 }
 
-async fn serial(
-    State(node): State<AppState>,
-    Path(id): Path<String>,
-    ws: WebSocketUpgrade,
-) -> Result<Response, ApiError> {
-    let stream = node.open_serial(parse_id(&id)?).await?;
+async fn serial(State(node): State<AppState>, Path(id): Path<String>, ws: WebSocketUpgrade) -> Result<Response, ApiError> {
+    let id = parse_id(&id)?;
+    if let Some(member) = remote_owner(&node, id)? {
+        return Ok(ws.on_upgrade(move |ws| tunnel(node, member, id, "serial", ws)));
+    }
+    let stream = node.open_serial(id).await?;
     Ok(ws.on_upgrade(move |ws| async move {
         let (mut reader, writer) = stream.into_split();
         let (mut ws_tx, mut ws_rx) = ws.split();

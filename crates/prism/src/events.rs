@@ -11,17 +11,17 @@ const RING_LEN: usize = 10_000;
 const RING_AGE: Duration = Duration::from_secs(600);
 const CHANNEL_LEN: usize = 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Op {
     Upsert,
     Delete,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Event {
     #[serde(rename = "type")]
-    pub ty: &'static str,
+    pub ty: String,
     pub origin_node: String,
     pub resource: String,
     pub ts: String,
@@ -82,16 +82,30 @@ impl Bus {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    pub fn publish(&self, ty: &'static str, resource: String, op: Op, payload: serde_json::Value) {
-        let now = SystemTime::now();
+    pub fn publish(&self, ty: &str, resource: String, op: Op, payload: serde_json::Value) {
         let event = Event {
-            ty,
+            ty: ty.to_string(),
             origin_node: self.node.clone(),
             resource,
-            ts: rfc3339(now),
+            ts: rfc3339(SystemTime::now()),
             op,
             payload,
         };
+        self.push(event);
+    }
+
+    /// Re-publishes an event that originated on another node, keeping its
+    /// origin, so this node's stream covers the whole cluster.
+    pub fn republish(&self, event: Event) {
+        self.push(event);
+    }
+
+    pub fn node(&self) -> &str {
+        &self.node
+    }
+
+    fn push(&self, event: Event) {
+        let now = SystemTime::now();
         let mut ring = self.ring();
         let seq = ring.next_seq;
         ring.next_seq += 1;

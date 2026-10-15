@@ -100,6 +100,10 @@ pub struct Cluster {
     pub channels: Channels,
     raft: Mutex<Option<ClusterNode>>,
     local: Mutex<Option<LocalMember>>,
+    /// The node this cluster runtime serves (set once at startup).
+    pub node: std::sync::OnceLock<std::sync::Weak<crate::node::Node>>,
+    /// The HTTP API, for requests tunnelled from peers.
+    pub http: std::sync::OnceLock<axum::Router>,
 }
 
 impl std::fmt::Debug for Cluster {
@@ -174,6 +178,8 @@ impl Cluster {
             channels: Channels::default(),
             raft: Mutex::default(),
             local: Mutex::new(local),
+            node: std::sync::OnceLock::new(),
+            http: std::sync::OnceLock::new(),
         }))
     }
 

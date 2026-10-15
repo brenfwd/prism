@@ -65,7 +65,7 @@ impl From<StateError> for NodeError {
 
 pub type Result<T, E = NodeError> = std::result::Result<T, E>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VmState {
     Stopped,
@@ -103,7 +103,7 @@ impl VmState {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[allow(clippy::struct_field_names)] // units in names match the API
 pub struct MemoryStats {
     /// Current balloon size.
@@ -117,7 +117,7 @@ pub struct MemoryStats {
     pub swap_in_kib: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct VmRuntime {
     pub state: VmState,
     pub vcpus: u16,
@@ -155,7 +155,7 @@ pub struct VmView {
     pub status: VmRuntime,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
 pub struct HostInfo {
     pub hostname: String,
     pub libvirt_version: String,
@@ -166,15 +166,22 @@ pub struct HostInfo {
     pub free_memory_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct NodeView {
     pub id: Uuid,
     pub name: String,
-    pub version: &'static str,
+    pub version: String,
     pub libvirt_connected: bool,
     pub domain_type: String,
     pub host: HostInfo,
     pub memory_pressure: Option<balloon::HostPressure>,
+    /// False when this view is a cached copy of an unreachable peer.
+    #[serde(default = "yes")]
+    pub reachable: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -225,6 +232,17 @@ pub struct Node {
     autostart_pending: std::sync::atomic::AtomicBool,
     /// Cluster membership, once the mesh layer is available.
     pub cluster: std::sync::OnceLock<Arc<crate::cluster::Cluster>>,
+    /// Runtime state of VMs on other nodes, from their event streams.
+    remote_runtime: Mutex<HashMap<Uuid, VmRuntime>>,
+    /// Other nodes' status, from their event streams.
+    remote_nodes: Mutex<HashMap<Uuid, NodeView>>,
+}
+
+/// What a peer sends first on `Events.Subscribe`.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct RuntimeSnapshot {
+    pub node: NodeView,
+    pub vms: HashMap<Uuid, VmRuntime>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -279,6 +297,8 @@ impl Node {
             ops: tokio::sync::Mutex::new(()),
             autostart_pending: host_booted.into(),
             cluster: std::sync::OnceLock::new(),
+            remote_runtime: Mutex::default(),
+            remote_nodes: Mutex::default(),
         })
     }
 
@@ -308,11 +328,12 @@ impl Node {
         NodeView {
             id: self.id,
             name: self.name.clone(),
-            version: env!("CARGO_PKG_VERSION"),
+            version: env!("CARGO_PKG_VERSION").into(),
             libvirt_connected: self.client().is_ok(),
             domain_type: self.cfg.domain_type().into(),
             host: lock(&self.host).clone(),
             memory_pressure: lock(&self.pressure).clone(),
+            reachable: true,
         }
     }
 
@@ -325,11 +346,73 @@ impl Node {
         );
     }
 
+    /// This node and every peer heard from.
+    pub fn nodes(&self) -> Vec<NodeView> {
+        let mut out = vec![self.view()];
+        out.extend(lock(&self.remote_nodes).values().cloned());
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
+    /// Runtime state of this node, for a peer's first event.
+    pub fn runtime_snapshot(&self) -> RuntimeSnapshot {
+        RuntimeSnapshot {
+            node: self.view(),
+            vms: lock(&self.runtime).clone(),
+        }
+    }
+
+    pub fn apply_remote_snapshot(&self, snap: RuntimeSnapshot) {
+        let node = snap.node.id;
+        let owned: Vec<Uuid> = self
+            .state
+            .vms()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|v| v.node == node)
+            .map(|v| v.id)
+            .collect();
+        let mut rt = lock(&self.remote_runtime);
+        for id in owned {
+            rt.remove(&id);
+        }
+        rt.extend(snap.vms);
+        drop(rt);
+        lock(&self.remote_nodes).insert(node, snap.node);
+    }
+
+    /// Updates the peer caches from one of a peer's own events.
+    pub fn apply_remote_event(&self, ev: &crate::events::Event) {
+        let id = ev.resource.rsplit('/').next().and_then(|s| Uuid::parse_str(s).ok());
+        match (ev.ty.as_str(), id) {
+            ("vm.state" | "vm.stats", Some(id)) => {
+                if let Ok(rt) = serde_json::from_value::<VmRuntime>(ev.payload.clone()) {
+                    lock(&self.remote_runtime).insert(id, rt);
+                }
+            }
+            ("node.status", Some(id)) => {
+                if let Ok(v) = serde_json::from_value::<NodeView>(ev.payload.clone()) {
+                    lock(&self.remote_nodes).insert(id, v);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Marks a peer unreachable in the cache.
+    pub fn forget_remote(&self, node: Uuid) {
+        if let Some(v) = lock(&self.remote_nodes).get_mut(&node) {
+            v.libvirt_connected = false;
+            v.reachable = false;
+        }
+    }
+
     pub(crate) fn vm_view(&self, mut spec: VmSpec) -> VmView {
-        let status = lock(&self.runtime)
-            .get(&spec.id)
-            .cloned()
-            .unwrap_or_default();
+        let status = if spec.node == self.id {
+            lock(&self.runtime).get(&spec.id).cloned().unwrap_or_default()
+        } else {
+            lock(&self.remote_runtime).get(&spec.id).cloned().unwrap_or_default()
+        };
         // User-data may hold secrets; the API only shows a fingerprint.
         if let Some(ci) = &mut spec.cloud_init {
             ci.user_data = format!("blake3:{}", blake3::hash(ci.user_data.as_bytes()).to_hex());

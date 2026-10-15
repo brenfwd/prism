@@ -5,6 +5,7 @@ pub mod blob;
 pub mod grpc;
 pub mod mesh;
 pub mod model;
+pub mod peers;
 pub mod runtime;
 
 pub use runtime::{Cluster, ClusterConfig};

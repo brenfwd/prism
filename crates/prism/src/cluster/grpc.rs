@@ -10,6 +10,9 @@ use std::time::Duration;
 
 use prism_cluster::{ClusterError, RaftService};
 use prism_proto::v1::cluster_server::{Cluster as ClusterRpc, ClusterServer};
+use prism_proto::v1::console_server::ConsoleServer;
+use prism_proto::v1::events_server::EventsServer;
+use prism_proto::v1::http_tunnel_server::HttpTunnelServer;
 use prism_proto::v1::raft_server::{Raft as _, RaftServer};
 use prism_proto::v1::{BootstrapReply, Empty, StatusReply, WriteReply, WriteRequest};
 use tonic::{Request, Response, Status};
@@ -36,6 +39,11 @@ fn caller(cluster: &Cluster, remote: Option<SocketAddr>) -> Result<Caller, Statu
         None if cluster.pending_join() => Ok(Caller::Unknown),
         None => Err(Status::permission_denied(format!("{addr} is not a member"))),
     }
+}
+
+/// Allows only active members (or anyone while this node is still joining).
+pub fn check_active(cluster: &Cluster, remote: Option<SocketAddr>) -> Result<(), Status> {
+    require_active(cluster, remote)
 }
 
 fn require_active(cluster: &Cluster, remote: Option<SocketAddr>) -> Result<(), Status> {
@@ -130,6 +138,15 @@ pub async fn serve(cluster: Arc<Cluster>, raft: prism_cluster::Raft) {
             }))
             .add_service(RaftServer::new(GuardedRaft {
                 inner: RaftService { raft: raft.clone() },
+                cluster: Arc::clone(&cluster),
+            }))
+            .add_service(EventsServer::new(super::peers::EventsService {
+                cluster: Arc::clone(&cluster),
+            }))
+            .add_service(HttpTunnelServer::new(super::peers::TunnelService {
+                cluster: Arc::clone(&cluster),
+            }))
+            .add_service(ConsoleServer::new(super::peers::ConsoleService {
                 cluster: Arc::clone(&cluster),
             }));
         tracing::info!("gRPC listening on {addr}");

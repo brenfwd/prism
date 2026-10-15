@@ -2,6 +2,7 @@
 
 mod cluster;
 mod console;
+mod forward;
 mod hygiene;
 mod pools;
 mod sse;
@@ -33,7 +34,8 @@ pub fn router(node: AppState) -> Router {
         .merge(tasks::routes())
         .merge(cluster::routes())
         .route("/events", get(sse::events))
-        .fallback(|| async { ApiError::not_found("no such endpoint") });
+        .fallback(|| async { ApiError::not_found("no such endpoint") })
+        .layer(axum::middleware::from_fn_with_state(Arc::clone(&node), forward::route));
 
     let hygiene = hygiene::Hygiene::new(&node.cfg.http, &node.name);
     Router::new()
@@ -57,15 +59,18 @@ pub fn router(node: AppState) -> Router {
 }
 
 async fn list_nodes(State(node): State<AppState>) -> axum::Json<Vec<NodeView>> {
-    axum::Json(vec![node.view()])
+    axum::Json(node.nodes())
 }
 
 async fn get_node(
     State(node): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<axum::Json<NodeView>, ApiError> {
-    check_node(&node, &id)?;
-    Ok(axum::Json(node.view()))
+    node.nodes()
+        .into_iter()
+        .find(|n| id == "local" && n.id == node.id || n.id.to_string() == id)
+        .map(axum::Json)
+        .ok_or_else(|| ApiError::not_found(format!("node {id}")))
 }
 
 /// Accepts this node's ID or the alias `local`.

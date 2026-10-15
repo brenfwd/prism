@@ -33,7 +33,7 @@ fn snapshot(node: &Node) -> SseEvent {
     let cursor = node.bus.cursor();
     let snap = Snapshot {
         cursor: cursor.clone(),
-        nodes: vec![node.view()],
+        nodes: node.nodes(),
         vms: node.vms().unwrap_or_default(),
         pools: node.storage.list().iter().map(|p| p.info()).collect(),
     };
@@ -47,7 +47,7 @@ fn snapshot(node: &Node) -> SseEvent {
 fn to_sse(e: &Sequenced) -> SseEvent {
     SseEvent::default()
         .id(e.id.clone())
-        .event(e.event.ty)
+        .event(&e.event.ty)
         .json_data(&e.event)
         .unwrap_or_default()
 }

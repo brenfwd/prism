@@ -22,7 +22,7 @@ const FAULT_SPIKE: u64 = 200;
 /// Ticks a VM may miss its target before being flagged unresponsive.
 const UNRESPONSIVE_TICKS: u32 = 6;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PressureLevel {
     Green,
@@ -30,7 +30,7 @@ pub enum PressureLevel {
     Red,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct HostPressure {
     pub level: PressureLevel,
     /// PSI `some avg10` and `full avg10`, percent; `None` without PSI.
@@ -39,10 +39,10 @@ pub struct HostPressure {
     pub mem_available_pct: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct BalloonStatus {
     pub target_kib: u64,
-    pub reason: &'static str,
+    pub reason: String,
     pub unresponsive: bool,
 }
 
@@ -223,7 +223,7 @@ impl Node {
                         self.update_runtime(spec.id, |r| {
                             r.balloon = Some(BalloonStatus {
                                 target_kib: current,
-                                reason: "steady",
+                                reason: "steady".into(),
                                 unresponsive,
                             });
                         });
@@ -246,7 +246,7 @@ impl Node {
                         self.update_runtime(spec.id, |r| {
                             r.balloon = Some(BalloonStatus {
                                 target_kib: target,
-                                reason,
+                                reason: reason.into(),
                                 unresponsive,
                             });
                         });

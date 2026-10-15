@@ -1,13 +1,7 @@
-//! The embedded web UI (`web/dist`), with SPA fallback.
+//! Serves the embedded web UI (`prism-web`), with SPA fallback.
 
 use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
-use rust_embed::RustEmbed;
-
-#[derive(RustEmbed)]
-#[folder = "../../web/dist"]
-#[allow_missing = true]
-struct Assets;
 
 const CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; \
     style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; \
@@ -15,17 +9,17 @@ const CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; \
 
 pub async fn serve(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
-    let (file, name) = match Assets::get(path) {
+    let (file, name) = match prism_web::get(path) {
         Some(f) if !path.is_empty() => (f, path),
         _ if path.starts_with("api/") || path.starts_with("assets/") => {
             return StatusCode::NOT_FOUND.into_response();
         }
-        _ => match Assets::get("index.html") {
+        _ => match prism_web::get("index.html") {
             Some(f) => (f, "index.html"),
             None => {
                 return (
                     StatusCode::NOT_FOUND,
-                    "UI not built: run `bun install && bun run build` in web/",
+                    "UI assets missing from this build",
                 )
                     .into_response();
             }

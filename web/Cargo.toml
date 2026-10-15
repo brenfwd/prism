@@ -1,0 +1,18 @@
+[package]
+name = "prism-web"
+description = "Prism's web UI, built with Bun and embedded"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+include = ["build.rs", "lib.rs", "index.html", "package.json", "bun.lock", "tsconfig.json", "vite.config.ts", "src/**", "public/**"]
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+rust-embed = { version = "8.13.0", features = ["interpolate-folder-path", "debug-embed"] }
+
+[lints]
+workspace = true

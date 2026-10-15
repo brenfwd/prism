@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
-    "typecheck": "tsc -b"
+    "build": "tsc && vite build",
+    "typecheck": "tsc"
   },
   "dependencies": {
     "@novnc/novnc": "^1.7.0",

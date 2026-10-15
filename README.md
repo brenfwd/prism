@@ -35,9 +35,16 @@ backups, migration and auto-ballooning are not implemented yet.
 Requires Rust (stable or nightly) and [Bun](https://bun.sh).
 
 ```sh
-(cd web && bun install && bun run build)   # builds web/dist, embedded into the binary
 cargo build --release
 ```
+
+The UI is the `prism-web` crate (`web/`). Its `build.rs` runs `bun install --frozen-lockfile`
+and `bun run build` into `OUT_DIR`, and the output is embedded into the binary. Cargo reruns it
+only when files in `web/` change.
+
+- `BUN=/path/to/bun` picks a specific Bun. Otherwise `bun` on `PATH`, then `~/.bun/bin/bun`.
+- `PRISM_SKIP_WEB=1` skips the UI and embeds a placeholder page. Useful for Rust-only checks
+  on machines without Bun.
 
 ## Run
 
@@ -66,7 +73,7 @@ domain_type = "qemu"
 
 Pool directories must support `O_DIRECT` (disks use `cache=none,io=native`), so tmpfs won't work.
 
-For UI work, run `bun run dev` in `web/`. It proxies `/api` to `127.0.0.1:8080`.
+For UI work, run `bun run dev` in `web/` for hot reload. It proxies `/api` to `127.0.0.1:8080`.
 
 ## Checks
 

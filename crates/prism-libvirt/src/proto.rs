@@ -319,3 +319,14 @@ pub mod memory_stat {
     pub const USABLE: i32 = 8;
     pub const DISK_CACHES: i32 = 10;
 }
+
+#[cfg(test)]
+mod procs_tests {
+    use super::procs;
+
+    #[test]
+    fn generated_procedure_numbers_match_the_protocol() {
+        assert_eq!(procs::CONNECT_OPEN, 1);
+        assert_eq!(procs::CONNECT_CLOSE, 2);
+    }
+}

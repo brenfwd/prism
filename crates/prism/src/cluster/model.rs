@@ -167,5 +167,9 @@ mod level_tests {
         assert!(!levels_compatible(1, 3));
         assert!(feature_enabled(1, 1));
         assert!(!feature_enabled(1, 2));
+        assert!(levels_compatible(2, 2));
+        assert!(levels_compatible(2, 1));
+        assert!(!feature_enabled(0, 1));
+        assert!(!feature_enabled(5, FEATURE_LEVEL + 1));
     }
 }

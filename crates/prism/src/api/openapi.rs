@@ -303,11 +303,66 @@ pub async fn serve() -> Json<Value> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    const SOURCES: &[&str] = &[
+        include_str!("mod.rs"),
+        include_str!("archive.rs"),
+        include_str!("archive_ops.rs"),
+        include_str!("cluster.rs"),
+        include_str!("console.rs"),
+        include_str!("host.rs"),
+        include_str!("networks.rs"),
+        include_str!("pools.rs"),
+        include_str!("tasks.rs"),
+        include_str!("vms.rs"),
+    ];
+
     #[test]
     fn operations_are_unique() {
         let mut seen = std::collections::HashSet::new();
-        for (m, p, ..) in super::OPERATIONS {
+        for (m, p, ..) in OPERATIONS {
             assert!(seen.insert((m, p)), "duplicate {m} {p}");
         }
+    }
+
+    #[test]
+    fn every_router_path_is_listed() {
+        for src in SOURCES {
+            for chunk in src.split(".route(").skip(1) {
+                let Some(path) = chunk.split('"').nth(1) else {
+                    continue;
+                };
+                if !path.starts_with('/') || path == "/openapi.json" {
+                    continue;
+                }
+                assert!(
+                    OPERATIONS.iter().any(|(_, p, ..)| *p == path),
+                    "route {path} missing from the OpenAPI table"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn document_shape() {
+        let doc = document();
+        assert_eq!(doc["openapi"], "3.1.0");
+        let paths = doc["paths"].as_object().expect("paths");
+        assert!(paths["/vms"]["get"].is_object());
+        assert!(paths["/vms"]["post"].is_object());
+        let params = paths["/vms/{id}"]["get"]["parameters"]
+            .as_array()
+            .expect("path parameters");
+        assert!(params.iter().any(|p| p["name"] == "id"));
+    }
+
+    #[test]
+    fn path_params_are_extracted() {
+        let names: Vec<_> = path_params("/a/{x}/b/{y}")
+            .iter()
+            .map(|p| p["name"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(names, ["x", "y"]);
     }
 }

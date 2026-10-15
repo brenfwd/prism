@@ -71,7 +71,9 @@ pub struct PoolInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct Volume {
     pub name: String,
+    /// Guest-visible size: the qcow2 virtual size, else the file size.
     pub size_bytes: u64,
+    pub file_bytes: u64,
     pub allocated_bytes: u64,
     pub kind: &'static str,
 }
@@ -93,6 +95,15 @@ fn volume_kind(name: &str) -> &'static str {
         Some("qcow2" | "raw" | "img") => "disk",
         _ => "file",
     }
+}
+
+/// Reads the virtual size from a qcow2 header. Display only: image
+/// metadata is untrusted and never used to make decisions.
+fn qcow2_virtual_size(fd: &OwnedFd) -> Option<u64> {
+    let mut hdr = [0u8; 32];
+    let n = rustix::io::pread(fd, &mut hdr, 0).ok()?;
+    (n == hdr.len() && hdr[..4] == *b"QFI\xfb")
+        .then(|| u64::from_be_bytes(hdr[24..32].try_into().unwrap_or_default()))
 }
 
 impl Pool {
@@ -158,19 +169,10 @@ impl Pool {
             if !valid_name(name) {
                 continue;
             }
-            let Ok(st) = rustix::fs::statat(&self.root, name, AtFlags::SYMLINK_NOFOLLOW) else {
-                continue;
-            };
-            if rustix::fs::FileType::from_raw_mode(st.st_mode) != rustix::fs::FileType::RegularFile
-            {
-                continue;
+            // Symlinks, directories and devices are skipped.
+            if let Ok(v) = self.volume(name) {
+                out.push(v);
             }
-            out.push(Volume {
-                name: name.into(),
-                size_bytes: st.st_size as u64,
-                allocated_bytes: st.st_blocks as u64 * 512,
-                kind: volume_kind(name),
-            });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(out)
@@ -180,9 +182,14 @@ impl Pool {
         Self::check(name)?;
         let fd = self.open_existing(name)?;
         let st = rustix::fs::fstat(&fd)?;
+        if rustix::fs::FileType::from_raw_mode(st.st_mode) != rustix::fs::FileType::RegularFile {
+            return Err(StorageError::NoVolume(name.into()));
+        }
+        let file_bytes = st.st_size as u64;
         Ok(Volume {
             name: name.into(),
-            size_bytes: st.st_size as u64,
+            size_bytes: qcow2_virtual_size(&fd).unwrap_or(file_bytes),
+            file_bytes,
             allocated_bytes: st.st_blocks as u64 * 512,
             kind: volume_kind(name),
         })
@@ -443,6 +450,20 @@ mod tests {
         assert_eq!(pool.volumes().unwrap().len(), 1);
         pool.delete_volume("a.iso").unwrap();
         assert!(pool.volumes().unwrap().is_empty());
+    }
+
+    #[test]
+    fn qcow2_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut hdr = vec![0u8; 512];
+        hdr[..4].copy_from_slice(b"QFI\xfb");
+        hdr[24..32].copy_from_slice(&(2u64 << 30).to_be_bytes());
+        std::fs::write(dir.path().join("a.qcow2"), &hdr).unwrap();
+        std::fs::write(dir.path().join("b.raw"), [0u8; 100]).unwrap();
+        let pool = Pool::open("p", dir.path(), "qcow2", true).unwrap();
+        let a = pool.volume("a.qcow2").unwrap();
+        assert_eq!((a.size_bytes, a.file_bytes), (2 << 30, 512));
+        assert_eq!(pool.volume("b.raw").unwrap().size_bytes, 100);
     }
 
     #[test]

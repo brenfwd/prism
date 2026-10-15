@@ -65,6 +65,7 @@ export interface Pool {
 export interface Volume {
   name: string;
   size_bytes: number;
+  file_bytes: number;
   allocated_bytes: number;
   kind: "disk" | "iso" | "file";
 }

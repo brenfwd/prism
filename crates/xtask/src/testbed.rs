@@ -75,6 +75,13 @@ impl NodeSpec {
     /// `virt-aa-helper` (the `AppArmor` profile generator) does not grant
     /// access to the backing chain of volume disks, so QEMU could not open
     /// the base image.
+    ///
+    /// The CPU is `host-model`, not `host-passthrough`: passthrough leaks
+    /// CPUID bits QEMU does not manage, notably CET shadow stacks, whose
+    /// state QEMU then fails to preserve. A vCPU ends up with a stale user
+    /// shadow-stack pointer, every process scheduled there dies with a
+    /// shadow-stack fault at the same address, and the node drops off the
+    /// network.
     fn domain_xml(&self) -> String {
         format!(
             r"<domain type='kvm'>
@@ -86,7 +93,7 @@ impl NodeSpec {
     <boot dev='hd'/>
   </os>
   <features><acpi/><apic/></features>
-  <cpu mode='host-passthrough' check='none' migratable='off'/>
+  <cpu mode='host-model' check='none'/>
   <clock offset='utc'/>
   <on_poweroff>destroy</on_poweroff>
   <on_reboot>restart</on_reboot>
@@ -589,7 +596,7 @@ impl Testbed {
         }
         self.ssh_check(
             ip,
-            "sudo install -m 0755 /tmp/prism /usr/local/bin/prism && rm -f /tmp/prism",
+            "sudo install -m 0755 /tmp/prism /usr/local/bin/prism && rm -f /tmp/prism && sync",
             None,
         )?;
         info("installed /usr/local/bin/prism");
@@ -863,7 +870,7 @@ mod tests {
         assert!(NodeSpec::from_domain("prism-tb-x").is_none());
         assert!(NodeSpec::from_domain("other").is_none());
         let xml = s.domain_xml();
-        assert!(xml.contains("<cpu mode='host-passthrough'"));
+        assert!(xml.contains("<cpu mode='host-model'"));
         assert!(xml.contains("/prism-testbed/prism-tb-12-seed.iso'"));
     }
 

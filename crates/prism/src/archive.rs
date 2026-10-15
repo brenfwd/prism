@@ -324,6 +324,18 @@ impl LocalMember {
         Ok(std::fs::File::from(fd))
     }
 
+    /// BLAKE3 of the stored file, hex (for scrubbing).
+    pub async fn hash(&self, path: &str) -> Result<String, StorageError> {
+        let file = self.open_read(path)?;
+        tokio::task::spawn_blocking(move || {
+            let mut h = blake3::Hasher::new();
+            h.update_reader(file)?;
+            Ok(h.finalize().to_hex().to_string())
+        })
+        .await
+        .map_err(|e| StorageError::Invalid(e.to_string()))?
+    }
+
     pub fn delete(&self, path: &str) -> Result<(), StorageError> {
         Self::check(path)?;
         rustix::fs::unlinkat(&self.root, path, AtFlags::empty()).map_err(|e| match e {

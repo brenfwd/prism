@@ -5,7 +5,7 @@ use uuid::Uuid;
 use super::networks;
 use super::{CLUSTER_ID, Command, Outcome, POOLS, PoolDoc, VMS};
 use crate::archive::{
-    ARCHIVE_FILES, ARCHIVE_MEMBERS, ARCHIVE_POOLS, ArchiveFileDoc, ArchivePoolDoc,
+    ARCHIVE_FILES, ARCHIVE_MEMBERS, ARCHIVE_POOLS, ArchiveFileDoc, ArchiveMemberDoc, ArchivePoolDoc,
 };
 use crate::cluster::model::{
     AdmitError, CLUSTER, ClusterDoc, INVITES, InviteDoc, MEMBERS, MemberDoc, TOMBSTONES,
@@ -145,6 +145,22 @@ pub(super) fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow:
                     m.name
                 )));
             }
+            if d.list::<ArchiveFileDoc>(ARCHIVE_FILES)?
+                .iter()
+                .any(|f| f.replicas.iter().any(|r| r.node == *node_id))
+            {
+                return Ok(Outcome::Conflict(format!(
+                    "{} still holds archive replicas; drain its archive members first",
+                    m.name
+                )));
+            }
+            for am in d
+                .list::<ArchiveMemberDoc>(ARCHIVE_MEMBERS)?
+                .into_iter()
+                .filter(|am| am.node == *node_id)
+            {
+                d.delete(ARCHIVE_MEMBERS, &am.key())?;
+            }
             d.delete(MEMBERS, &node_id.to_string())?;
             d.put(
                 TOMBSTONES,
@@ -182,6 +198,37 @@ pub(super) fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow:
                 )?;
             }
             d.put(ARCHIVE_MEMBERS, &member.key(), member)?;
+        }
+        Command::AddArchiveReplica {
+            pool,
+            path,
+            replica,
+        } => {
+            let key = ArchiveFileDoc::key(pool, path);
+            let Some(mut f) = d.get::<ArchiveFileDoc>(ARCHIVE_FILES, &key)? else {
+                return Ok(Outcome::NotFound(format!("{path} in {pool}")));
+            };
+            if !f.replicas.contains(replica) {
+                f.replicas.push(replica.clone());
+                d.put(ARCHIVE_FILES, &key, &f)?;
+            }
+        }
+        Command::RemoveArchiveReplica {
+            pool,
+            path,
+            replica,
+        } => {
+            let key = ArchiveFileDoc::key(pool, path);
+            let Some(mut f) = d.get::<ArchiveFileDoc>(ARCHIVE_FILES, &key)? else {
+                return Ok(Outcome::NotFound(format!("{path} in {pool}")));
+            };
+            if f.replicas.len() == 1 && f.replicas[0] == *replica {
+                return Ok(Outcome::Conflict(format!(
+                    "{path} has no other replica; copy it elsewhere first"
+                )));
+            }
+            f.replicas.retain(|r| r != replica);
+            d.put(ARCHIVE_FILES, &key, &f)?;
         }
         Command::PutArchiveFile { file, create } => {
             if d.get::<ArchivePoolDoc>(ARCHIVE_POOLS, &file.pool)?

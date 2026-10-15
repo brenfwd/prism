@@ -1,6 +1,7 @@
 //! HTTP API under `/api/v1`, plus the embedded UI.
 
 mod archive;
+mod archive_ops;
 mod cluster;
 mod console;
 mod forward;
@@ -40,6 +41,7 @@ pub fn router(node: AppState) -> Router {
         .merge(cluster::routes())
         .merge(internal::routes())
         .merge(archive::routes())
+        .merge(archive_ops::routes())
         .route("/events", get(sse::events))
         .fallback(|| async { ApiError::not_found("no such endpoint") })
         .layer(axum::middleware::from_fn_with_state(

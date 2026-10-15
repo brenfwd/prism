@@ -7,6 +7,7 @@ mod cluster;
 mod config;
 mod db;
 mod events;
+mod leave;
 mod network;
 mod node;
 mod render;
@@ -70,6 +71,15 @@ enum Command {
         #[command(subcommand)]
         cmd: cli::ClusterCmd,
     },
+    /// Leave the cluster and wipe this node's state.
+    Leave {
+        #[arg(long)]
+        config: PathBuf,
+        /// Wipe offline, without telling the cluster (stop `prism serve`
+        /// first); remove the node from another member afterwards.
+        #[arg(long)]
+        force: bool,
+    },
     /// Join a cluster with an invite from `prism cluster invite`.
     Join {
         #[arg(long)]
@@ -107,6 +117,9 @@ fn main() -> anyhow::Result<()> {
         Command::Doctor { config } => tokio::runtime::Runtime::new()?.block_on(doctor(&config)),
         Command::Cluster { config, cmd } => {
             tokio::runtime::Runtime::new()?.block_on(cli::cluster(&config, cmd))
+        }
+        Command::Leave { config, force } => {
+            tokio::runtime::Runtime::new()?.block_on(leave::leave(&config, force))
         }
         Command::Join { config, invite } => {
             tokio::runtime::Runtime::new()?.block_on(cli::join(&config, &invite))

@@ -23,6 +23,8 @@ pub fn routes() -> Router<AppState> {
         .route("/cluster/invites/{id}", delete(revoke))
         .route("/cluster/accept", post(accept))
         .route("/cluster/join", post(join))
+        .route("/cluster/leave", post(leave))
+        .route("/cluster/removed", get(removed))
         .route("/cluster/members/{node}", delete(remove))
         .route("/cluster/members/{node}/voter", post(set_voter))
         .route("/cluster/mesh", get(mesh))
@@ -164,6 +166,53 @@ async fn remove(
         .await
         .map_err(NodeError::from)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Removes this node from the cluster, then stops the daemon so the CLI can
+/// wipe its state.
+async fn leave(State(node): State<AppState>) -> Result<StatusCode, ApiError> {
+    let c = cluster(&node)?;
+    let Some(doc) = c.state.cluster()? else {
+        return Err(ApiError::bad_request("this node is not in a cluster"));
+    };
+    let others = c
+        .state
+        .members()?
+        .iter()
+        .filter(|m| m.node_id != node.id)
+        .count();
+    let is_hub = doc.mode == ClusterMode::HubSpoke
+        && c.state
+            .members()?
+            .iter()
+            .any(|m| m.node_id == node.id && m.voter);
+    if others > 0 && is_hub {
+        return Err(ApiError::bad_request(
+            "this node is the hub; remove the other members first, or run `prism leave --force`",
+        ));
+    }
+    if others > 0 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+        node.state
+            .apply(Command::RemoveMember {
+                node_id: node.id,
+                now,
+            })
+            .await
+            .map_err(NodeError::from)?;
+    }
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        std::process::exit(0);
+    });
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Tombstones: removed members whose identity is blocked for good.
+async fn removed(State(node): State<AppState>) -> Result<impl IntoResponse, ApiError> {
+    Ok(axum::Json(node.state.tombstones()?))
 }
 
 #[derive(Debug, Deserialize)]

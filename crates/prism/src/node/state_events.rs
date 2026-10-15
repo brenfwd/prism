@@ -114,7 +114,10 @@ impl Node {
                         serde_json::Value::Null,
                     );
                 }
-                Command::PutArchivePool { .. } | Command::PutArchiveMember { .. } => {
+                Command::PutArchivePool { .. }
+                | Command::PutArchiveMember { .. }
+                | Command::AddArchiveReplica { .. }
+                | Command::RemoveArchiveReplica { .. } => {
                     self.bus.publish(
                         "archive.pool",
                         "/archive/pools".into(),

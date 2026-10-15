@@ -3,6 +3,7 @@
 
 mod apparmor;
 mod archive_io;
+mod archive_repair;
 mod backups;
 mod balloon;
 mod devices;
@@ -198,6 +199,7 @@ impl Node {
         tokio::spawn(Arc::clone(self).watch_state());
         tokio::spawn(Arc::clone(self).stats_loop());
         tokio::spawn(Arc::clone(self).balloon_loop());
+        tokio::spawn(Arc::clone(self).scrub_loop());
         tokio::spawn(crate::network::Agent::new(self.id, self.state.clone()).run());
         tokio::spawn(Arc::clone(self).seed_default_network());
     }

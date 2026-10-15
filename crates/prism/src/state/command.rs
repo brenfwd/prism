@@ -73,6 +73,18 @@ pub enum Command {
         file: ArchiveFileDoc,
         create: bool,
     },
+    /// Adds a verified replica to an existing file.
+    AddArchiveReplica {
+        pool: String,
+        path: String,
+        replica: crate::archive::Replica,
+    },
+    /// Forgets a replica (drained, missing or corrupt); the last one stays.
+    RemoveArchiveReplica {
+        pool: String,
+        path: String,
+        replica: crate::archive::Replica,
+    },
     DeleteArchiveFile {
         pool: String,
         path: String,

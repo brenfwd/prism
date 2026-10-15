@@ -15,10 +15,20 @@ use crate::spec::{DiskDevice, DiskSpec, NicNetwork, NicSpec, VmSpec, random_mac,
 /// How long to wait for the guest to release a hot-unplugged device.
 const UNPLUG_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// A file in an archive pool.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ArchiveRef {
+    pub pool: String,
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddDisk {
     pub pool: String,
+    /// Attach an ISO from an archive pool (CD-ROMs only).
+    #[serde(default)]
+    pub archive: Option<ArchiveRef>,
     /// Attach an existing volume…
     #[serde(default)]
     pub volume: Option<String>,
@@ -42,6 +52,9 @@ pub struct UpdateDisk {
     pub media: Option<Option<String>>,
     /// Grow the disk to this size.
     pub size_gib: Option<u64>,
+    /// CD-ROM media from an archive pool instead of a local volume.
+    #[serde(default)]
+    pub archive: Option<ArchiveRef>,
 }
 
 #[allow(clippy::option_option)]
@@ -116,10 +129,37 @@ impl Node {
         Ok(self.vm_view(spec))
     }
 
-    pub async fn add_disk(&self, id: Uuid, req: AddDisk) -> Result<VmView> {
+    /// Makes an archive file available as a volume in `pool`, fetching it
+    /// once (named by its BLAKE3) and verifying it before first use.
+    async fn archive_volume(&self, pool: &str, r: &ArchiveRef) -> Result<String> {
+        let file = self
+            .state
+            .archive_file(&r.pool, &r.path)?
+            .ok_or_else(|| NodeError::NotFound(format!("{}/{}", r.pool, r.path)))?;
+        let pool = self.storage.get(pool)?;
+        let name = format!("archive-{}.iso", &file.blake3[..16.min(file.blake3.len())]);
+        if pool.volume(&name).is_ok() {
+            return Ok(name);
+        }
+        let partial = self.archive_fetch(&file, &pool).await?;
+        match pool.commit_partial(&partial, &name) {
+            Ok(()) | Err(crate::storage::StorageError::Exists(_)) => Ok(name),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub async fn add_disk(&self, id: Uuid, mut req: AddDisk) -> Result<VmView> {
         let _guard = self.ops.lock().await;
         let old = self.local_spec(id)?;
         let pool = self.storage.get(&req.pool)?;
+        if let Some(a) = &req.archive {
+            if req.device != DiskDevice::Cdrom || req.volume.is_some() {
+                return Err(NodeError::Invalid(
+                    "archive files attach only as CD-ROMs, without a volume".into(),
+                ));
+            }
+            req.volume = Some(self.archive_volume(&req.pool, a).await?);
+        }
         let (volume, created) = match (req.volume, req.size_gib, req.device) {
             (Some(v), None, _) => {
                 pool.volume(&v)?;
@@ -221,17 +261,22 @@ impl Node {
                 )
                 .await?;
             }
-            if req.media.is_none() {
+            if req.media.is_none() && req.archive.is_none() {
                 self.refresh(&spec).await;
                 return Ok(self.vm_view(spec));
             }
         }
-        if let Some(media) = req.media {
+        if req.media.is_some() || req.archive.is_some() {
+            let media = req.media.clone().flatten();
             if disk.device != DiskDevice::Cdrom {
                 return Err(NodeError::Invalid(
                     "only CD-ROMs have removable media".into(),
                 ));
             }
+            let media = match (&req.archive, media) {
+                (Some(a), _) => Some(self.archive_volume(&disk.pool, a).await?),
+                (None, m) => m,
+            };
             if let Some(v) = &media {
                 self.storage.get(&disk.pool)?.volume(v)?;
             }

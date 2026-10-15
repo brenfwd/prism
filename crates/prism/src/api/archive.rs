@@ -141,6 +141,8 @@ async fn list_files(
 struct UploadQuery {
     /// Set when a peer forwards an upload to the chosen member's node.
     member: Option<String>,
+    /// With `member`: this is a replica copy of an existing file.
+    replica: Option<u8>,
 }
 
 fn unix_now() -> i64 {
@@ -162,6 +164,14 @@ async fn upload(
         return Err(ApiError::bad_request(
             "paths are /-separated names of [A-Za-z0-9._-]",
         ));
+    }
+    if q.replica.is_some()
+        && let Some(m) = &q.member
+    {
+        node.archive_receive_replica(&pool, &path, m, req.into_body())
+            .await
+            .map_err(NodeError::Internal)?;
+        return Ok(StatusCode::NO_CONTENT.into_response());
     }
     if node.state.archive_file(&pool, &path)?.is_some() {
         return Err(ApiError::new(
@@ -245,6 +255,18 @@ async fn upload(
         let _ = member.delete(&path);
         return Err(NodeError::from(e).into());
     }
+    if let Ok(Some(p)) = node
+        .state
+        .archive_pools()
+        .map(|p| p.into_iter().find(|p| p.name == pool && p.replicas > 1))
+    {
+        let node = std::sync::Arc::clone(&node);
+        tokio::spawn(async move {
+            if let Err(e) = node.archive_repair_pool(&p.name).await {
+                tracing::warn!("filling replicas of {}: {e:#}", p.name);
+            }
+        });
+    }
     Ok((StatusCode::CREATED, axum::Json(file)).into_response())
 }
 
@@ -318,6 +340,8 @@ fn parse_range(v: &str, size: u64) -> Option<(u64, u64)> {
 #[derive(Debug, Deserialize)]
 struct LocalQuery {
     local: Option<u8>,
+    /// With `local`: delete only this member's copy.
+    member: Option<String>,
 }
 
 /// Serves a file (with `Range`) from a replica on this node, or proxies it
@@ -413,6 +437,14 @@ async fn delete_file(
     Path((pool, path)): Path<(String, String)>,
     Query(q): Query<LocalQuery>,
 ) -> Result<StatusCode, ApiError> {
+    if q.local.is_some()
+        && let Some(name) = &q.member
+    {
+        if let Some(m) = node.archive.member(name).filter(|m| m.pool == pool) {
+            let _ = m.delete(&path);
+        }
+        return Ok(StatusCode::NO_CONTENT);
+    }
     let file = node
         .state
         .archive_file(&pool, &path)?

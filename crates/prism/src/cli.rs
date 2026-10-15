@@ -45,6 +45,8 @@ pub enum ClusterCmd {
     },
     /// Remove a member (its VMs must be moved first).
     Remove { node: String },
+    /// Show removed members, whose keys, IDs and addresses are blocked.
+    Removed,
 }
 
 /// The daemon's API address: a loopback listener if there is one.
@@ -59,7 +61,7 @@ fn api_addr(cfg: &Config) -> anyhow::Result<SocketAddr> {
 }
 
 /// One JSON request over HTTP/1.1 to the local daemon.
-async fn call(
+pub(crate) async fn call(
     cfg: &Config,
     method: &str,
     path: &str,
@@ -251,6 +253,21 @@ pub async fn cluster(dir: &Path, cmd: ClusterCmd) -> anyhow::Result<()> {
                 "Admitted {}. It finishes joining by itself.",
                 p["name"].as_str().unwrap_or_default()
             );
+        }
+        ClusterCmd::Removed => {
+            let t = call(&cfg, "GET", "/cluster/removed", None).await?;
+            let list = t.as_array().cloned().unwrap_or_default();
+            if list.is_empty() {
+                println!("No members have been removed.");
+            }
+            for m in list {
+                println!(
+                    "  {}  {}  key {}",
+                    m["node_id"].as_str().unwrap_or_default(),
+                    m["mesh_addr"].as_str().unwrap_or_default(),
+                    m["wg_pubkey"].as_str().unwrap_or_default()
+                );
+            }
         }
         ClusterCmd::Remove { node } => {
             call(&cfg, "DELETE", &format!("/cluster/members/{node}"), None).await?;

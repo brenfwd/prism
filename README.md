@@ -46,6 +46,46 @@ only when files in `web/` change.
 - `PRISM_SKIP_WEB=1` skips the UI and embeds a placeholder page. Useful for Rust-only checks
   on machines without Bun.
 
+### Static binary
+
+A plain `cargo build` links glibc dynamically. For a fully static binary, build for a musl
+target. The bundled SQLite is C code and needs a musl C compiler; `cargo-zigbuild` uses Zig
+to provide one. musl targets link `crt-static` by default, so no `RUSTFLAGS` are needed.
+
+One-time setup:
+
+```sh
+rustup target add x86_64-unknown-linux-musl     # aarch64-unknown-linux-musl for ARM
+cargo install cargo-zigbuild
+# plus Zig on PATH: https://ziglang.org/download/ (or your package manager)
+```
+
+Build:
+
+```sh
+cargo zigbuild --release --target x86_64-unknown-linux-musl -p prism
+# → target/x86_64-unknown-linux-musl/release/prism
+```
+
+Verify that it is static:
+
+```sh
+B=target/x86_64-unknown-linux-musl/release/prism
+file "$B"                       # "statically linked"
+readelf -d "$B" | grep NEEDED   # must print nothing
+ldd "$B"                        # "not a dynamic executable"
+```
+
+Notes:
+
+- The UI is embedded as usual, so the build machine still needs Bun.
+- Plain `cargo build --target x86_64-unknown-linux-musl` (without zigbuild) usually fails while
+  compiling SQLite unless a musl C toolchain such as `musl-gcc` is installed.
+- Zig may print `linker stderr: ignoring deprecated linker optimization setting "1"`. It is harmless.
+- Any new dependency that links a system library (OpenSSL, libz, …) breaks the static
+  build. The `readelf` check above catches it. See the dependency rules in
+  [docs/DESIGN.md](docs/DESIGN.md).
+
 ## Run
 
 Prism runs as root on a KVM host with libvirt ≥ 8.0 (`virtqemud` or `libvirtd`) and `qemu-img`.

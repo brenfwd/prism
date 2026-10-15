@@ -278,8 +278,7 @@ impl Node {
 
         // 5. Source-side sockets QEMU connects to, spliced to the destination.
         let dir = migration_dir(migration);
-        std::fs::create_dir_all(&dir)?;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o711))?;
+        crate::storage::create_traversable(&dir)?;
         let mut splicers = Vec::new();
         for which in ["mem", "nbd"] {
             let path = dir.join(format!("{which}.sock"));
@@ -452,7 +451,8 @@ impl Node {
         }
         let seed = self.seed_iso(&req.vm)?;
         let dir = migration_dir(migration);
-        std::fs::create_dir_all(&dir).map_err(anyhow::Error::from)?;
+        // Parents must be traversable by QEMU's user.
+        crate::storage::create_traversable(&dir).map_err(anyhow::Error::from)?;
         // QEMU (its own user) creates the listening sockets here.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
             .map_err(anyhow::Error::from)?;

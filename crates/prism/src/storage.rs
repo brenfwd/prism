@@ -103,7 +103,7 @@ fn volume_kind(name: &str) -> &'static str {
 /// Creates `path` and any missing parents as root-owned `0711`: the qemu
 /// uid can reach image files (which libvirt relabels) but cannot list or
 /// write the directories. Explicit because Prism runs with `umask 077`.
-fn create_traversable(path: &Path) -> std::io::Result<()> {
+pub(crate) fn create_traversable(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
     let missing: Vec<&Path> = path.ancestors().take_while(|p| !p.exists()).collect();

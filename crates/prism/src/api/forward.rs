@@ -52,9 +52,17 @@ pub async fn route(State(node): State<AppState>, req: Request, next: Next) -> Re
     if req.extensions().get::<Tunnelled>().is_some() || !node.state.clustered() || is_ws {
         return next.run(req).await;
     }
-    let Some(owner) = owner(&node, req.uri().path(), req.uri().query()) else {
+    // Inside the nested API router the path has lost its `/api/v1` prefix;
+    // route and forward with the original URI.
+    let original = req
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map_or_else(|| req.uri().clone(), |o| o.0.clone());
+    let Some(owner) = owner(&node, original.path(), original.query()) else {
         return next.run(req).await;
     };
+    let mut req = req;
+    *req.uri_mut() = original;
     let Some(cluster) = node.cluster.get() else {
         return next.run(req).await;
     };

@@ -274,7 +274,10 @@ async fn forward_to(
             )
         })?;
     let (mut parts, body) = req.into_parts();
-    let path = parts.uri.path().to_string();
+    let path = parts
+        .extensions
+        .get::<axum::extract::OriginalUri>()
+        .map_or_else(|| parts.uri.path().to_string(), |o| o.0.path().to_string());
     let uri = match member {
         Some(mem) => format!("{path}?member={mem}"),
         None => format!("{path}?local=1"),

@@ -77,6 +77,12 @@ pub struct FinishReq {
     /// Images to delete when cancelled.
     pub pool: String,
     pub images: Vec<String>,
+    /// Snapshot metadata to redefine on the destination.
+    #[serde(default)]
+    pub snapshot_xml: Vec<String>,
+    /// The VM as the destination will own it.
+    #[serde(default)]
+    pub vm: Option<Box<VmSpec>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,9 +183,7 @@ impl Node {
     ) -> anyhow::Result<serde_json::Value> {
         let c = self.client()?;
         let dom = domain_ref(spec);
-        if !c.snapshots(&dom).await?.is_empty() {
-            anyhow::bail!("{} has snapshots; delete them before migrating", spec.name);
-        }
+        let snapshot_xml = self.export_snapshots(spec).await?;
 
         // 1. Intent: the VM may run on either node until this completes.
         let mut intent = spec.clone();
@@ -330,6 +334,8 @@ impl Node {
                     cancelled: !perform_ok,
                     pool: req.pool.clone(),
                     images: image_names,
+                    snapshot_xml,
+                    vm: Some(Box::new(on_destination(spec, dst.node_id, &req.pool))),
                 },
             )
             .await?;
@@ -495,11 +501,17 @@ impl Node {
             .await;
         let _ = std::fs::remove_dir_all(migration_dir(migration));
         match res {
-            Ok((_, cookie_out)) if !req.cancelled => Ok(FinishResp {
-                cookie: B64.encode(cookie_out),
-                ok: true,
-                error: None,
-            }),
+            Ok((_, cookie_out)) if !req.cancelled => {
+                if let Some(vm) = &req.vm {
+                    self.import_migrated_snapshots(vm.id, &req.pool, vm, &req.snapshot_xml)
+                        .await;
+                }
+                Ok(FinishResp {
+                    cookie: B64.encode(cookie_out),
+                    ok: true,
+                    error: None,
+                })
+            }
             other => {
                 if let Ok(pool) = self.storage.get(&req.pool) {
                     for n in &req.images {

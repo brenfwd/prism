@@ -500,6 +500,7 @@ mod tests {
             autostart: false,
             cloud_init: None,
             migrating: None,
+            snapshot_xml: Vec::new(),
         }
     }
 

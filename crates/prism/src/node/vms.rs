@@ -101,6 +101,7 @@ impl Node {
             autostart: req.autostart,
             cloud_init: req.cloud_init,
             migrating: None,
+            snapshot_xml: Vec::new(),
         };
         spec.assign_targets();
 

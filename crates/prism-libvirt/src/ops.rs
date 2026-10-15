@@ -53,6 +53,8 @@ pub mod flags {
     pub const AFFECT_CONFIG: u32 = 2;
 
     pub const SNAPSHOT_CREATE_REDEFINE: u32 = 1;
+    pub const SNAPSHOT_CREATE_CURRENT: u32 = 2;
+    pub const SNAPSHOT_REDEFINE_CURRENT_FLAGS: u32 = 1 | 2;
     pub const SNAPSHOT_CREATE_NO_METADATA: u32 = 4;
     pub const SNAPSHOT_CREATE_DISK_ONLY: u32 = 16;
     pub const SNAPSHOT_CREATE_REUSE_EXT: u32 = 32;

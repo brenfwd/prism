@@ -36,6 +36,10 @@ pub struct VmSpec {
     /// it completes, and neither node quarantines it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migrating: Option<Migration>,
+    /// Snapshot metadata in transit during a move; redefined (and cleared)
+    /// by the destination node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub snapshot_xml: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -403,6 +407,7 @@ pub mod tests {
             autostart: false,
             cloud_init: None,
             migrating: None,
+            snapshot_xml: Vec::new(),
         }
     }
 

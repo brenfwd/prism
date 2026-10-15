@@ -15,6 +15,7 @@ mod moves;
 mod networks;
 mod remote;
 mod runtime;
+mod snapshot_move;
 mod snapshots;
 mod state_events;
 mod vms;

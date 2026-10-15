@@ -3,7 +3,7 @@
   <uuid>8f0c2a51-4b1e-4c3e-9a0d-2f5b6c7d8e9f</uuid>
   <description>a &amp; b</description>
   <metadata>
-    <prism:vm xmlns:prism='urn:prism:1' generation='3'/>
+    <prism:vm xmlns:prism='urn:prism:1' generation='3' epoch='4'/>
   </metadata>
   <memory unit='KiB'>2097152</memory>
   <currentMemory unit='KiB'>1048576</currentMemory>
@@ -27,6 +27,7 @@
       <target dev='vda' bus='virtio'/>
       <boot order='1'/>
       <serial>11111111222233334444</serial>
+      <alias name='ua-11111111-2222-3333-4444-555555555555'/>
     </disk>
     <disk type='file' device='cdrom'>
       <driver name='qemu' type='raw'/>
@@ -35,13 +36,35 @@
       <readonly/>
       <boot order='2'/>
       <serial>66666666777788889999</serial>
+      <alias name='ua-66666666-7777-8888-9999-000000000000'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <target dev='sdb' bus='sata'/>
+      <readonly/>
+      <serial>77777777777788889999</serial>
+      <alias name='ua-77777777-7777-8888-9999-000000000000'/>
+    </disk>
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='/var/lib/prism/pools/default/.prism-seed-x.iso'/>
+      <target dev='sdzz' bus='sata'/>
+      <readonly/>
+      <alias name='ua-cloud-init'/>
     </disk>
     <interface type='bridge'>
       <source bridge='br0'/>
       <target dev='pnabcdef01'/>
       <mac address='52:54:00:aa:bb:cc'/>
       <model type='virtio'/>
+      <alias name='ua-abcdef01-2222-3333-4444-555555555555'/>
     </interface>
+    <controller type='pci' model='pcie-root-port'/>
+    <controller type='pci' model='pcie-root-port'/>
+    <controller type='pci' model='pcie-root-port'/>
+    <controller type='pci' model='pcie-root-port'/>
+    <controller type='pci' model='pcie-root-port'/>
+    <controller type='pci' model='pcie-root-port'/>
     <serial type='pty'>
       <target port='0'/>
     </serial>

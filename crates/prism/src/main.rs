@@ -7,11 +7,14 @@ mod events;
 mod node;
 mod render;
 mod spec;
+mod state;
 mod storage;
+mod tasks;
 mod ui;
 
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use clap::{Parser, Subcommand};
@@ -19,10 +22,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::db::Db;
+use crate::db::{NodeDb, StateDb};
 use crate::events::Bus;
 use crate::node::Node;
+use crate::state::State;
 use crate::storage::{Pool, Storage};
+use crate::tasks::Tasks;
 
 #[derive(Debug, Parser)]
 #[command(name = "prism", version, about = "libvirt/KVM manager")]
@@ -160,13 +165,21 @@ async fn serve(dir: &Path, adopt: bool) -> anyhow::Result<()> {
         .mode(0o700)
         .create(dir.join("data"))?;
     let node_id = load_identity(dir, adopt)?;
-    let db = Db::open(&dir.join("data/state.db"))?;
-    let boot_epoch: u64 = db
+    let state_db = StateDb::open(&dir.join("data/state.db"))?;
+    let node_db = NodeDb::open(&dir.join("data/node.db"))?;
+    let boot_epoch: u64 = state_db
         .meta("boot_epoch")?
         .and_then(|s| s.parse().ok())
         .unwrap_or(0)
         + 1;
-    db.set_meta("boot_epoch", &boot_epoch.to_string())?;
+    state_db.set_meta("boot_epoch", &boot_epoch.to_string())?;
+    // Autostart VMs only once per host boot, not on every Prism restart.
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let host_booted = state_db.meta("host_boot_id")?.as_deref() != Some(boot_id.as_str());
+    state_db.set_meta("host_boot_id", &boot_id)?;
+    let state = State::new(state_db, node_id);
 
     let storage = Storage::new(cfg.storage.pool_roots.clone());
     for (name, p) in &cfg.pools {
@@ -175,10 +188,17 @@ async fn serve(dir: &Path, adopt: bool) -> anyhow::Result<()> {
                 .with_context(|| format!("opening pool {name}"))?,
         );
     }
-    for row in db.pools()? {
-        match Pool::open(&row.name, Path::new(&row.path), &row.format, false) {
-            Ok(p) => storage.insert(p),
-            Err(e) => tracing::error!("pool {}: {e}", row.name),
+    for p in state.pools(node_id)? {
+        if storage.get(&p.name).is_ok() {
+            tracing::warn!(
+                "pool {} is defined in prism.toml and the API; using prism.toml",
+                p.name
+            );
+            continue;
+        }
+        match Pool::open(&p.name, &p.path, &p.format, false) {
+            Ok(pool) => storage.insert(pool),
+            Err(e) => tracing::error!("pool {}: {e}", p.name),
         }
     }
 
@@ -188,8 +208,18 @@ async fn serve(dir: &Path, adopt: bool) -> anyhow::Result<()> {
             .to_string_lossy()
             .into_owned()
     });
-    let bus = Bus::new(node_id.to_string(), boot_epoch);
-    let node = Node::new(node_id, name, cfg.clone(), db, storage, bus);
+    let bus = Arc::new(Bus::new(node_id.to_string(), boot_epoch));
+    let tasks = Tasks::new(node_db, Arc::clone(&bus), node_id);
+    let node = Node::new(
+        node_id,
+        name,
+        cfg.clone(),
+        state,
+        storage,
+        bus,
+        tasks,
+        host_booted,
+    );
     node.start();
 
     let app = api::router(node);

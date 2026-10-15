@@ -4,11 +4,17 @@
 //! `libvirt-sock`) so the libvirt C library is never linked.
 
 mod client;
+mod events;
+pub mod ops;
 pub mod proto;
+pub mod typed;
 pub mod xdr;
 
-pub use client::{Client, DomainEvent, Stream, StreamReader, StreamWriter};
+pub use client::{Client, Stream, StreamReader, StreamWriter};
+pub use events::{BlockJobStatus, DomainEvent};
+pub use ops::{BlockInfo, BlockJobInfo, DomainChild};
 pub use proto::{Domain, DomainInfo, DomainState, LifecycleEvent, NodeInfo, RemoteError};
+pub use typed::{Params, TypedParam, TypedValue};
 
 /// Errors returned by the client.
 #[derive(Debug, thiserror::Error)]

@@ -19,11 +19,42 @@ pub struct VmSpec {
     pub machine: String,
     pub disks: Vec<DiskSpec>,
     pub nics: Vec<NicSpec>,
+    /// Owning node; nil in documents written before clustering existed.
+    #[serde(default)]
+    pub node: Uuid,
+    /// Bumped whenever ownership moves; a node only runs VMs it owns.
+    #[serde(default)]
+    pub owner_epoch: u64,
+    /// Start the VM when its node starts (managed by Prism, not libvirt).
+    #[serde(default)]
+    pub autostart: bool,
+    #[serde(default)]
+    pub cloud_init: Option<CloudInit>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CpuSpec {
     pub vcpus: u32,
+    #[serde(default)]
+    pub model: CpuModel,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CpuModel {
+    /// The host CPU model with its features; migratable between similar hosts.
+    #[default]
+    HostModel,
+    /// Exactly the host CPU; fastest, but only migratable to identical CPUs.
+    HostPassthrough,
+}
+
+/// cloud-init `NoCloud` data, delivered on a generated seed ISO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudInit {
+    pub user_data: String,
+    #[serde(default)]
+    pub network_config: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,11 +87,19 @@ pub enum Firmware {
 pub struct DiskSpec {
     pub id: Uuid,
     pub pool: String,
-    pub volume: String,
+    /// The image file; `None` is an empty CD-ROM tray.
+    pub volume: Option<String>,
     pub device: DiskDevice,
     pub format: String,
     #[serde(default)]
     pub boot_order: Option<u32>,
+    /// Guest device name (`vda`, `sdb`); stable across hotplug.
+    #[serde(default)]
+    pub target: String,
+    /// Read-only backing layers below `volume` (snapshot history), oldest
+    /// first, as volume names in the same pool.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backing: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,6 +114,8 @@ pub struct NicSpec {
     pub id: Uuid,
     pub mac: String,
     pub network: NicNetwork,
+    #[serde(default)]
+    pub boot_order: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +151,16 @@ pub struct CreateVm {
     pub iso: Option<String>,
     #[serde(default)]
     pub network: Option<NicNetwork>,
+    /// Copy this volume (in `pool`) as the boot disk, for example a cloud
+    /// image; grown to `disk_gib` when given.
+    #[serde(default)]
+    pub image: Option<String>,
+    #[serde(default)]
+    pub cloud_init: Option<CloudInit>,
+    #[serde(default)]
+    pub autostart: bool,
+    #[serde(default)]
+    pub cpu_model: CpuModel,
 }
 
 fn default_balloon() -> BalloonMode {
@@ -126,7 +177,27 @@ fn default_firmware() -> Firmware {
 pub struct UpdateVm {
     pub description: Option<String>,
     pub vcpus: Option<u32>,
+    pub cpu_model: Option<CpuModel>,
     pub memory: Option<UpdateMemory>,
+    pub autostart: Option<bool>,
+    /// `Some(None)` removes cloud-init.
+    #[allow(clippy::option_option)] // absent vs. null
+    #[serde(default, deserialize_with = "double_option")]
+    pub cloud_init: Option<Option<CloudInit>>,
+    /// Disk and NIC IDs in boot order; devices not listed don't boot.
+    pub boot_order: Option<Vec<Uuid>>,
+    /// Optimistic concurrency: fail unless the VM is at this generation.
+    pub generation: Option<u64>,
+}
+
+/// Distinguishes an absent field (`None`) from `null` (`Some(None)`).
+#[allow(clippy::option_option)]
+fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -160,6 +231,72 @@ impl MemorySpec {
     }
 }
 
+impl VmSpec {
+    /// Assigns guest device names to disks that lack one: the lowest free
+    /// name per bus prefix, so existing names never change.
+    pub fn assign_targets(&mut self) {
+        let mut used: Vec<String> = self
+            .disks
+            .iter()
+            .filter(|d| !d.target.is_empty())
+            .map(|d| d.target.clone())
+            .collect();
+        for disk in self.disks.iter_mut().filter(|d| d.target.is_empty()) {
+            let prefix = disk.device.target_prefix();
+            let name = (0..26 * 27)
+                .map(|i| disk_target(prefix, i))
+                .find(|n| !used.contains(n))
+                .unwrap_or_default();
+            used.push(name.clone());
+            disk.target = name;
+        }
+    }
+
+    /// Sets boot order from a list of disk and NIC IDs.
+    pub fn set_boot_order(&mut self, order: &[Uuid]) -> Result<(), String> {
+        for id in order {
+            if !self.disks.iter().any(|d| d.id == *id) && !self.nics.iter().any(|n| n.id == *id) {
+                return Err(format!("no disk or NIC {id}"));
+            }
+        }
+        let pos = |id: Uuid| order.iter().position(|o| *o == id).map(|p| p as u32 + 1);
+        for d in &mut self.disks {
+            d.boot_order = pos(d.id);
+        }
+        for n in &mut self.nics {
+            n.boot_order = pos(n.id);
+        }
+        Ok(())
+    }
+
+    pub fn disk(&self, id: Uuid) -> Option<&DiskSpec> {
+        self.disks.iter().find(|d| d.id == id)
+    }
+}
+
+impl DiskDevice {
+    pub fn target_prefix(self) -> &'static str {
+        match self {
+            Self::Disk => "vd",
+            Self::Cdrom => "sd",
+        }
+    }
+}
+
+/// `vda`..`vdz`, then `vdaa`..: the Linux naming scheme.
+pub fn disk_target(prefix: &str, index: usize) -> String {
+    let letters = b"abcdefghijklmnopqrstuvwxyz";
+    if index < 26 {
+        format!("{prefix}{}", letters[index] as char)
+    } else {
+        format!(
+            "{prefix}{}{}",
+            letters[(index / 26 - 1) % 26] as char,
+            letters[index % 26] as char
+        )
+    }
+}
+
 /// A locally administered unicast MAC in QEMU's `52:54:00` range.
 pub fn random_mac() -> String {
     let b = Uuid::new_v4().into_bytes();
@@ -182,6 +319,9 @@ impl CreateVm {
         if self.disk_gib == Some(0) {
             return Err("disk_gib must be positive".into());
         }
+        if self.image.is_some() && self.iso.is_some() {
+            return Err("give either image or iso, not both".into());
+        }
         Ok(())
     }
 }
@@ -195,8 +335,102 @@ pub fn valid_ifname(name: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
+
+    pub fn sample_spec(name: &str) -> VmSpec {
+        VmSpec {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            description: String::new(),
+            generation: 1,
+            cpu: CpuSpec {
+                vcpus: 1,
+                model: CpuModel::HostModel,
+            },
+            memory: MemorySpec {
+                max_mib: 512,
+                min_mib: 256,
+                target_mib: 512,
+                balloon: BalloonMode::Manual,
+            },
+            firmware: Firmware::Bios,
+            machine: "q35".into(),
+            disks: vec![],
+            nics: vec![],
+            node: Uuid::nil(),
+            owner_epoch: 0,
+            autostart: false,
+            cloud_init: None,
+        }
+    }
+
+    fn disk(device: DiskDevice, target: &str) -> DiskSpec {
+        DiskSpec {
+            id: Uuid::new_v4(),
+            pool: "p".into(),
+            volume: Some("v".into()),
+            device,
+            format: "qcow2".into(),
+            boot_order: None,
+            target: target.into(),
+            backing: vec![],
+        }
+    }
+
+    #[test]
+    fn targets_are_stable() {
+        let mut s = sample_spec("a");
+        s.disks = vec![
+            disk(DiskDevice::Disk, "vdb"),
+            disk(DiskDevice::Disk, ""),
+            disk(DiskDevice::Cdrom, ""),
+        ];
+        s.assign_targets();
+        assert_eq!(s.disks[0].target, "vdb");
+        assert_eq!(s.disks[1].target, "vda");
+        assert_eq!(s.disks[2].target, "sda");
+        assert_eq!(disk_target("vd", 26), "vdaa");
+    }
+
+    #[test]
+    fn boot_order() {
+        let mut s = sample_spec("a");
+        s.disks = vec![
+            disk(DiskDevice::Disk, "vda"),
+            disk(DiskDevice::Cdrom, "sda"),
+        ];
+        let (d, c) = (s.disks[0].id, s.disks[1].id);
+        s.set_boot_order(&[c, d]).unwrap();
+        assert_eq!(s.disks[1].boot_order, Some(1));
+        assert_eq!(s.disks[0].boot_order, Some(2));
+        s.set_boot_order(&[d]).unwrap();
+        assert_eq!(s.disks[1].boot_order, None);
+        assert!(s.set_boot_order(&[Uuid::new_v4()]).is_err());
+    }
+
+    #[test]
+    fn update_distinguishes_null() {
+        let u: UpdateVm = serde_json::from_str(r#"{"cloud_init": null}"#).unwrap();
+        assert_eq!(u.cloud_init, Some(None));
+        let u: UpdateVm = serde_json::from_str("{}").unwrap();
+        assert_eq!(u.cloud_init, None);
+    }
+
+    #[test]
+    fn old_documents_still_parse() {
+        let old = r#"{"id":"8f0c2a51-4b1e-4c3e-9a0d-2f5b6c7d8e9f","name":"x","generation":1,
+            "cpu":{"vcpus":1},"memory":{"max_mib":512,"min_mib":128,"target_mib":512,"balloon":"manual"},
+            "firmware":"bios","machine":"pc-q35-10.2",
+            "disks":[{"id":"11111111-2222-3333-4444-555555555555","pool":"default","volume":"x.qcow2",
+                      "device":"disk","format":"qcow2","boot_order":1}],
+            "nics":[{"id":"abcdef01-2222-3333-4444-555555555555","mac":"52:54:00:aa:bb:cc","network":{"type":"user"}}]}"#;
+        let mut v: VmSpec = serde_json::from_str(old).unwrap();
+        v.assign_targets();
+        assert_eq!(v.disks[0].volume.as_deref(), Some("x.qcow2"));
+        assert_eq!(v.disks[0].target, "vda");
+        assert!(v.node.is_nil());
+    }
 
     #[test]
     fn mac_format() {

@@ -40,6 +40,15 @@ impl Encoder {
         self
     }
 
+    pub fn i64(&mut self, v: i64) -> &mut Self {
+        self.buf.extend_from_slice(&v.to_be_bytes());
+        self
+    }
+
+    pub fn f64(&mut self, v: f64) -> &mut Self {
+        self.u64(v.to_bits())
+    }
+
     pub fn bool(&mut self, v: bool) -> &mut Self {
         self.u32(u32::from(v))
     }
@@ -122,6 +131,14 @@ impl<'a> Decoder<'a> {
         let hi = u64::from(self.u32()?);
         let lo = u64::from(self.u32()?);
         Ok(hi << 32 | lo)
+    }
+
+    pub fn i64(&mut self) -> Result<i64, Error> {
+        Ok(self.u64()? as i64)
+    }
+
+    pub fn f64(&mut self) -> Result<f64, Error> {
+        Ok(f64::from_bits(self.u64()?))
     }
 
     pub fn bool(&mut self) -> Result<bool, Error> {

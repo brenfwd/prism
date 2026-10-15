@@ -1,16 +1,16 @@
-//! Desired state in `data/state.db` (SQLite, WAL).
+//! SQLite stores: `data/state.db` (desired state, a document store that the
+//! replicated command log applies to) and `data/node.db` (node-local: tasks).
 
 use std::path::Path;
 use std::sync::Mutex;
 
 use anyhow::Context;
-use rusqlite::{Connection, OptionalExtension, params};
-use uuid::Uuid;
+use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
-use crate::spec::VmSpec;
-
-const MIGRATIONS: &[&str] = &[
-    // 1: initial schema
+const STATE_MIGRATIONS: &[&str] = &[
+    // 1: initial schema (MVP)
     "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
      CREATE TABLE vms (
          id TEXT PRIMARY KEY,
@@ -23,44 +23,55 @@ const MIGRATIONS: &[&str] = &[
          path TEXT NOT NULL,
          format TEXT NOT NULL
      );",
+    // 2: generic document store; carry MVP rows over
+    "CREATE TABLE docs (
+         collection TEXT NOT NULL,
+         id TEXT NOT NULL,
+         body TEXT NOT NULL,
+         PRIMARY KEY (collection, id)
+     ) WITHOUT ROWID;
+     INSERT INTO docs (collection, id, body) SELECT 'vm', id, spec FROM vms;
+     INSERT INTO docs (collection, id, body)
+         SELECT 'pool', name, json_object('name', name, 'path', path, 'format', format) FROM pools;
+     DROP TABLE vms;
+     DROP TABLE pools;",
 ];
 
+const NODE_MIGRATIONS: &[&str] = &[
+    // 1: tasks
+    "CREATE TABLE tasks (
+         id TEXT PRIMARY KEY,
+         body TEXT NOT NULL,
+         created_at INTEGER NOT NULL
+     );
+     CREATE INDEX tasks_created ON tasks (created_at);",
+];
+
+/// A SQLite connection with forward-only migrations keyed by `user_version`.
 #[derive(Debug)]
-pub struct Db {
+pub struct Sqlite {
     conn: Mutex<Connection>,
 }
 
-#[derive(Debug, Clone)]
-pub struct PoolRow {
-    pub name: String,
-    pub path: String,
-    pub format: String,
-}
-
-impl Db {
-    pub fn open(path: &Path) -> anyhow::Result<Self> {
+impl Sqlite {
+    fn open(path: &Path, migrations: &[&str]) -> anyhow::Result<Self> {
         let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
-        Self::init(conn)
+        Self::init(conn, migrations).with_context(|| format!("migrating {}", path.display()))
     }
 
-    #[cfg(test)]
-    pub fn memory() -> anyhow::Result<Self> {
-        Self::init(Connection::open_in_memory()?)
-    }
-
-    fn init(mut conn: Connection) -> anyhow::Result<Self> {
+    fn init(mut conn: Connection, migrations: &[&str]) -> anyhow::Result<Self> {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         let version = usize::try_from(version).unwrap_or(0);
-        if version > MIGRATIONS.len() {
+        if version > migrations.len() {
             anyhow::bail!(
-                "state.db schema version {version} is newer than this binary supports ({})",
-                MIGRATIONS.len()
+                "schema version {version} is newer than this binary supports ({})",
+                migrations.len()
             );
         }
-        for (i, sql) in MIGRATIONS.iter().enumerate().skip(version) {
+        for (i, sql) in migrations.iter().enumerate().skip(version) {
             let tx = conn.transaction()?;
             tx.execute_batch(sql)?;
             tx.pragma_update(None, "user_version", i as i64 + 1)?;
@@ -71,150 +82,273 @@ impl Db {
         })
     }
 
-    fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+    pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+}
+
+/// Desired state: documents grouped into collections, plus `meta`.
+#[derive(Debug)]
+pub struct StateDb {
+    db: Sqlite,
+}
+
+/// Read and write documents inside one transaction.
+pub struct Docs<'a> {
+    tx: &'a Transaction<'a>,
+}
+
+impl Docs<'_> {
+    pub fn get<T: DeserializeOwned>(
+        &self,
+        collection: &str,
+        id: &str,
+    ) -> anyhow::Result<Option<T>> {
+        get(self.tx, collection, id)
+    }
+
+    pub fn list<T: DeserializeOwned>(&self, collection: &str) -> anyhow::Result<Vec<T>> {
+        list(self.tx, collection)
+    }
+
+    pub fn put<T: Serialize>(&self, collection: &str, id: &str, body: &T) -> anyhow::Result<()> {
+        self.tx.execute(
+            "INSERT INTO docs (collection, id, body) VALUES (?1, ?2, ?3)
+             ON CONFLICT (collection, id) DO UPDATE SET body = excluded.body",
+            params![collection, id, serde_json::to_string(body)?],
+        )?;
+        Ok(())
+    }
+
+    /// Returns whether a document was removed.
+    pub fn delete(&self, collection: &str, id: &str) -> anyhow::Result<bool> {
+        Ok(self.tx.execute(
+            "DELETE FROM docs WHERE collection = ?1 AND id = ?2",
+            params![collection, id],
+        )? > 0)
+    }
+}
+
+fn get<T: DeserializeOwned>(
+    conn: &Connection,
+    collection: &str,
+    id: &str,
+) -> anyhow::Result<Option<T>> {
+    let body: Option<String> = conn
+        .query_row(
+            "SELECT body FROM docs WHERE collection = ?1 AND id = ?2",
+            params![collection, id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    body.map(|b| serde_json::from_str(&b).with_context(|| format!("decoding {collection}/{id}")))
+        .transpose()
+}
+
+fn list<T: DeserializeOwned>(conn: &Connection, collection: &str) -> anyhow::Result<Vec<T>> {
+    let mut stmt =
+        conn.prepare_cached("SELECT id, body FROM docs WHERE collection = ?1 ORDER BY id")?;
+    let rows = stmt.query_map([collection], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    rows.map(|r| {
+        let (id, body) = r?;
+        serde_json::from_str(&body).with_context(|| format!("decoding {collection}/{id}"))
+    })
+    .collect()
+}
+
+fn set_meta(conn: &Connection, key: &str, value: &str) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2)
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        [key, value],
+    )?;
+    Ok(())
+}
+
+impl StateDb {
+    pub fn open(path: &Path) -> anyhow::Result<Self> {
+        Ok(Self {
+            db: Sqlite::open(path, STATE_MIGRATIONS)?,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn memory() -> anyhow::Result<Self> {
+        Ok(Self {
+            db: Sqlite::init(Connection::open_in_memory()?, STATE_MIGRATIONS)?,
+        })
+    }
 
     pub fn meta(&self, key: &str) -> anyhow::Result<Option<String>> {
         Ok(self
+            .db
             .conn()
             .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
             .optional()?)
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> anyhow::Result<()> {
-        self.conn().execute(
-            "INSERT INTO meta (key, value) VALUES (?1, ?2)
-             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-            [key, value],
+        set_meta(&self.db.conn(), key, value)
+    }
+
+    pub fn get<T: DeserializeOwned>(
+        &self,
+        collection: &str,
+        id: &str,
+    ) -> anyhow::Result<Option<T>> {
+        get(&self.db.conn(), collection, id)
+    }
+
+    pub fn list<T: DeserializeOwned>(&self, collection: &str) -> anyhow::Result<Vec<T>> {
+        list(&self.db.conn(), collection)
+    }
+
+    /// Runs `f` in one transaction, committing only if it succeeds.
+    pub fn transaction<R>(
+        &self,
+        f: impl FnOnce(&Docs<'_>) -> anyhow::Result<R>,
+    ) -> anyhow::Result<R> {
+        let mut conn = self.db.conn();
+        let tx = conn.transaction()?;
+        let r = f(&Docs { tx: &tx })?;
+        tx.commit()?;
+        Ok(r)
+    }
+}
+
+/// Node-local store: tasks.
+#[derive(Debug)]
+pub struct NodeDb {
+    db: Sqlite,
+}
+
+impl NodeDb {
+    pub fn open(path: &Path) -> anyhow::Result<Self> {
+        Ok(Self {
+            db: Sqlite::open(path, NODE_MIGRATIONS)?,
+        })
+    }
+
+    #[cfg(test)]
+    pub fn memory() -> anyhow::Result<Self> {
+        Ok(Self {
+            db: Sqlite::init(Connection::open_in_memory()?, NODE_MIGRATIONS)?,
+        })
+    }
+
+    pub fn put_task<T: Serialize>(
+        &self,
+        id: &str,
+        created_at: i64,
+        body: &T,
+    ) -> anyhow::Result<()> {
+        self.db.conn().execute(
+            "INSERT INTO tasks (id, body, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT (id) DO UPDATE SET body = excluded.body",
+            params![id, serde_json::to_string(body)?, created_at],
         )?;
         Ok(())
     }
 
-    pub fn vms(&self) -> anyhow::Result<Vec<VmSpec>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT spec FROM vms ORDER BY name")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    pub fn task<T: DeserializeOwned>(&self, id: &str) -> anyhow::Result<Option<T>> {
+        let body: Option<String> = self
+            .db
+            .conn()
+            .query_row("SELECT body FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+            .optional()?;
+        body.map(|b| Ok(serde_json::from_str(&b)?)).transpose()
+    }
+
+    /// Most recent first.
+    pub fn tasks<T: DeserializeOwned>(&self, limit: usize) -> anyhow::Result<Vec<T>> {
+        let conn = self.db.conn();
+        let mut stmt = conn
+            .prepare_cached("SELECT body FROM tasks ORDER BY created_at DESC, id DESC LIMIT ?1")?;
+        let rows = stmt.query_map([limit as i64], |r| r.get::<_, String>(0))?;
         rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
     }
 
-    pub fn vm(&self, id: Uuid) -> anyhow::Result<Option<VmSpec>> {
-        let spec: Option<String> = self
-            .conn()
-            .query_row(
-                "SELECT spec FROM vms WHERE id = ?1",
-                [id.to_string()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        spec.map(|s| Ok(serde_json::from_str(&s)?)).transpose()
-    }
-
-    pub fn vm_by_name(&self, name: &str) -> anyhow::Result<Option<VmSpec>> {
-        let spec: Option<String> = self
-            .conn()
-            .query_row("SELECT spec FROM vms WHERE name = ?1", [name], |r| r.get(0))
-            .optional()?;
-        spec.map(|s| Ok(serde_json::from_str(&s)?)).transpose()
-    }
-
-    pub fn insert_vm(&self, spec: &VmSpec, now: i64) -> anyhow::Result<()> {
-        self.conn().execute(
-            "INSERT INTO vms (id, name, spec, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![
-                spec.id.to_string(),
-                spec.name,
-                serde_json::to_string(spec)?,
-                now
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn update_vm(&self, spec: &VmSpec) -> anyhow::Result<()> {
-        let n = self.conn().execute(
-            "UPDATE vms SET name = ?2, spec = ?3 WHERE id = ?1",
-            params![spec.id.to_string(), spec.name, serde_json::to_string(spec)?],
-        )?;
-        anyhow::ensure!(n == 1, "vm {} not found", spec.id);
-        Ok(())
-    }
-
-    pub fn delete_vm(&self, id: Uuid) -> anyhow::Result<()> {
-        self.conn()
-            .execute("DELETE FROM vms WHERE id = ?1", [id.to_string()])?;
-        Ok(())
-    }
-
-    pub fn pools(&self) -> anyhow::Result<Vec<PoolRow>> {
-        let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT name, path, format FROM pools ORDER BY name")?;
-        let rows = stmt.query_map([], |r| {
-            Ok(PoolRow {
-                name: r.get(0)?,
-                path: r.get(1)?,
-                format: r.get(2)?,
-            })
-        })?;
-        Ok(rows.collect::<Result<_, _>>()?)
-    }
-
-    pub fn insert_pool(&self, row: &PoolRow) -> anyhow::Result<()> {
-        self.conn().execute(
-            "INSERT INTO pools (name, path, format) VALUES (?1, ?2, ?3)",
-            params![row.name, row.path, row.format],
-        )?;
-        Ok(())
-    }
-
-    pub fn delete_pool(&self, name: &str) -> anyhow::Result<()> {
-        self.conn()
-            .execute("DELETE FROM pools WHERE name = ?1", [name])?;
-        Ok(())
+    /// Deletes finished tasks older than `before` (unix seconds).
+    pub fn prune_tasks(&self, before: i64) -> anyhow::Result<usize> {
+        Ok(self.db.conn().execute(
+            "DELETE FROM tasks WHERE created_at < ?1 AND json_extract(body, '$.state') != 'running'",
+            [before],
+        )?)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::*;
 
     #[test]
-    fn vm_round_trip() {
-        let db = Db::memory().unwrap();
-        let spec = VmSpec {
-            id: Uuid::new_v4(),
-            name: "a".into(),
-            description: String::new(),
-            generation: 1,
-            cpu: CpuSpec { vcpus: 1 },
-            memory: MemorySpec {
-                max_mib: 512,
-                min_mib: 256,
-                target_mib: 512,
-                balloon: BalloonMode::Manual,
-            },
-            firmware: Firmware::Bios,
-            machine: "q35".into(),
-            disks: vec![],
-            nics: vec![],
+    fn docs_round_trip() {
+        let db = StateDb::memory().unwrap();
+        db.transaction(|d| {
+            d.put("vm", "a", &serde_json::json!({"name": "a"}))?;
+            d.put("vm", "b", &serde_json::json!({"name": "b"}))?;
+            Ok(())
+        })
+        .unwrap();
+        let all: Vec<serde_json::Value> = db.list("vm").unwrap();
+        assert_eq!(all.len(), 2);
+        let removed = db.transaction(|d| d.delete("vm", "a")).unwrap();
+        assert!(removed);
+        assert_eq!(db.get::<serde_json::Value>("vm", "a").unwrap(), None);
+    }
+
+    #[test]
+    fn failed_transaction_rolls_back() {
+        let db = StateDb::memory().unwrap();
+        let r: anyhow::Result<()> = db.transaction(|d| {
+            d.put("vm", "a", &1)?;
+            anyhow::bail!("no")
+        });
+        assert!(r.is_err());
+        assert_eq!(db.list::<i32>("vm").unwrap().len(), 0);
+    }
+
+    #[test]
+    fn migrates_mvp_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        let db = Sqlite::init(conn, &STATE_MIGRATIONS[..1]).unwrap();
+        db.conn()
+            .execute_batch(
+                "INSERT INTO vms VALUES ('id1', 'web', '{\"name\":\"web\"}', 0);
+                 INSERT INTO pools VALUES ('fast', '/srv/fast', 'raw');",
+            )
+            .unwrap();
+        let conn = db.conn.into_inner().unwrap();
+        let db = StateDb {
+            db: Sqlite::init(conn, STATE_MIGRATIONS).unwrap(),
         };
-        db.insert_vm(&spec, 0).unwrap();
-        assert!(db.insert_vm(&spec, 0).is_err());
-        assert_eq!(db.vm(spec.id).unwrap().unwrap(), spec);
-        assert_eq!(db.vm_by_name("a").unwrap().unwrap().id, spec.id);
-        db.delete_vm(spec.id).unwrap();
-        assert_eq!(db.vms().unwrap().len(), 0);
+        let vm: serde_json::Value = db.get("vm", "id1").unwrap().unwrap();
+        assert_eq!(vm["name"], "web");
+        let pool: serde_json::Value = db.get("pool", "fast").unwrap().unwrap();
+        assert_eq!(pool["path"], "/srv/fast");
     }
 
     #[test]
     fn meta() {
-        let db = Db::memory().unwrap();
-        assert_eq!(db.meta("x").unwrap(), None);
+        let db = StateDb::memory().unwrap();
         db.set_meta("x", "1").unwrap();
         db.set_meta("x", "2").unwrap();
         assert_eq!(db.meta("x").unwrap().as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn tasks() {
+        let db = NodeDb::memory().unwrap();
+        db.put_task("a", 1, &serde_json::json!({"state": "succeeded"}))
+            .unwrap();
+        db.put_task("b", 2, &serde_json::json!({"state": "running"}))
+            .unwrap();
+        let t: Vec<serde_json::Value> = db.tasks(10).unwrap();
+        assert_eq!(t[0]["state"], "running");
+        assert_eq!(db.prune_tasks(10).unwrap(), 1);
     }
 }

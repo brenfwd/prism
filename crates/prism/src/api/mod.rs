@@ -4,6 +4,7 @@ mod console;
 mod hygiene;
 mod pools;
 mod sse;
+mod tasks;
 mod vms;
 
 use std::sync::Arc;
@@ -28,6 +29,7 @@ pub fn router(node: AppState) -> Router {
         .merge(vms::routes())
         .merge(pools::routes())
         .merge(console::routes())
+        .merge(tasks::routes())
         .route("/events", get(sse::events))
         .fallback(|| async { ApiError::not_found("no such endpoint") });
 

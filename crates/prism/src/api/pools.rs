@@ -9,9 +9,10 @@ use axum::routing::{get, put};
 use serde::Deserialize;
 
 use super::{ApiError, AppState, Json, check_node};
-use crate::db::PoolRow;
 use crate::events::Op;
 use crate::node::Node;
+use crate::node::NodeError;
+use crate::state::{Command, PoolDoc};
 use crate::storage::{Pool, PoolInfo, Volume};
 
 pub fn routes() -> Router<AppState> {
@@ -92,14 +93,19 @@ async fn create(
     }
     let path = node.storage.new_pool_path(&req.name, req.root.as_deref())?;
     let pool = Pool::open(&req.name, &path, &req.format, false)?;
-    node.db.insert_pool(&PoolRow {
-        name: req.name.clone(),
-        path: path.to_string_lossy().into_owned(),
-        format: req.format,
-    })?;
     let info = pool.info();
     node.storage.insert(pool);
-    publish_pool(&node, &req.name, Op::Upsert);
+    node.state
+        .apply(Command::PutPool {
+            pool: PoolDoc {
+                name: req.name.clone(),
+                path,
+                format: req.format,
+                node: node.id,
+            },
+        })
+        .await
+        .map_err(NodeError::from)?;
     Ok((StatusCode::CREATED, axum::Json(info)))
 }
 
@@ -125,14 +131,14 @@ async fn remove(
             format!("used by {}", users.join(", ")),
         ));
     }
-    node.db.delete_pool(&pool)?;
+    node.state
+        .apply(Command::DeletePool {
+            node: node.id,
+            name: pool.clone(),
+        })
+        .await
+        .map_err(NodeError::from)?;
     node.storage.remove(&pool);
-    node.bus.publish(
-        "pool",
-        format!("/nodes/{}/pools/{pool}", node.id),
-        Op::Delete,
-        serde_json::Value::Null,
-    );
     Ok(StatusCode::NO_CONTENT)
 }
 

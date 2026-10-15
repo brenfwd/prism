@@ -13,9 +13,10 @@ use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::time::Instant;
 
 use crate::Error;
+use crate::events::DomainEvent;
 use crate::proto::{
-    self, Domain, DomainInfo, DomainState, Header, LifecycleEvent, MessageType, NodeInfo,
-    RemoteError, Status, flags, procs,
+    self, Domain, DomainInfo, DomainState, Header, MessageType, NodeInfo, RemoteError, Status,
+    flags, procs,
 };
 use crate::xdr::{Decoder, Encoder};
 
@@ -23,14 +24,6 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(120);
 /// Largest data chunk sent in one stream message.
 const STREAM_CHUNK: usize = 256 * 1024;
-
-/// A domain lifecycle event delivered by the daemon.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DomainEvent {
-    pub domain: Domain,
-    pub event: LifecycleEvent,
-    pub detail: i32,
-}
 
 #[derive(Debug)]
 enum StreamEvent {
@@ -164,13 +157,17 @@ impl Client {
         Ok((rx, stream))
     }
 
-    async fn call_with(&self, proc: u32, f: impl FnOnce(&mut Encoder)) -> Result<Vec<u8>, Error> {
+    pub(crate) async fn call_with(
+        &self,
+        proc: u32,
+        f: impl FnOnce(&mut Encoder),
+    ) -> Result<Vec<u8>, Error> {
         let mut e = Encoder::new();
         f(&mut e);
         self.call(proc, e.into_inner()).await
     }
 
-    async fn call_dom(
+    pub(crate) async fn call_dom(
         &self,
         proc: u32,
         dom: &Domain,
@@ -363,10 +360,15 @@ impl Client {
     /// Asks the daemon to deliver lifecycle events for all domains on this
     /// connection. Returns the callback ID.
     pub async fn register_lifecycle_events(&self) -> Result<i32, Error> {
+        self.register_event(flags::DOMAIN_EVENT_ID_LIFECYCLE).await
+    }
+
+    /// Registers for one `VIR_DOMAIN_EVENT_ID_*` for all domains on this
+    /// connection. Returns the callback ID.
+    pub async fn register_event(&self, event_id: i32) -> Result<i32, Error> {
         let r = self
             .call_with(procs::CONNECT_DOMAIN_EVENT_CALLBACK_REGISTER_ANY, |e| {
-                e.i32(flags::DOMAIN_EVENT_ID_LIFECYCLE)
-                    .option(None::<&Domain>, |e, d| d.encode(e));
+                e.i32(event_id).option(None::<&Domain>, |e, d| d.encode(e));
             })
             .await?;
         Decoder::new(&r).i32()
@@ -574,18 +576,13 @@ fn dispatch(inner: &Inner, msg: &[u8]) -> Result<(), Error> {
             };
             let _ = tx.send(res);
         }
-        MessageType::Message => {
-            if h.proc == procs::DOMAIN_EVENT_CALLBACK_LIFECYCLE {
-                let mut d = Decoder::new(body);
-                let _callback_id = d.i32()?;
-                let ev = DomainEvent {
-                    domain: Domain::decode(&mut d)?,
-                    event: LifecycleEvent::from(d.i32()?),
-                    detail: d.i32()?,
-                };
+        MessageType::Message => match DomainEvent::decode(h.proc, body) {
+            Ok(Some(ev)) => {
                 let _ = inner.events.send(ev);
             }
-        }
+            Ok(None) => tracing::debug!("ignoring event procedure {}", h.proc),
+            Err(e) => tracing::warn!("undecodable event {}: {e}", h.proc),
+        },
         MessageType::Stream => {
             let mut streams = lock(&inner.streams);
             let ev = match h.status {

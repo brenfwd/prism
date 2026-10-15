@@ -2,19 +2,127 @@ use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, patch, post};
 use serde::Deserialize;
 use uuid::Uuid;
 
 use super::{ApiError, AppState, Json};
-use crate::node::{Action, VmView};
+use crate::node::{Action, AddDisk, AddNic, CreateSnapshot, SnapshotView, UpdateDisk, VmView};
 use crate::spec::{CreateVm, UpdateVm};
+use crate::tasks::Task;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/vms", get(list).post(create))
         .route("/vms/{id}", get(show).patch(update).delete(remove))
         .route("/vms/{id}/actions/{action}", post(action))
+        .route("/vms/{id}/disks", post(add_disk))
+        .route(
+            "/vms/{id}/disks/{disk}",
+            patch(update_disk).delete(remove_disk),
+        )
+        .route("/vms/{id}/nics", post(add_nic))
+        .route("/vms/{id}/nics/{nic}", delete(remove_nic))
+        .route("/vms/{id}/snapshots", get(snapshots).post(create_snapshot))
+        .route("/vms/{id}/snapshots/{name}", delete(delete_snapshot))
+        .route("/vms/{id}/snapshots/{name}/revert", post(revert_snapshot))
+}
+
+fn parse_sub(id: &str, what: &str) -> Result<Uuid, ApiError> {
+    Uuid::parse_str(id).map_err(|_| ApiError::not_found(format!("{what} {id}")))
+}
+
+/// `202 Accepted` with the task and its `Location`.
+fn accepted(task: Task) -> impl IntoResponse {
+    let location = format!("/api/v1/tasks/{}", task.id);
+    (
+        StatusCode::ACCEPTED,
+        [(header::LOCATION, location)],
+        axum::Json(task),
+    )
+}
+
+async fn add_disk(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AddDisk>,
+) -> Result<axum::Json<VmView>, ApiError> {
+    Ok(axum::Json(node.add_disk(parse_id(&id)?, req).await?))
+}
+
+async fn update_disk(
+    State(node): State<AppState>,
+    Path((id, disk)): Path<(String, String)>,
+    Json(req): Json<UpdateDisk>,
+) -> Result<axum::Json<VmView>, ApiError> {
+    Ok(axum::Json(
+        node.update_disk(parse_id(&id)?, parse_sub(&disk, "disk")?, req)
+            .await?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoveDiskQuery {
+    #[serde(default)]
+    delete_volume: bool,
+}
+
+async fn remove_disk(
+    State(node): State<AppState>,
+    Path((id, disk)): Path<(String, String)>,
+    Query(q): Query<RemoveDiskQuery>,
+) -> Result<axum::Json<VmView>, ApiError> {
+    Ok(axum::Json(
+        node.remove_disk(parse_id(&id)?, parse_sub(&disk, "disk")?, q.delete_volume)
+            .await?,
+    ))
+}
+
+async fn add_nic(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AddNic>,
+) -> Result<axum::Json<VmView>, ApiError> {
+    Ok(axum::Json(node.add_nic(parse_id(&id)?, req).await?))
+}
+
+async fn remove_nic(
+    State(node): State<AppState>,
+    Path((id, nic)): Path<(String, String)>,
+) -> Result<axum::Json<VmView>, ApiError> {
+    Ok(axum::Json(
+        node.remove_nic(parse_id(&id)?, parse_sub(&nic, "nic")?)
+            .await?,
+    ))
+}
+
+async fn snapshots(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<axum::Json<Vec<SnapshotView>>, ApiError> {
+    Ok(axum::Json(node.snapshots(parse_id(&id)?).await?))
+}
+
+async fn create_snapshot(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<CreateSnapshot>,
+) -> Result<impl IntoResponse, ApiError> {
+    Ok(accepted(node.create_snapshot(parse_id(&id)?, req)?))
+}
+
+async fn delete_snapshot(
+    State(node): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    Ok(accepted(node.delete_snapshot(parse_id(&id)?, name)?))
+}
+
+async fn revert_snapshot(
+    State(node): State<AppState>,
+    Path((id, name)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    Ok(accepted(node.revert_snapshot(parse_id(&id)?, name)?))
 }
 
 fn parse_id(id: &str) -> Result<Uuid, ApiError> {

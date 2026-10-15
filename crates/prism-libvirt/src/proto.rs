@@ -128,6 +128,52 @@ pub mod procs {
     pub const CONNECT_DOMAIN_EVENT_CALLBACK_REGISTER_ANY: u32 = 316;
     pub const DOMAIN_EVENT_CALLBACK_LIFECYCLE: u32 = 318;
     pub const DOMAIN_DEFINE_XML_FLAGS: u32 = 350;
+    pub const DOMAIN_ATTACH_DEVICE_FLAGS: u32 = 160;
+    pub const DOMAIN_DETACH_DEVICE_FLAGS: u32 = 161;
+    pub const DOMAIN_ABORT_JOB: u32 = 164;
+    pub const DOMAIN_MIGRATE_SET_MAX_DOWNTIME: u32 = 166;
+    pub const DOMAIN_UPDATE_DEVICE_FLAGS: u32 = 174;
+    pub const DOMAIN_SNAPSHOT_CREATE_XML: u32 = 185;
+    pub const DOMAIN_SNAPSHOT_GET_XML_DESC: u32 = 186;
+    pub const DOMAIN_SNAPSHOT_LOOKUP_BY_NAME: u32 = 189;
+    pub const DOMAIN_REVERT_TO_SNAPSHOT: u32 = 192;
+    pub const DOMAIN_SNAPSHOT_DELETE: u32 = 193;
+    pub const DOMAIN_GET_BLOCK_INFO: u32 = 194;
+    pub const DOMAIN_SET_VCPUS_FLAGS: u32 = 199;
+    pub const DOMAIN_BLOCK_JOB_ABORT: u32 = 237;
+    pub const DOMAIN_GET_BLOCK_JOB_INFO: u32 = 238;
+    pub const DOMAIN_BLOCK_RESIZE: u32 = 251;
+    pub const DOMAIN_LIST_ALL_SNAPSHOTS: u32 = 274;
+    pub const DOMAIN_GET_JOB_STATS: u32 = 298;
+    pub const CONNECT_DOMAIN_EVENT_CALLBACK_DEREGISTER_ANY: u32 = 317;
+    pub const DOMAIN_EVENT_CALLBACK_BALLOON_CHANGE: u32 = 331;
+    pub const DOMAIN_EVENT_CALLBACK_DEVICE_REMOVED: u32 = 333;
+    pub const DOMAIN_FSFREEZE: u32 = 335;
+    pub const DOMAIN_FSTHAW: u32 = 336;
+    pub const DOMAIN_EVENT_BLOCK_JOB_2: u32 = 339;
+    pub const CONNECT_GET_ALL_DOMAIN_STATS: u32 = 344;
+    pub const DOMAIN_BLOCK_COPY: u32 = 345;
+    pub const DOMAIN_EVENT_CALLBACK_AGENT_LIFECYCLE: u32 = 348;
+    pub const DOMAIN_EVENT_CALLBACK_MIGRATION_ITERATION: u32 = 359;
+    pub const DOMAIN_EVENT_CALLBACK_JOB_COMPLETED: u32 = 363;
+    pub const CONNECT_BASELINE_HYPERVISOR_CPU: u32 = 394;
+    pub const DOMAIN_CHECKPOINT_CREATE_XML: u32 = 411;
+    pub const DOMAIN_CHECKPOINT_GET_XML_DESC: u32 = 412;
+    pub const DOMAIN_LIST_ALL_CHECKPOINTS: u32 = 413;
+    pub const DOMAIN_CHECKPOINT_LOOKUP_BY_NAME: u32 = 415;
+    pub const DOMAIN_CHECKPOINT_DELETE: u32 = 417;
+    pub const DOMAIN_BACKUP_BEGIN: u32 = 421;
+}
+
+/// `virDomainEventID` values.
+pub mod event_ids {
+    pub const LIFECYCLE: i32 = 0;
+    pub const BALLOON_CHANGE: i32 = 13;
+    pub const DEVICE_REMOVED: i32 = 15;
+    pub const BLOCK_JOB_2: i32 = 16;
+    pub const AGENT_LIFECYCLE: i32 = 18;
+    pub const MIGRATION_ITERATION: i32 = 20;
+    pub const JOB_COMPLETED: i32 = 21;
 }
 
 pub const KEEPALIVE_PROC_PING: u32 = 1;
@@ -323,6 +369,8 @@ pub mod flags {
 
 /// `virDomainMemoryStatTags`.
 pub mod memory_stat {
+    pub const SWAP_IN: i32 = 0;
+    pub const MAJOR_FAULT: i32 = 2;
     pub const UNUSED: i32 = 4;
     pub const AVAILABLE: i32 = 5;
     pub const ACTUAL_BALLOON: i32 = 6;

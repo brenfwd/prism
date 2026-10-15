@@ -1,11 +1,21 @@
-//! `VmSpec` → libvirt domain XML. A pure function, tested against golden output.
+//! `VmSpec` → libvirt domain XML. Pure functions, tested against golden output.
 
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
 use quick_xml::escape::escape;
 
-use crate::spec::{BalloonMode, DiskDevice, Firmware, NicNetwork, VmSpec};
+use crate::spec::{
+    BalloonMode, CpuModel, DiskDevice, DiskSpec, Firmware, NicNetwork, NicSpec, VmSpec,
+};
+
+/// Where a pool keeps its files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolLoc {
+    pub path: PathBuf,
+    /// The filesystem supports `O_DIRECT`, so disks use `cache='none'`.
+    pub direct_io: bool,
+}
 
 /// Host-specific inputs to rendering.
 #[derive(Clone)]
@@ -13,32 +23,116 @@ pub struct RenderCtx<'a> {
     pub domain_type: &'a str,
     pub emulator: Option<&'a Path>,
     pub uefi_loader: Option<&'a Path>,
-    /// Resolves a pool name to its directory.
-    pub pool_path: &'a dyn Fn(&str) -> Option<PathBuf>,
+    pub pool: &'a dyn Fn(&str) -> Option<PoolLoc>,
+    /// A cloud-init seed ISO to attach as an extra read-only CD-ROM.
+    pub seed_iso: Option<&'a Path>,
 }
 
 pub const METADATA_NS: &str = "urn:prism:1";
+/// Target of the cloud-init seed CD-ROM; never assigned to user disks
+/// because those are named from `sda` upwards.
+pub const SEED_TARGET: &str = "sdzz";
+/// Empty PCI Express root ports so disks and NICs can be hot-plugged on `q35`.
+const SPARE_ROOT_PORTS: usize = 6;
 
 fn esc(s: &str) -> std::borrow::Cow<'_, str> {
     escape(s)
 }
 
-fn disk_target(device: DiskDevice, index: usize) -> String {
-    let prefix = match device {
-        DiskDevice::Disk => "vd",
-        DiskDevice::Cdrom => "sd",
+/// The `<disk>` element for one disk, as used both in the domain and for hotplug.
+pub fn disk_xml(disk: &DiskSpec, ctx: &RenderCtx<'_>, indent: &str) -> Result<String, String> {
+    let pool = (ctx.pool)(&disk.pool).ok_or_else(|| format!("unknown pool {}", disk.pool))?;
+    let mut x = String::new();
+    let w = &mut x;
+    let (device, bus) = match disk.device {
+        DiskDevice::Disk => ("disk", "virtio"),
+        DiskDevice::Cdrom => ("cdrom", "sata"),
     };
-    // vda..vdz, then vdaa..: enough for any VM Prism creates.
-    let letters = b"abcdefghijklmnopqrstuvwxyz";
-    if index < 26 {
-        format!("{prefix}{}", letters[index] as char)
-    } else {
-        format!(
-            "{prefix}{}{}",
-            letters[index / 26 - 1] as char,
-            letters[index % 26] as char
-        )
+    let _ = writeln!(w, "{indent}<disk type='file' device='{device}'>");
+    match disk.device {
+        DiskDevice::Disk if pool.direct_io => {
+            let _ = writeln!(
+                w,
+                "{indent}  <driver name='qemu' type='{}' cache='none' io='native' discard='unmap'/>",
+                esc(&disk.format)
+            );
+        }
+        DiskDevice::Disk => {
+            let _ = writeln!(
+                w,
+                "{indent}  <driver name='qemu' type='{}' cache='writeback' discard='unmap'/>",
+                esc(&disk.format)
+            );
+        }
+        DiskDevice::Cdrom => {
+            let _ = writeln!(w, "{indent}  <driver name='qemu' type='raw'/>");
+        }
     }
+    if let Some(volume) = &disk.volume {
+        let path = pool.path.join(volume);
+        let _ = writeln!(
+            w,
+            "{indent}  <source file='{}'/>",
+            esc(&path.to_string_lossy())
+        );
+    }
+    let _ = writeln!(
+        w,
+        "{indent}  <target dev='{}' bus='{bus}'/>",
+        esc(&disk.target)
+    );
+    if disk.device == DiskDevice::Cdrom {
+        let _ = writeln!(w, "{indent}  <readonly/>");
+    }
+    if let Some(order) = disk.boot_order {
+        let _ = writeln!(w, "{indent}  <boot order='{order}'/>");
+    }
+    let _ = writeln!(
+        w,
+        "{indent}  <serial>{}</serial>",
+        &disk.id.simple().to_string()[..20]
+    );
+    let _ = writeln!(w, "{indent}  <alias name='ua-{}'/>", disk.id);
+    let _ = writeln!(w, "{indent}</disk>");
+    Ok(x)
+}
+
+/// The `<interface>` element for one NIC.
+pub fn nic_xml(nic: &NicSpec, indent: &str) -> String {
+    let mut x = String::new();
+    let w = &mut x;
+    match &nic.network {
+        NicNetwork::Bridge { bridge } => {
+            let _ = writeln!(w, "{indent}<interface type='bridge'>");
+            let _ = writeln!(w, "{indent}  <source bridge='{}'/>", esc(bridge));
+            let _ = writeln!(
+                w,
+                "{indent}  <target dev='pn{}'/>",
+                &nic.id.simple().to_string()[..8]
+            );
+        }
+        NicNetwork::User => {
+            let _ = writeln!(w, "{indent}<interface type='user'>");
+        }
+    }
+    let _ = writeln!(w, "{indent}  <mac address='{}'/>", esc(&nic.mac));
+    let _ = writeln!(w, "{indent}  <model type='virtio'/>");
+    if let Some(order) = nic.boot_order {
+        let _ = writeln!(w, "{indent}  <boot order='{order}'/>");
+    }
+    let _ = writeln!(w, "{indent}  <alias name='ua-{}'/>", nic.id);
+    let _ = writeln!(w, "{indent}</interface>");
+    x
+}
+
+/// The seed CD-ROM, as a `<disk>` element.
+pub fn seed_xml(path: &Path, indent: &str) -> String {
+    format!(
+        "{indent}<disk type='file' device='cdrom'>\n{indent}  <driver name='qemu' type='raw'/>\n\
+         {indent}  <source file='{}'/>\n{indent}  <target dev='{SEED_TARGET}' bus='sata'/>\n\
+         {indent}  <readonly/>\n{indent}  <alias name='ua-cloud-init'/>\n{indent}</disk>\n",
+        esc(&path.to_string_lossy())
+    )
 }
 
 /// Renders the persistent domain definition for `spec`.
@@ -53,8 +147,8 @@ pub fn render(spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<String, String> {
     }
     let _ = writeln!(
         w,
-        "  <metadata>\n    <prism:vm xmlns:prism='{METADATA_NS}' generation='{}'/>\n  </metadata>",
-        spec.generation
+        "  <metadata>\n    <prism:vm xmlns:prism='{METADATA_NS}' generation='{}' epoch='{}'/>\n  </metadata>",
+        spec.generation, spec.owner_epoch
     );
     let _ = writeln!(
         w,
@@ -94,13 +188,19 @@ pub fn render(spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<String, String> {
     }
     let _ = writeln!(w, "  </os>");
     let _ = writeln!(w, "  <features>\n    <acpi/>\n    <apic/>\n  </features>");
-    if ctx.domain_type == "kvm" {
-        let _ = writeln!(w, "  <cpu mode='host-model'/>");
-    } else {
-        let _ = writeln!(
-            w,
-            "  <cpu mode='custom' match='exact'>\n    <model fallback='allow'>qemu64</model>\n  </cpu>"
-        );
+    match (ctx.domain_type, spec.cpu.model) {
+        ("kvm", CpuModel::HostModel) => {
+            let _ = writeln!(w, "  <cpu mode='host-model'/>");
+        }
+        ("kvm", CpuModel::HostPassthrough) => {
+            let _ = writeln!(w, "  <cpu mode='host-passthrough' migratable='on'/>");
+        }
+        _ => {
+            let _ = writeln!(
+                w,
+                "  <cpu mode='custom' match='exact'>\n    <model fallback='allow'>qemu64</model>\n  </cpu>"
+            );
+        }
     }
     let _ = writeln!(w, "  <clock offset='utc'/>");
     let _ = writeln!(
@@ -116,71 +216,17 @@ pub fn render(spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<String, String> {
             esc(&emu.to_string_lossy())
         );
     }
-    let (mut n_disk, mut n_cd) = (0, 0);
     for disk in &spec.disks {
-        let dir =
-            (ctx.pool_path)(&disk.pool).ok_or_else(|| format!("unknown pool {}", disk.pool))?;
-        let path = dir.join(&disk.volume);
-        let (target, bus) = match disk.device {
-            DiskDevice::Disk => {
-                n_disk += 1;
-                (disk_target(DiskDevice::Disk, n_disk - 1), "virtio")
-            }
-            DiskDevice::Cdrom => {
-                n_cd += 1;
-                (disk_target(DiskDevice::Cdrom, n_cd - 1), "sata")
-            }
-        };
-        let device = match disk.device {
-            DiskDevice::Disk => "disk",
-            DiskDevice::Cdrom => "cdrom",
-        };
-        let _ = writeln!(w, "    <disk type='file' device='{device}'>");
-        match disk.device {
-            DiskDevice::Disk => {
-                let _ = writeln!(
-                    w,
-                    "      <driver name='qemu' type='{}' cache='none' io='native' discard='unmap'/>",
-                    esc(&disk.format)
-                );
-            }
-            DiskDevice::Cdrom => {
-                let _ = writeln!(w, "      <driver name='qemu' type='raw'/>");
-            }
-        }
-        let _ = writeln!(w, "      <source file='{}'/>", esc(&path.to_string_lossy()));
-        let _ = writeln!(w, "      <target dev='{target}' bus='{bus}'/>");
-        if disk.device == DiskDevice::Cdrom {
-            let _ = writeln!(w, "      <readonly/>");
-        }
-        if let Some(order) = disk.boot_order {
-            let _ = writeln!(w, "      <boot order='{order}'/>");
-        }
-        let _ = writeln!(
-            w,
-            "      <serial>{}</serial>",
-            &disk.id.simple().to_string()[..20]
-        );
-        let _ = writeln!(w, "    </disk>");
+        w.push_str(&disk_xml(disk, ctx, "    ")?);
+    }
+    if let Some(seed) = ctx.seed_iso {
+        w.push_str(&seed_xml(seed, "    "));
     }
     for nic in &spec.nics {
-        match &nic.network {
-            NicNetwork::Bridge { bridge } => {
-                let _ = writeln!(w, "    <interface type='bridge'>");
-                let _ = writeln!(w, "      <source bridge='{}'/>", esc(bridge));
-                let _ = writeln!(
-                    w,
-                    "      <target dev='pn{}'/>",
-                    &nic.id.simple().to_string()[..8]
-                );
-            }
-            NicNetwork::User => {
-                let _ = writeln!(w, "    <interface type='user'>");
-            }
-        }
-        let _ = writeln!(w, "      <mac address='{}'/>", esc(&nic.mac));
-        let _ = writeln!(w, "      <model type='virtio'/>");
-        let _ = writeln!(w, "    </interface>");
+        w.push_str(&nic_xml(nic, "    "));
+    }
+    for _ in 0..SPARE_ROOT_PORTS {
+        let _ = writeln!(w, "    <controller type='pci' model='pcie-root-port'/>");
     }
     let _ = writeln!(
         w,
@@ -217,6 +263,62 @@ pub fn render(spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<String, String> {
     let _ = writeln!(w, "  </devices>");
     let _ = writeln!(w, "</domain>");
     Ok(x)
+}
+
+/// `(target, source file)` for each `<disk>` in domain XML, in document order.
+pub fn disk_sources(xml: &str) -> Vec<(String, Option<PathBuf>)> {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+
+    let mut reader = Reader::from_str(xml);
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut disk_depth = None;
+    let (mut target, mut source) = (None, None);
+    loop {
+        let Ok(ev) = reader.read_event() else {
+            return out;
+        };
+        match ev {
+            Event::Start(e) => {
+                depth += 1;
+                if e.name().as_ref() == "disk" && disk_depth.is_none() {
+                    disk_depth = Some(depth);
+                    (target, source) = (None, None);
+                } else if disk_depth.is_some() && depth == disk_depth.unwrap_or(0) + 1 {
+                    take_disk_child(&e, &mut target, &mut source);
+                }
+            }
+            Event::Empty(e) => {
+                if disk_depth.is_some_and(|d| depth == d) {
+                    take_disk_child(&e, &mut target, &mut source);
+                }
+            }
+            Event::End(e) => {
+                if e.name().as_ref() == "disk" && disk_depth == Some(depth) {
+                    disk_depth = None;
+                    if let Some(t) = target.take() {
+                        out.push((t, source.take().map(PathBuf::from)));
+                    }
+                }
+                depth = depth.saturating_sub(1);
+            }
+            Event::Eof => return out,
+            _ => {}
+        }
+    }
+}
+
+fn take_disk_child(
+    e: &quick_xml::events::BytesStart<'_>,
+    target: &mut Option<String>,
+    source: &mut Option<String>,
+) {
+    match e.name().as_ref() {
+        "target" => *target = get_attr(e, "dev"),
+        "source" => *source = get_attr(e, "file"),
+        _ => {}
+    }
 }
 
 /// Extracts the VNC UNIX socket path from live domain XML.
@@ -314,7 +416,10 @@ mod tests {
             name: "web<1>".into(),
             description: "a & b".into(),
             generation: 3,
-            cpu: CpuSpec { vcpus: 2 },
+            cpu: CpuSpec {
+                vcpus: 2,
+                model: CpuModel::HostModel,
+            },
             memory: MemorySpec {
                 max_mib: 2048,
                 min_mib: 512,
@@ -327,18 +432,32 @@ mod tests {
                 DiskSpec {
                     id: Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap(),
                     pool: "default".into(),
-                    volume: "web-root.qcow2".into(),
+                    volume: Some("web-root.qcow2".into()),
                     device: DiskDevice::Disk,
                     format: "qcow2".into(),
                     boot_order: Some(1),
+                    target: "vda".into(),
+                    backing: vec![],
                 },
                 DiskSpec {
                     id: Uuid::parse_str("66666666-7777-8888-9999-000000000000").unwrap(),
                     pool: "default".into(),
-                    volume: "install.iso".into(),
+                    volume: Some("install.iso".into()),
                     device: DiskDevice::Cdrom,
                     format: "raw".into(),
                     boot_order: Some(2),
+                    target: "sda".into(),
+                    backing: vec![],
+                },
+                DiskSpec {
+                    id: Uuid::parse_str("77777777-7777-8888-9999-000000000000").unwrap(),
+                    pool: "slow".into(),
+                    volume: None,
+                    device: DiskDevice::Cdrom,
+                    format: "raw".into(),
+                    boot_order: None,
+                    target: "sdb".into(),
+                    backing: vec![],
                 },
             ],
             nics: vec![NicSpec {
@@ -347,32 +466,60 @@ mod tests {
                 network: NicNetwork::Bridge {
                     bridge: "br0".into(),
                 },
+                boot_order: None,
             }],
+            node: Uuid::nil(),
+            owner_epoch: 4,
+            autostart: false,
+            cloud_init: None,
         }
     }
 
-    fn ctx(f: &dyn Fn(&str) -> Option<PathBuf>) -> RenderCtx<'_> {
+    fn pools(p: &str) -> Option<PoolLoc> {
+        match p {
+            "default" => Some(PoolLoc {
+                path: "/var/lib/prism/pools/default".into(),
+                direct_io: true,
+            }),
+            "slow" => Some(PoolLoc {
+                path: "/srv/slow".into(),
+                direct_io: false,
+            }),
+            _ => None,
+        }
+    }
+
+    fn ctx<'a>(f: &'a dyn Fn(&str) -> Option<PoolLoc>, seed: Option<&'a Path>) -> RenderCtx<'a> {
         RenderCtx {
             domain_type: "kvm",
             emulator: None,
             uefi_loader: None,
-            pool_path: f,
+            pool: f,
+            seed_iso: seed,
         }
     }
 
     #[test]
     fn golden() {
-        let pools =
-            |p: &str| (p == "default").then(|| PathBuf::from("/var/lib/prism/pools/default"));
-        let xml = render(&spec(), &ctx(&pools)).unwrap();
+        let seed = PathBuf::from("/var/lib/prism/pools/default/.prism-seed-x.iso");
+        let xml = render(&spec(), &ctx(&pools, Some(&seed))).unwrap();
         let golden = include_str!("../tests/golden/basic.xml");
         assert_eq!(xml, golden, "rendered:\n{xml}");
     }
 
     #[test]
+    fn writeback_without_direct_io() {
+        let mut s = spec();
+        s.disks[0].pool = "slow".into();
+        let xml = disk_xml(&s.disks[0], &ctx(&pools, None), "").unwrap();
+        assert!(xml.contains("cache='writeback'"));
+        assert!(!xml.contains("io='native'"));
+    }
+
+    #[test]
     fn unknown_pool() {
-        let pools = |_: &str| None;
-        assert!(render(&spec(), &ctx(&pools)).is_err());
+        let none = |_: &str| None;
+        assert!(render(&spec(), &ctx(&none, None)).is_err());
     }
 
     #[test]
@@ -394,9 +541,20 @@ mod tests {
     }
 
     #[test]
-    fn targets() {
-        assert_eq!(disk_target(DiskDevice::Disk, 0), "vda");
-        assert_eq!(disk_target(DiskDevice::Disk, 26), "vdaa");
-        assert_eq!(disk_target(DiskDevice::Cdrom, 1), "sdb");
+    fn reads_disk_sources() {
+        let xml = "<domain><devices>\
+            <disk type='file' device='disk'><driver name='qemu' type='qcow2'/>\
+              <source file='/p/a.snap1' index='2'><foo/></source>\
+              <backingStore type='file' index='1'><source file='/p/a.qcow2'/></backingStore>\
+              <target dev='vda' bus='virtio'/></disk>\
+            <disk type='file' device='cdrom'><target dev='sda' bus='sata'/></disk>\
+            </devices></domain>";
+        assert_eq!(
+            disk_sources(xml),
+            vec![
+                ("vda".to_string(), Some(PathBuf::from("/p/a.snap1"))),
+                ("sda".to_string(), None)
+            ]
+        );
     }
 }

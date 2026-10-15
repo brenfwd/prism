@@ -30,7 +30,8 @@ export default defineConfig({
   server: {
     fs: { allow: [".", rfbWasm] },
     proxy: {
-      "/api": { target: "http://127.0.0.1:8080", ws: true, changeOrigin: false },
+      // PRISM_API points the dev proxy at another node, e.g. http://192.168.122.4:8080.
+      "/api": { target: process.env.PRISM_API ?? "http://127.0.0.1:8080", ws: true, changeOrigin: false },
     },
   },
 });

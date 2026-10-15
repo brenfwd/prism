@@ -8,6 +8,14 @@ export interface MemoryStats {
   usable_kib: number | null;
   disk_caches_kib: number | null;
   rss_kib: number | null;
+  major_faults?: number | null;
+  swap_in_kib?: number | null;
+}
+
+export interface BalloonStatus {
+  target_kib: number;
+  reason: string;
+  unresponsive: boolean;
 }
 
 export interface VmRuntime {
@@ -18,27 +26,53 @@ export interface VmRuntime {
   cpu_time_ns: number;
   memory_stats: MemoryStats;
   pending_restart: boolean;
+  agent?: boolean;
+  balloon?: BalloonStatus | null;
 }
 
 export type BalloonMode = "off" | "manual" | "auto";
+export type CpuModel = "host_model" | "host_passthrough";
+export type Firmware = "bios" | "uefi";
 export type NicNetwork = { type: "user" } | { type: "bridge"; bridge: string };
+
+export interface Disk {
+  id: string;
+  pool: string;
+  /** `null` is an empty CD-ROM tray. */
+  volume: string | null;
+  device: "disk" | "cdrom";
+  format: string;
+  boot_order: number | null;
+  target?: string;
+  backing?: string[];
+}
+
+export interface Nic {
+  id: string;
+  mac: string;
+  network: NicNetwork;
+  boot_order?: number | null;
+}
 
 export interface Vm {
   id: string;
   name: string;
   description: string;
   generation: number;
-  cpu: { vcpus: number };
+  cpu: { vcpus: number; model?: CpuModel };
   memory: { max_mib: number; min_mib: number; target_mib: number; balloon: BalloonMode };
-  firmware: "bios" | "uefi";
+  firmware: Firmware;
   machine: string;
-  disks: {
-    id: string; pool: string; volume: string; device: "disk" | "cdrom"; format: string; boot_order: number | null;
-  }[];
-  nics: { id: string; mac: string; network: NicNetwork }[];
+  disks: Disk[];
+  nics: Nic[];
   node: string;
+  autostart?: boolean;
+  /** `user_data` is a `blake3:` fingerprint; the API never returns secrets. */
+  cloud_init?: { user_data: string; network_config?: string | null } | null;
   status: VmRuntime;
 }
+
+export type PressureLevel = "green" | "yellow" | "red";
 
 export interface NodeView {
   id: string;
@@ -50,6 +84,9 @@ export interface NodeView {
     hostname: string; libvirt_version: string; cpu_model: string; cpus: number; memory_kib: number;
     free_memory_bytes: number;
   };
+  memory_pressure?: {
+    level: PressureLevel; some_avg10: number | null; full_avg10: number | null; mem_available_pct: number;
+  } | null;
 }
 
 export interface Pool {
@@ -70,18 +107,68 @@ export interface Volume {
   kind: "disk" | "iso" | "file";
 }
 
+export interface CloudInit {
+  user_data: string;
+  network_config?: string;
+}
+
 export interface CreateVm {
   name: string;
   vcpus: number;
   memory_mib: number;
   min_memory_mib?: number;
-  firmware: "bios" | "uefi";
+  balloon?: BalloonMode;
+  firmware: Firmware;
   pool: string;
   disk_gib?: number;
   iso?: string;
+  image?: string;
+  cloud_init?: CloudInit;
   network?: NicNetwork;
   description?: string;
+  autostart?: boolean;
+  cpu_model?: CpuModel;
 }
+
+export interface UpdateVm {
+  description?: string;
+  vcpus?: number;
+  cpu_model?: CpuModel;
+  memory?: { max_mib?: number; min_mib?: number; target_mib?: number; balloon?: BalloonMode };
+  autostart?: boolean;
+  cloud_init?: CloudInit | null;
+  boot_order?: string[];
+  generation?: number;
+}
+
+export interface Snapshot {
+  name: string;
+  description: string;
+  /** Unix seconds. */
+  created: number | null;
+  state: string;
+  parent: string | null;
+  memory: boolean;
+  current: boolean;
+}
+
+export type TaskState = "running" | "succeeded" | "failed" | "cancelled";
+
+export interface Task {
+  id: string;
+  kind: string;
+  resource: string;
+  node: string;
+  state: TaskState;
+  progress: number | null;
+  message: string;
+  error: string | null;
+  result: unknown;
+  created: string;
+  updated: string;
+}
+
+export type VmAction = "start" | "shutdown" | "stop" | "reboot" | "reset" | "pause" | "resume";
 
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) {
@@ -90,11 +177,16 @@ export class ApiError extends Error {
 }
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`/api/v1${path}`, {
-    method,
-    headers: body === undefined ? {} : { "content-type": "application/json" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`/api/v1${path}`, {
+      method,
+      headers: body === undefined ? {} : { "content-type": "application/json" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new ApiError(0, "network", "Prism didn't answer. Check that the node is reachable.");
+  }
   if (!res.ok) {
     let code = "error";
     let detail = res.statusText;
@@ -107,55 +199,80 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     }
     throw new ApiError(res.status, code, detail);
   }
-  if (res.status === 204) return undefined as T;
-  return res.json();
+  if (res.status === 204 || res.headers.get("content-length") === "0") return undefined as T;
+  const text = await res.text();
+  return (text ? JSON.parse(text) : undefined) as T;
 }
+
+const enc = encodeURIComponent;
 
 export const api = {
   nodes: () => request<NodeView[]>("GET", "/nodes"),
   vms: () => request<Vm[]>("GET", "/vms"),
   vm: (id: string) => request<Vm>("GET", `/vms/${id}`),
   createVm: (req: CreateVm) => request<Vm>("POST", "/vms", req),
-  updateVm: (id: string, req: unknown) => request<Vm>("PATCH", `/vms/${id}`, req),
+  updateVm: (id: string, req: UpdateVm) => request<Vm>("PATCH", `/vms/${id}`, req),
   deleteVm: (id: string, deleteDisks: boolean) =>
     request<void>("DELETE", `/vms/${id}?delete_disks=${deleteDisks}`),
-  action: (id: string, action: string) => request<Vm>("POST", `/vms/${id}/actions/${action}`),
+  action: (id: string, action: VmAction) => request<Vm>("POST", `/vms/${id}/actions/${action}`),
+
+  addDisk: (id: string, req: { pool: string; volume?: string; size_gib?: number; device: "disk" | "cdrom" }) =>
+    request<Vm>("POST", `/vms/${id}/disks`, req),
+  updateDisk: (id: string, disk: string, req: { media?: string | null; size_gib?: number }) =>
+    request<Vm>("PATCH", `/vms/${id}/disks/${disk}`, req),
+  removeDisk: (id: string, disk: string, deleteVolume: boolean) =>
+    request<Vm>("DELETE", `/vms/${id}/disks/${disk}?delete_volume=${deleteVolume}`),
+  addNic: (id: string, req: { network: NicNetwork; mac?: string }) => request<Vm>("POST", `/vms/${id}/nics`, req),
+  removeNic: (id: string, nic: string) => request<Vm>("DELETE", `/vms/${id}/nics/${nic}`),
+
+  snapshots: (id: string) => request<Snapshot[]>("GET", `/vms/${id}/snapshots`),
+  createSnapshot: (id: string, req: { name?: string; description: string; memory: boolean }) =>
+    request<Task>("POST", `/vms/${id}/snapshots`, req),
+  deleteSnapshot: (id: string, name: string) => request<Task>("DELETE", `/vms/${id}/snapshots/${enc(name)}`),
+  revertSnapshot: (id: string, name: string) => request<Task>("POST", `/vms/${id}/snapshots/${enc(name)}/revert`),
+
+  tasks: () => request<Task[]>("GET", "/tasks?limit=100"),
+  cancelTask: (id: string) => request<void>("POST", `/tasks/${id}/cancel`),
+
   pools: () => request<Pool[]>("GET", "/nodes/local/pools"),
-  createPool: (name: string, format: string) =>
-    request<Pool>("POST", "/nodes/local/pools", { name, format }),
-  deletePool: (name: string) => request<void>("DELETE", `/nodes/local/pools/${encodeURIComponent(name)}`),
-  volumes: (pool: string) => request<Volume[]>("GET", `/nodes/local/pools/${encodeURIComponent(pool)}/volumes`),
-  createVolume: (pool: string, name: string, size_gib: number) =>
-    request<Volume>("POST", `/nodes/local/pools/${encodeURIComponent(pool)}/volumes`, { name, size_gib }),
+  createPool: (name: string, format: string) => request<Pool>("POST", "/nodes/local/pools", { name, format }),
+  deletePool: (name: string) => request<void>("DELETE", `/nodes/local/pools/${enc(name)}`),
+  volumes: (pool: string) => request<Volume[]>("GET", `/nodes/local/pools/${enc(pool)}/volumes`),
+  createVolume: (pool: string, name: string, size_gib: number, format: string) =>
+    request<Volume>("POST", `/nodes/local/pools/${enc(pool)}/volumes`, { name, size_gib, format }),
   deleteVolume: (pool: string, name: string) =>
-    request<void>("DELETE", `/nodes/local/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(name)}`),
+    request<void>("DELETE", `/nodes/local/pools/${enc(pool)}/volumes/${enc(name)}`),
 };
 
 /** Uploads a file with progress, as a raw PUT. */
 export function uploadVolume(
   pool: string,
   file: File,
-  onProgress: (fraction: number) => void,
+  name: string,
+  onProgress: (loaded: number, total: number) => void,
 ): { promise: Promise<Volume>; abort: () => void } {
   const xhr = new XMLHttpRequest();
   const promise = new Promise<Volume>((resolve, reject) => {
-    xhr.open("PUT", `/api/v1/nodes/local/pools/${encodeURIComponent(pool)}/volumes/${encodeURIComponent(file.name)}`);
+    xhr.open("PUT", `/api/v1/nodes/local/pools/${enc(pool)}/volumes/${enc(name)}`);
     xhr.setRequestHeader("content-type", "application/octet-stream");
-    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded / e.total);
+    xhr.upload.onprogress = (e) => e.lengthComputable && onProgress(e.loaded, e.total);
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) resolve(JSON.parse(xhr.responseText));
       else {
         let detail = xhr.statusText;
+        let code = "upload_failed";
         try {
-          detail = JSON.parse(xhr.responseText).detail ?? detail;
+          const p = JSON.parse(xhr.responseText);
+          detail = p.detail ?? detail;
+          code = p.code ?? code;
         } catch {
           /* ignore */
         }
-        reject(new ApiError(xhr.status, "upload_failed", detail));
+        reject(new ApiError(xhr.status, code, detail));
       }
     };
-    xhr.onerror = () => reject(new ApiError(0, "network", "upload failed"));
-    xhr.onabort = () => reject(new ApiError(0, "aborted", "upload cancelled"));
+    xhr.onerror = () => reject(new ApiError(0, "network", "The upload was interrupted."));
+    xhr.onabort = () => reject(new ApiError(0, "aborted", "Upload cancelled."));
     xhr.send(file);
   });
   return { promise, abort: () => xhr.abort() };
@@ -164,4 +281,32 @@ export function uploadVolume(
 export function wsUrl(path: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${location.host}/api/v1${path}`;
+}
+
+/** Turns API and network errors into one calm sentence. */
+export function humanError(e: unknown): string {
+  if (!e) return "";
+  if (e instanceof ApiError) {
+    const d = e.message.trim();
+    const sentence = d ? d[0].toUpperCase() + d.slice(1) + (/[.!?]$/.test(d) ? "" : ".") : "";
+    switch (e.code) {
+      case "libvirt_unavailable":
+        return `Prism can't reach libvirt on this host right now. ${sentence}`;
+      case "network":
+      case "aborted":
+        return sentence;
+      case "not_found":
+        return sentence || "That no longer exists.";
+      case "conflict":
+      case "exists":
+        return sentence || "Something changed in the meantime. Try again.";
+      case "invalid_body":
+        return `The request was malformed: ${d}`;
+      default:
+        if (e.status >= 500) return `Something went wrong on the host. ${sentence}`;
+        return sentence || `Request failed (${e.status}).`;
+    }
+  }
+  if (e instanceof Error) return e.message;
+  return String(e);
 }

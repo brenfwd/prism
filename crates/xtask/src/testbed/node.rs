@@ -28,6 +28,9 @@ impl NodeSpec {
     pub(super) fn lan_mac(&self) -> String {
         format!("52:54:00:7b:01:{:02x}", self.index)
     }
+    pub(super) fn lan_ip(&self) -> String {
+        format!("10.77.0.{}", self.index)
+    }
     pub(super) fn lan_addr(&self) -> String {
         format!("10.77.0.{}/24", self.index)
     }

@@ -89,7 +89,7 @@ impl Testbed {
             None,
         )?;
         let current = self.ssh_check(ip, "sudo cat /etc/prism/prism.toml", None)?;
-        let patched = patch_http(&current, ip, &spec.hostname())?;
+        let patched = patch_http(&current, ip, &spec.hostname(), &spec.lan_ip())?;
         if patched != current {
             self.ssh_check(
                 ip,
@@ -127,8 +127,8 @@ impl Testbed {
 }
 
 /// Rewrites `[http] listen` and `allowed_hosts` so the host can reach the
-/// node's API at its NAT address.
-fn patch_http(toml: &str, ip: &str, hostname: &str) -> anyhow::Result<String> {
+/// node's API at its NAT address, and `[cluster] advertise` to its LAN address.
+fn patch_http(toml: &str, ip: &str, hostname: &str, lan: &str) -> anyhow::Result<String> {
     let mut section = "";
     let (mut listen, mut hosts) = (false, false);
     let mut out = String::with_capacity(toml.len() + 64);
@@ -146,6 +146,9 @@ fn patch_http(toml: &str, ip: &str, hostname: &str) -> anyhow::Result<String> {
         } else if section == "[http]" && t.starts_with("allowed_hosts") {
             write!(out, "allowed_hosts = [\"{ip}\", \"{hostname}\"]")?;
             hosts = true;
+        } else if section == "[cluster]" && t.starts_with("advertise") {
+            // Peers reach this node over the testbed LAN.
+            write!(out, "advertise = [\"{lan}\"]")?;
         } else {
             out.push_str(line);
         }
@@ -186,14 +189,21 @@ listen = ["127.0.0.1:8080"]
 allowed_hosts = []
 allowed_origins = []
 
+[cluster]
+advertise = []
+
 [libvirt]
 socket = "auto"
 "#;
-        let out = patch_http(toml, "192.168.122.5", "tb-1").unwrap();
+        let out = patch_http(toml, "192.168.122.5", "tb-1", "10.77.0.1").unwrap();
         assert!(out.contains(r#"listen = ["127.0.0.1:8080", "192.168.122.5:8080"]"#));
         assert!(out.contains(r#"allowed_hosts = ["192.168.122.5", "tb-1"]"#));
+        assert!(out.contains(r#"advertise = ["10.77.0.1"]"#));
         assert!(out.contains("[libvirt]\nsocket = \"auto\"\n"));
-        assert_eq!(patch_http(&out, "192.168.122.5", "tb-1").unwrap(), out);
-        assert!(patch_http("[libvirt]\n", "1.2.3.4", "x").is_err());
+        assert_eq!(
+            patch_http(&out, "192.168.122.5", "tb-1", "10.77.0.1").unwrap(),
+            out
+        );
+        assert!(patch_http("[libvirt]\n", "1.2.3.4", "x", "10.77.0.9").is_err());
     }
 }

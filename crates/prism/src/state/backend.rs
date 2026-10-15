@@ -60,6 +60,10 @@ impl prism_cluster::Backend for StateBackend {
             Err(e) => match e.downcast::<Rejected>() {
                 // Rolled back; still record that the entry was applied.
                 Ok(Rejected(o)) => {
+                    tracing::warn!(
+                        index = applied_index(meta),
+                        "replicated command rejected: {o:?}"
+                    );
                     s.db.set_meta(APPLIED_META, &meta_json)?;
                     o
                 }

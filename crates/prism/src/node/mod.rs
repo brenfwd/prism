@@ -3,6 +3,7 @@
 
 mod balloon;
 mod devices;
+mod moves;
 mod snapshots;
 mod vms;
 
@@ -26,6 +27,7 @@ use crate::tasks::Tasks;
 
 pub use balloon::BalloonStatus;
 pub use devices::{AddDisk, AddNic, UpdateDisk};
+pub use moves::MoveVm;
 pub use snapshots::{CreateSnapshot, SnapshotView};
 
 const STATS_INTERVAL: Duration = Duration::from_secs(5);
@@ -799,6 +801,12 @@ impl Node {
             };
             match &*cmd {
                 Command::PutVm { vm, .. } => {
+                    if vm.node == self.id && self.runtime(vm.id).state == VmState::Unknown {
+                        // Moved here: define it.
+                        let node = Arc::clone(&self);
+                        let id = vm.id;
+                        tokio::spawn(async move { node.adopt(id).await });
+                    }
                     let view = self.vm_view((**vm).clone());
                     self.bus.publish(
                         "vm.config",

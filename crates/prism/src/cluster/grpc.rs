@@ -148,7 +148,13 @@ pub async fn serve(cluster: Arc<Cluster>, raft: prism_cluster::Raft) {
             }))
             .add_service(ConsoleServer::new(super::peers::ConsoleService {
                 cluster: Arc::clone(&cluster),
-            }));
+            }))
+            .add_service(prism_proto::v1::data_plane_server::DataPlaneServer::new(
+                super::dataplane::DataPlaneService {
+                    cluster: Arc::clone(&cluster),
+                    plane: Arc::clone(&cluster.dataplane),
+                },
+            ));
         tracing::info!("gRPC listening on {addr}");
         if let Err(e) = router.serve(addr).await {
             tracing::warn!("gRPC server on {addr}: {e}; retrying");

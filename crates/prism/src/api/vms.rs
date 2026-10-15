@@ -7,7 +7,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::{ApiError, AppState, Json};
-use crate::node::{Action, AddDisk, AddNic, CreateSnapshot, SnapshotView, UpdateDisk, VmView};
+use crate::node::{Action, AddDisk, AddNic, CreateSnapshot, MoveVm, SnapshotView, UpdateDisk, VmView};
 use crate::spec::{CreateVm, UpdateVm};
 use crate::tasks::Task;
 
@@ -26,6 +26,15 @@ pub fn routes() -> Router<AppState> {
         .route("/vms/{id}/snapshots", get(snapshots).post(create_snapshot))
         .route("/vms/{id}/snapshots/{name}", delete(delete_snapshot))
         .route("/vms/{id}/snapshots/{name}/revert", post(revert_snapshot))
+        .route("/vms/{id}/move", post(move_vm))
+}
+
+async fn move_vm(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<MoveVm>,
+) -> Result<impl IntoResponse, ApiError> {
+    Ok(accepted(node.move_vm(parse_id(&id)?, req)?))
 }
 
 fn parse_sub(id: &str, what: &str) -> Result<Uuid, ApiError> {

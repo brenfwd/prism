@@ -98,3 +98,21 @@ message ConsoleFrame {
 service Console {
   rpc Open(stream ConsoleFrame) returns (stream ConsoleFrame);
 }
+
+message OpenSession {
+  // JSON of the session's purpose (for example receiving a volume).
+  bytes purpose = 1;
+}
+
+message SessionReply {
+  // 128-bit session ID the caller presents on the data-plane connection.
+  bytes session_id = 1;
+  // JSON with purpose-specific details.
+  bytes detail = 2;
+}
+
+// Bulk transfers (disk copies, migration streams) run on a raw TCP data
+// plane (port 7444) inside WireGuard; this service sets sessions up.
+service DataPlane {
+  rpc Open(OpenSession) returns (SessionReply);
+}

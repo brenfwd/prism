@@ -564,6 +564,44 @@ impl Pool {
         self.volume(name)
     }
 
+    /// Opens a volume for reading (confined).
+    pub fn open_read(&self, name: &str) -> Result<std::fs::File, StorageError> {
+        Self::check(name)?;
+        Ok(std::fs::File::from(self.open_existing(name)?))
+    }
+
+    /// Starts receiving `name`: returns a hidden partial file to fill, then
+    /// [`Self::commit_partial`] or [`Self::abort_partial`].
+    pub fn begin_partial(&self, name: &str) -> Result<(String, std::fs::File), StorageError> {
+        Self::check(name)?;
+        if self.open_existing(name).is_ok() {
+            return Err(StorageError::Exists(name.into()));
+        }
+        let partial = format!("{PARTIAL_PREFIX}{}", uuid::Uuid::new_v4().simple());
+        let fd = rustix::fs::openat2(
+            &self.root,
+            &partial,
+            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL | OFlags::CLOEXEC,
+            Mode::from_raw_mode(0o600),
+            resolve(),
+        )?;
+        Ok((partial, std::fs::File::from(fd)))
+    }
+
+    pub fn commit_partial(&self, partial: &str, name: &str) -> Result<(), StorageError> {
+        rustix::fs::renameat_with(&self.root, partial, &self.root, name, RenameFlags::NOREPLACE).map_err(|e| {
+            let _ = rustix::fs::unlinkat(&self.root, partial, AtFlags::empty());
+            match e {
+                rustix::io::Errno::EXIST => StorageError::Exists(name.into()),
+                e => e.into(),
+            }
+        })
+    }
+
+    pub fn abort_partial(&self, partial: &str) {
+        let _ = rustix::fs::unlinkat(&self.root, partial, AtFlags::empty());
+    }
+
     /// Removes partial uploads left by a crash.
     pub fn clean_partials(&self) {
         let Ok(vols) = rustix::fs::openat2(

@@ -104,6 +104,7 @@ pub struct Cluster {
     pub node: std::sync::OnceLock<std::sync::Weak<crate::node::Node>>,
     /// The HTTP API, for requests tunnelled from peers.
     pub http: std::sync::OnceLock<axum::Router>,
+    pub dataplane: Arc<super::dataplane::DataPlane>,
 }
 
 impl std::fmt::Debug for Cluster {
@@ -180,6 +181,7 @@ impl Cluster {
             local: Mutex::new(local),
             node: std::sync::OnceLock::new(),
             http: std::sync::OnceLock::new(),
+            dataplane: Arc::default(),
         }))
     }
 
@@ -240,12 +242,24 @@ impl Cluster {
         )
         .await?;
         tokio::spawn(super::grpc::serve(Arc::clone(self), node.raft.clone()));
+        tokio::spawn(Arc::clone(self).serve_dataplane());
+        tokio::spawn(super::peers::fan_in(Arc::clone(self)));
         *self.raft.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(node);
         self.state.set_proposer(Arc::new(Proposer {
             cluster: Arc::clone(self),
         }));
         tokio::spawn(Arc::clone(self).reconcile_loop());
         Ok(())
+    }
+
+    async fn serve_dataplane(self: Arc<Self>) {
+        loop {
+            if let Some(addr) = self.grpc_listen() {
+                let addr = SocketAddr::new(addr.ip(), prism_proto::DATA_PORT);
+                Arc::clone(&self.dataplane).serve(addr).await;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
     }
 
     /// The gRPC listen address once this node has a mesh address.

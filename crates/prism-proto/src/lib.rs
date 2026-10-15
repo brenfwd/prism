@@ -13,3 +13,6 @@ pub mod v1 {
 
 /// Port of the gRPC control plane on the mesh.
 pub const GRPC_PORT: u16 = 7443;
+
+/// Port of the raw TCP data plane on the mesh.
+pub const DATA_PORT: u16 = 7444;

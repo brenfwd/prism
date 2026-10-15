@@ -1,5 +1,6 @@
 //! HTTP API under `/api/v1`, plus the embedded UI.
 
+mod archive;
 mod cluster;
 mod console;
 mod forward;
@@ -35,6 +36,7 @@ pub fn router(node: AppState) -> Router {
         .merge(tasks::routes())
         .merge(cluster::routes())
         .merge(internal::routes())
+        .merge(archive::routes())
         .route("/events", get(sse::events))
         .fallback(|| async { ApiError::not_found("no such endpoint") })
         .layer(axum::middleware::from_fn_with_state(Arc::clone(&node), forward::route))
@@ -116,6 +118,10 @@ impl ApiError {
 
     pub fn not_found(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, "not_found", detail)
+    }
+
+    pub fn detail(&self) -> &str {
+        &self.detail
     }
 
     pub fn bad_request(detail: impl Into<String>) -> Self {

@@ -1,6 +1,7 @@
 //! Prism: a libvirt/KVM manager in one static binary.
 
 mod api;
+mod archive;
 mod cli;
 mod cluster;
 mod config;
@@ -225,21 +226,50 @@ async fn serve(dir: &Path, adopt: bool) -> anyhow::Result<()> {
             .to_string_lossy()
             .into_owned()
     });
+    let mut archive = archive::Archive::default();
+    for (mname, m) in &cfg.archive_members {
+        let member = archive::LocalMember::open(mname, &m.pool, &m.path)
+            .with_context(|| format!("opening archive member {mname}"))?;
+        archive.members.insert(mname.clone(), Arc::new(member));
+    }
+
     let bus = Arc::new(Bus::new(node_id.to_string(), boot_epoch));
     let tasks = Tasks::new(node_db, Arc::clone(&bus), node_id);
     let node = Node::new(
         node_id,
-        name,
+        name.clone(),
         cfg.clone(),
-        state,
+        state.clone(),
         storage,
+        archive,
         bus,
         tasks,
         host_booted,
     );
-    node.start();
+    let app = api::router(Arc::clone(&node));
 
-    let app = api::router(node);
+    if let Some(mesh) = cluster::wg::mesh() {
+        let c = cluster::Cluster::new(
+            node_id,
+            name,
+            state,
+            mesh,
+            cluster::ClusterConfig {
+                advertise: cfg.cluster.advertise.clone(),
+                wireguard_port: cfg.cluster.wireguard_port,
+                data_dir: dir.join("data"),
+            },
+        )?;
+        let _ = c.node.set(Arc::downgrade(&node));
+        let _ = c.http.set(app.clone());
+        if let Err(e) = c.resume().await {
+            tracing::error!("resuming cluster membership: {e:#}");
+        }
+        let _ = node.cluster.set(c);
+    }
+    node.start();
+    node.register_archive_members().await;
+
     let mut servers = tokio::task::JoinSet::new();
     for addr in &cfg.http.listen {
         let listener = tokio::net::TcpListener::bind(addr)

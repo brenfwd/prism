@@ -179,6 +179,9 @@ pub struct NodeView {
     pub domain_type: String,
     pub host: HostInfo,
     pub memory_pressure: Option<balloon::HostPressure>,
+    /// This node's archive member directories and their free space.
+    #[serde(default)]
+    pub archive: Vec<crate::archive::MemberCapacity>,
     /// False when this view is a cached copy of an unreachable peer.
     #[serde(default = "yes")]
     pub reachable: bool,
@@ -222,6 +225,7 @@ pub struct Node {
     pub cfg: Config,
     pub state: State,
     pub storage: Storage,
+    pub archive: crate::archive::Archive,
     pub bus: Arc<Bus>,
     pub tasks: Tasks,
     libvirt: watch::Sender<Option<Client>>,
@@ -281,6 +285,7 @@ impl Node {
         cfg: Config,
         state: State,
         storage: Storage,
+        archive: crate::archive::Archive,
         bus: Arc<Bus>,
         tasks: Tasks,
         host_booted: bool,
@@ -291,6 +296,7 @@ impl Node {
             cfg,
             state,
             storage,
+            archive,
             bus,
             tasks,
             libvirt: watch::channel(None).0,
@@ -304,6 +310,31 @@ impl Node {
             remote_runtime: Mutex::default(),
             remote_nodes: Mutex::default(),
         })
+    }
+
+    /// Registers this node's archive member directories in the shared
+    /// index (idempotent).
+    pub async fn register_archive_members(&self) {
+        let existing = self.state.archive_members().unwrap_or_default();
+        for (name, m) in &self.cfg.archive_members {
+            let doc = crate::archive::ArchiveMemberDoc {
+                node: self.id,
+                name: name.clone(),
+                pool: m.pool.clone(),
+                weight: m.weight,
+                reserve: m.reserve,
+                state: existing
+                    .iter()
+                    .find(|e| e.node == self.id && e.name == *name)
+                    .map_or(crate::archive::MemberState::Active, |e| e.state),
+            };
+            if existing.contains(&doc) {
+                continue;
+            }
+            if let Err(e) = self.state.apply(Command::PutArchiveMember { member: doc }).await {
+                tracing::warn!(member = %name, "registering archive member: {e}");
+            }
+        }
     }
 
     /// Spawns the libvirt supervisor, the state watcher, the stats loop and
@@ -337,6 +368,7 @@ impl Node {
             domain_type: self.cfg.domain_type().into(),
             host: lock(&self.host).clone(),
             memory_pressure: lock(&self.pressure).clone(),
+            archive: self.archive.capacity(),
             reachable: true,
         }
     }
@@ -855,6 +887,25 @@ impl Node {
                 | Command::SetVoter { .. }
                 | Command::RemoveMember { .. } => {
                     self.bus.publish("cluster", "/cluster".into(), Op::Upsert, serde_json::Value::Null);
+                }
+                Command::PutArchivePool { .. } | Command::PutArchiveMember { .. } => {
+                    self.bus.publish("archive.pool", "/archive/pools".into(), Op::Upsert, serde_json::Value::Null);
+                }
+                Command::PutArchiveFile { file, .. } => {
+                    self.bus.publish(
+                        "archive.file",
+                        format!("/archive/pools/{}/files/{}", file.pool, file.path),
+                        Op::Upsert,
+                        serde_json::to_value(file).unwrap_or_default(),
+                    );
+                }
+                Command::DeleteArchiveFile { pool, path } => {
+                    self.bus.publish(
+                        "archive.file",
+                        format!("/archive/pools/{pool}/files/{path}"),
+                        Op::Delete,
+                        serde_json::Value::Null,
+                    );
                 }
             }
         }

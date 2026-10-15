@@ -18,6 +18,65 @@ pub struct Config {
     pub storage: StorageConfig,
     pub pools: BTreeMap<String, PoolConfig>,
     pub cluster: ClusterSection,
+    /// Directories this node contributes to archive pools.
+    pub archive_members: BTreeMap<String, ArchiveMemberConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ArchiveMemberConfig {
+    /// The archive pool this directory belongs to (created on first use).
+    pub pool: String,
+    pub path: PathBuf,
+    /// Relative share of new files.
+    #[serde(default = "one")]
+    pub weight: f64,
+    /// Free space to keep; the member takes no new files below it.
+    #[serde(default, with = "size_str")]
+    pub reserve: u64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+/// Sizes as bytes or strings like `50GiB`.
+mod size_str {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &u64, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u64(*v)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum V {
+            N(u64),
+            S(String),
+        }
+        match V::deserialize(d)? {
+            V::N(n) => Ok(n),
+            V::S(s) => super::parse_size(&s).map_err(serde::de::Error::custom),
+        }
+    }
+}
+
+/// Parses `123`, `10k`, `50GiB`, `1.5T` (binary units).
+pub fn parse_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let split = s.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(s.len());
+    let (num, unit) = s.split_at(split);
+    let n: f64 = num.parse().map_err(|_| format!("bad size {s:?}"))?;
+    let mult: u64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1 << 10,
+        "m" | "mb" | "mib" => 1 << 20,
+        "g" | "gb" | "gib" => 1 << 30,
+        "t" | "tb" | "tib" => 1 << 40,
+        u => return Err(format!("unknown size unit {u:?}")),
+    };
+    Ok((n * mult as f64) as u64)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -151,6 +210,17 @@ impl Config {
         if self.http.listen.is_empty() {
             bail!("http.listen is empty");
         }
+        for (name, m) in &self.archive_members {
+            if !crate::storage::valid_name(name) || !crate::storage::valid_name(&m.pool) {
+                bail!("archive member {name}: invalid member or pool name");
+            }
+            if !m.path.is_absolute() {
+                bail!("archive member {name}: path must be absolute");
+            }
+            if !(m.weight > 0.0) {
+                bail!("archive member {name}: weight must be positive");
+            }
+        }
         Ok(())
     }
 
@@ -217,6 +287,17 @@ mod tests {
         cfg.validate().unwrap();
         assert_eq!(cfg.pools["default"].format, "qcow2");
         assert_eq!(cfg.http.listen[0].to_string(), "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn sizes() {
+        assert_eq!(parse_size("50GiB").unwrap(), 50 << 30);
+        assert_eq!(parse_size("1.5t").unwrap(), 3 << 39);
+        assert_eq!(parse_size("4096").unwrap(), 4096);
+        assert!(parse_size("5 parsecs").is_err());
+        let cfg: Config = toml::from_str("[archive_members.a]\npool = \"archive\"\npath = \"/srv/a\"\nreserve = \"10GiB\"\n").unwrap();
+        assert_eq!(cfg.archive_members["a"].reserve, 10 << 30);
+        assert!((cfg.archive_members["a"].weight - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]

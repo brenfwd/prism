@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::archive::{ARCHIVE_FILES, ARCHIVE_MEMBERS, ARCHIVE_POOLS, ArchiveFileDoc, ArchiveMemberDoc, ArchivePoolDoc};
 use crate::cluster::model::{
     AdmitError, CLUSTER, ClusterDoc, INVITES, InviteDoc, MEMBERS, MemberDoc, MemberState, TOMBSTONES, TombstoneDoc,
 };
@@ -96,6 +97,23 @@ pub enum Command {
     RemoveMember {
         node_id: Uuid,
         now: i64,
+    },
+    PutArchivePool {
+        pool: ArchivePoolDoc,
+    },
+    /// Registers or updates a node's member directory (creates the pool on
+    /// first use).
+    PutArchiveMember {
+        member: ArchiveMemberDoc,
+    },
+    /// Records a file. With `create`, fails if the path exists.
+    PutArchiveFile {
+        file: ArchiveFileDoc,
+        create: bool,
+    },
+    DeleteArchiveFile {
+        pool: String,
+        path: String,
     },
 }
 
@@ -273,6 +291,37 @@ fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow::Result<Out
                 d.delete(POOLS, &PoolDoc::key(pool.node, &pool.name))?;
             }
         }
+        Command::PutArchivePool { pool } => {
+            d.put(ARCHIVE_POOLS, &pool.name, pool)?;
+        }
+        Command::PutArchiveMember { member } => {
+            if d.get::<ArchivePoolDoc>(ARCHIVE_POOLS, &member.pool)?.is_none() {
+                d.put(
+                    ARCHIVE_POOLS,
+                    &member.pool,
+                    &ArchivePoolDoc {
+                        name: member.pool.clone(),
+                        replicas: 1,
+                    },
+                )?;
+            }
+            d.put(ARCHIVE_MEMBERS, &member.key(), member)?;
+        }
+        Command::PutArchiveFile { file, create } => {
+            if d.get::<ArchivePoolDoc>(ARCHIVE_POOLS, &file.pool)?.is_none() {
+                return reject(Outcome::NotFound(format!("archive pool {}", file.pool)));
+            }
+            let key = ArchiveFileDoc::key(&file.pool, &file.path);
+            if *create && d.get::<ArchiveFileDoc>(ARCHIVE_FILES, &key)?.is_some() {
+                return reject(Outcome::Conflict(format!("{} already exists in {}", file.path, file.pool)));
+            }
+            d.put(ARCHIVE_FILES, &key, file)?;
+        }
+        Command::DeleteArchiveFile { pool, path } => {
+            if !d.delete(ARCHIVE_FILES, &ArchiveFileDoc::key(pool, path))? {
+                return reject(Outcome::NotFound(format!("{pool}/{path}")));
+            }
+        }
     }
     Ok(Outcome::Ok)
 }
@@ -419,6 +468,28 @@ impl State {
 
     pub fn tombstones(&self) -> anyhow::Result<Vec<TombstoneDoc>> {
         self.db.list(TOMBSTONES)
+    }
+
+    pub fn archive_pools(&self) -> anyhow::Result<Vec<ArchivePoolDoc>> {
+        self.db.list(ARCHIVE_POOLS)
+    }
+
+    pub fn archive_members(&self) -> anyhow::Result<Vec<ArchiveMemberDoc>> {
+        self.db.list(ARCHIVE_MEMBERS)
+    }
+
+    pub fn archive_file(&self, pool: &str, path: &str) -> anyhow::Result<Option<ArchiveFileDoc>> {
+        self.db.get(ARCHIVE_FILES, &ArchiveFileDoc::key(pool, path))
+    }
+
+    /// Files in `pool` whose path starts with `prefix`.
+    pub fn archive_files(&self, pool: &str, prefix: &str) -> anyhow::Result<Vec<ArchiveFileDoc>> {
+        Ok(self
+            .db
+            .list::<ArchiveFileDoc>(ARCHIVE_FILES)?
+            .into_iter()
+            .filter(|f| f.pool == pool && f.path.starts_with(prefix))
+            .collect())
     }
 }
 

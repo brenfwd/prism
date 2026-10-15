@@ -1,7 +1,7 @@
 //! Background archive health: re-replicating after a node has been offline
 //! past the grace period, rebalancing fill, and scrubbing.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -11,7 +11,6 @@ use uuid::Uuid;
 
 use super::Node;
 use super::archive_repair::{MoveReport, ScrubReport};
-use super::lock;
 use crate::archive::{ArchiveFileDoc, ArchiveMemberDoc, MemberState, Replica};
 use crate::state::Command;
 
@@ -19,6 +18,8 @@ use crate::state::Command;
 pub const OFFLINE_GRACE: Duration = Duration::from_secs(24 * 3600);
 const HEALTH_EVERY: Duration = Duration::from_secs(300);
 const REBALANCE_EVERY: Duration = Duration::from_secs(24 * 3600);
+const OFFLINE_META: &str = "archive.offline";
+const SCRUB_META: &str = "archive.scrub_at";
 const SCRUB_EVERY: Duration = Duration::from_secs(7 * 24 * 3600);
 /// Fill may differ from the pool's mean by this much before files move.
 const REBALANCE_MARGIN: f64 = 0.10;
@@ -75,16 +76,32 @@ pub fn pick_file<'a>(
 
 impl Node {
     /// Nodes that have been unreachable for longer than the grace period.
+    /// First-seen-offline times persist in the state db's node-local meta,
+    /// so a daemon restart does not restart the clock.
     pub(super) fn archive_expired_nodes(&self) -> HashSet<Uuid> {
-        let now = Instant::now();
-        let mut offline = lock(&self.archive_offline);
+        let now = unix_now();
+        let db = self.state.db();
+        let mut offline: HashMap<Uuid, u64> = db
+            .meta(OFFLINE_META)
+            .ok()
+            .flatten()
+            .and_then(|m| serde_json::from_str(&m).ok())
+            .unwrap_or_default();
+        let before = offline.clone();
         let mut expired = HashSet::new();
-        for n in self.nodes() {
-            if n.reachable {
-                offline.remove(&n.id);
-            } else if now.duration_since(*offline.entry(n.id).or_insert(now)) >= OFFLINE_GRACE {
+        let nodes = self.nodes();
+        offline.retain(|id, _| nodes.iter().any(|n| n.id == *id && !n.reachable));
+        for n in nodes.iter().filter(|n| !n.reachable) {
+            let since = *offline.entry(n.id).or_insert(now);
+            if now.saturating_sub(since) >= OFFLINE_GRACE.as_secs() {
                 expired.insert(n.id);
             }
+        }
+        if offline != before
+            && let Ok(json) = serde_json::to_string(&offline)
+            && let Err(e) = db.set_meta(OFFLINE_META, &json)
+        {
+            tracing::warn!("persisting archive offline clock: {e:#}");
         }
         expired
     }
@@ -224,11 +241,32 @@ impl Node {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
+    /// Whether a weekly scrub is due; stamps the time when it is, so the
+    /// schedule survives restarts.
+    fn archive_scrub_due(&self) -> bool {
+        let (now, db) = (unix_now(), self.state.db());
+        let last = db
+            .meta(SCRUB_META)
+            .ok()
+            .flatten()
+            .and_then(|m| m.parse::<u64>().ok());
+        let Some(last) = last else {
+            // First run: start the clock rather than scrubbing at once.
+            let _ = db.set_meta(SCRUB_META, &now.to_string());
+            return false;
+        };
+        let due = now.saturating_sub(last) >= SCRUB_EVERY.as_secs();
+        if due {
+            let _ = db.set_meta(SCRUB_META, &now.to_string());
+        }
+        due
+    }
+
     /// Every pass: re-replicate after the grace period (on the leader only,
-    /// so nodes don't race), rebalance daily, and scrub this node weekly.
+    /// so nodes don't race), rebalance daily, and scrub the whole cluster weekly (leader only).
     pub(super) async fn archive_health_loop(self: Arc<Self>) {
         let mut tick = tokio::time::interval(HEALTH_EVERY);
-        let (mut last_rebalance, mut last_scrub) = (Instant::now(), Instant::now());
+        let mut last_rebalance = Instant::now();
         tick.tick().await;
         loop {
             tick.tick().await;
@@ -248,10 +286,9 @@ impl Node {
                     last_rebalance = Instant::now();
                 }
             }
-            if last_scrub.elapsed() >= SCRUB_EVERY {
-                last_scrub = Instant::now();
+            if leads && self.archive_scrub_due() {
                 for p in &pools {
-                    match self.archive_scrub_local(&p.name).await {
+                    match self.archive_scrub(&p.name).await {
                         Ok(r) if r.corrupt + r.missing > 0 => {
                             tracing::warn!(pool = %p.name, "scrub: {r:?}");
                         }
@@ -262,6 +299,12 @@ impl Node {
             }
         }
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 #[cfg(test)]

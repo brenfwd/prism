@@ -119,9 +119,6 @@ pub struct Node {
     remote_runtime: Mutex<HashMap<Uuid, VmRuntime>>,
     /// Other nodes' status, from their event streams.
     remote_nodes: Mutex<HashMap<Uuid, NodeView>>,
-    /// When each unreachable node was first seen offline, for the archive's
-    /// under-replication grace period.
-    archive_offline: Mutex<HashMap<Uuid, std::time::Instant>>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -176,7 +173,6 @@ impl Node {
             cluster: std::sync::OnceLock::new(),
             remote_runtime: Mutex::default(),
             remote_nodes: Mutex::default(),
-            archive_offline: Mutex::default(),
         })
     }
 

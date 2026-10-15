@@ -41,6 +41,7 @@ export function VncConsole({ vmId, render = renderOverride() ?? "auto" }: { vmId
   const [serverCursor, setServerCursor] = useState(false);
   const [renderer, setRenderer] = useState("");
   const [stats, setStats] = useState<Extract<FromWorker, { type: "stats" }> | null>(null);
+  const [wasConnected, setWasConnected] = useState(false);
 
   useEffect(() => {
     const host = box.current;
@@ -105,6 +106,7 @@ export function VncConsole({ vmId, render = renderOverride() ?? "auto" }: { vmId
           break;
         case "status":
           setStatus(m.status);
+          if (m.status === "connected") setWasConnected(true);
           setDetail(m.detail);
           break;
         case "size":
@@ -268,6 +270,18 @@ export function VncConsole({ vmId, render = renderOverride() ?? "auto" }: { vmId
           <Button size="xs" variant="primary" icon="rotate" onClick={() => setAttempt((a) => a + 1)}>Reconnect</Button>
         )}
       </div>
+      <div className="relative">
+      {status === "disconnected" && (
+        <div className="absolute inset-0 z-10 grid place-items-center rounded-xl bg-black/80 text-center">
+          <div className="px-6">
+            <p className="text-base font-semibold text-white">The screen disconnected</p>
+            <p className="mt-1 max-w-sm text-sm text-zinc-400">
+              {wasConnected ? "The connection dropped. The machine may have restarted." : "Prism couldn't open this machine's display. It may still be starting, or the host refused access."}
+            </p>
+            <Button className="mt-4" size="sm" variant="primary" icon="rotate" onClick={() => setAttempt((a) => a + 1)}>Reconnect</Button>
+          </div>
+        </div>
+      )}
       <div
         ref={box}
         tabIndex={0}
@@ -280,6 +294,7 @@ export function VncConsole({ vmId, render = renderOverride() ?? "auto" }: { vmId
         data-render-ms={stats?.renderMs.toFixed(1)}
         className={`h-[calc(100dvh-17rem)] min-h-[360px] overflow-hidden rounded-xl bg-black ring-1 ring-zinc-900/10 dark:ring-white/10 outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${serverCursor ? "cursor-none" : ""}`}
       />
+      </div>
     </div>
   );
 }

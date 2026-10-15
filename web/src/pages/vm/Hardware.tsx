@@ -21,6 +21,9 @@ async function deviceChange(qc: QueryClient, vm: Vm, what: string, run: () => Pr
     if (!isOn(view)) toast({ tone: "success", title: `${what}` });
     else if (view.status.pending_restart && !vm.status.pending_restart)
       toast({ tone: "warning", title: `${what}: saved for the next power cycle`, body: "The running machine couldn't take this change live. It applies after it powers off and starts again." });
+    else if (view.status.pending_restart)
+      // Other changes were already waiting, so we can't tell whether this one applied live.
+      toast({ tone: "success", title: what, body: "If the guest doesn't see it yet, it will after the next power cycle." });
     else toast({ tone: "success", title: `${what} live`, body: "The running guest sees the change now." });
     return true;
   } catch (e) {

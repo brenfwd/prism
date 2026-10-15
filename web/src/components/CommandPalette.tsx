@@ -94,7 +94,7 @@ export function CommandPalette() {
         });
       }
       cmds.push({ id: `console-${vm.id}`, group: "Actions", label: `Open console of ${vm.name}`, keywords: "vnc screen display", icon: "monitor", vm, run: open("console") });
-      cmds.push({ id: `snap-${vm.id}`, group: "Actions", label: `Snapshot ${vm.name}`, keywords: "take checkpoint backup", icon: "camera", vm, run: go(() => navigate({ to: "/vms/$id", params: { id: vm.id }, search: { tab: "snapshots", take: "1" } })) });
+      cmds.push({ id: `snap-${vm.id}`, group: "Actions", label: `Snapshot ${vm.name}`, keywords: "take checkpoint backup", icon: "camera", vm, run: go(() => navigate({ to: "/vms/$id", params: { id: vm.id }, search: { tab: "snapshots", take: "now" } })) });
       cmds.push({ id: `hw-${vm.id}`, group: "Actions", label: `Edit hardware of ${vm.name}`, keywords: "disk nic cdrom iso insert", icon: "disk", vm, run: open("hardware") });
       cmds.push({ id: `set-${vm.id}`, group: "Actions", label: `Settings of ${vm.name}`, keywords: "cpu memory delete autostart", icon: "settings", vm, run: open("settings") });
     }

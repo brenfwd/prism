@@ -147,7 +147,7 @@ export function SnapshotsTab({ vm, openForm }: { vm: Vm; openForm: boolean }) {
                       {n.memory && <Badge tone="sky" title="Includes memory: reverting resumes the running machine">with memory</Badge>}
                       <span className="text-xs text-zinc-500" title={n.created ? dateTime(n.created * 1000) : undefined}>
                         {n.created ? ago(n.created * 1000) : ""}
-                        {n.state && ` · ${n.state === "shutoff" ? "taken while off" : n.state === "running" ? "taken while running" : n.state}`}
+                        {n.state && ` · ${n.state === "shutoff" ? "taken while off" : n.state === "running" || n.state === "paused" ? "taken while running" : n.state === "disk-snapshot" ? "disks only" : n.state}`}
                       </span>
                     </div>
                     {n.description && <p className="mt-0.5 text-[13px] text-zinc-600 dark:text-zinc-400">{n.description}</p>}

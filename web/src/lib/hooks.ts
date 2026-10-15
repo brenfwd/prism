@@ -28,6 +28,9 @@ export function useAllVolumes(): { data: (Volume & { pool: string })[]; loading:
   };
 }
 
+/** A disk Prism created for a machine (`<vm>-disk0.qcow2`), even if detached. */
+export const looksLikeVmDisk = (name: string) => /-disk\d+\.(qcow2|raw|img)$/.test(name);
+
 /** Memory the host can still hand out, in bytes. */
 export function hostAvailableBytes(node: NodeView | undefined): number | null {
   if (!node) return null;

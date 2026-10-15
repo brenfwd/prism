@@ -3,7 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { api, humanError, type Pool, type Vm, type Volume } from "../api";
 import { bytes } from "../lib/format";
-import { usePools, useVms, useVolumes, volumeUsers } from "../lib/hooks";
+import { looksLikeVmDisk, usePools, useVms, useVolumes, volumeUsers } from "../lib/hooks";
 import { pickFiles } from "../lib/overlays";
 import { startUpload, uploads } from "../lib/tasks";
 import { useStore } from "../lib/store";
@@ -14,13 +14,14 @@ import { Icon, type IconName } from "../components/icons";
 import { UploadRow } from "../components/TaskTray";
 import { Badge, Button, Card, EmptyState, ErrorText, Field, IconButton, Input, Menu, Meter, Modal, Segmented, cx } from "../components/ui";
 
-type Kind = "image" | "iso" | "vmdisk" | "layer" | "file";
+type Kind = "image" | "iso" | "vmdisk" | "loose" | "layer" | "file";
 type Filter = "all" | "image" | "iso" | "vmdisk";
 
 const kindMeta: Record<Kind, { label: string; icon: IconName; tone: "indigo" | "sky" | "neutral" | "amber" }> = {
   image: { label: "Disk image", icon: "cloud", tone: "indigo" },
   iso: { label: "ISO", icon: "disc", tone: "sky" },
   vmdisk: { label: "VM disk", icon: "disk", tone: "neutral" },
+  loose: { label: "Unattached disk", icon: "disk", tone: "amber" },
   layer: { label: "Snapshot layer", icon: "layers", tone: "neutral" },
   file: { label: "File", icon: "file", tone: "neutral" },
 };
@@ -29,7 +30,7 @@ function classify(v: Volume, pool: string, users: Map<string, Vm[]>): Kind {
   if (v.kind === "iso") return "iso";
   if (v.kind === "file") return "file";
   const used = users.get(`${pool}/${v.name}`);
-  if (!used) return "image";
+  if (!used) return looksLikeVmDisk(v.name) ? "loose" : "image";
   const asLayer = used.every((vm) => vm.disks.every((d) => d.pool !== pool || d.volume !== v.name));
   return asLayer ? "layer" : "vmdisk";
 }
@@ -123,8 +124,8 @@ function PoolView({ pool, single, onUpload }: { pool: Pool; single: boolean; onU
         .sort((a, b) => order(a.kind) - order(b.kind) || a.v.name.localeCompare(b.v.name)),
     [volumes.data, vms, users, pool.name],
   );
-  const shown = rows.filter((r) => filter === "all" || r.kind === filter || (filter === "vmdisk" && r.kind === "layer"));
-  const counts = { image: rows.filter((r) => r.kind === "image").length, iso: rows.filter((r) => r.kind === "iso").length, vmdisk: rows.filter((r) => r.kind === "vmdisk" || r.kind === "layer").length };
+  const shown = rows.filter((r) => filter === "all" || r.kind === filter || (filter === "vmdisk" && (r.kind === "layer" || r.kind === "loose")));
+  const counts = { image: rows.filter((r) => r.kind === "image").length, iso: rows.filter((r) => r.kind === "iso").length, vmdisk: rows.filter((r) => r.kind === "vmdisk" || r.kind === "layer" || r.kind === "loose").length };
 
   const del = async (v: Volume) => {
     if (!(await confirm({ title: `Delete ${v.name}?`, body: `${bytes(v.allocated_bytes)} is freed in ${pool.name}. This can't be undone.`, confirmLabel: "Delete", danger: true }))) return;
@@ -252,7 +253,7 @@ function PoolView({ pool, single, onUpload }: { pool: Pool; single: boolean; onU
   );
 }
 
-const order = (k: Kind) => ({ image: 0, iso: 1, vmdisk: 2, layer: 3, file: 4 })[k];
+const order = (k: Kind) => ({ image: 0, iso: 1, vmdisk: 2, loose: 3, layer: 4, file: 5 })[k];
 
 function NewDisk({ pool, onClose }: { pool: Pool; onClose: () => void }) {
   const qc = useQueryClient();

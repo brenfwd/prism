@@ -94,8 +94,10 @@ export function useEventStream(qc: QueryClient) {
     es.addEventListener("pool", (e) => {
       const ev: Envelope<Pool | null> = JSON.parse((e as MessageEvent).data);
       const name = decodeURIComponent(ev.resource.split("/").pop() ?? "");
-      if (ev.op === "delete" || !ev.payload) {
+      if (ev.op === "delete") {
         qc.setQueryData<Pool[]>(["pools"], (ps) => ps?.filter((p) => p.name !== name));
+      } else if (!ev.payload) {
+        qc.invalidateQueries({ queryKey: ["pools"] });
       } else {
         const pool = ev.payload;
         qc.setQueryData<Pool[]>(["pools"], (ps) =>

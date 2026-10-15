@@ -5,7 +5,7 @@ import { api, type BalloonMode, type CpuModel, type CreateVm, type Firmware, typ
 import { putVm } from "../events";
 import { defaultUser, invalidKey, sshKeyLines, userData } from "../lib/cloudinit";
 import { GiB, bytes, memLabel } from "../lib/format";
-import { hostAvailableBytes, runAction, useAllVolumes, useNode, usePools, useVms, volumeUsers } from "../lib/hooks";
+import { hostAvailableBytes, looksLikeVmDisk, runAction, useAllVolumes, useNode, usePools, useVms, volumeUsers } from "../lib/hooks";
 import { local, useStore } from "../lib/store";
 import { startUpload, uploads } from "../lib/tasks";
 import { toast } from "../lib/toast";
@@ -63,7 +63,7 @@ export function NewVmPage({ search }: { search: NewVmSearch }) {
 
   // Candidates for each source: free-standing disk images, or ISOs.
   const images = useMemo(
-    () => volumes.filter((v) => v.kind === "disk" && !users.has(`${v.pool}/${v.name}`)).sort((a, b) => Number(b.name.endsWith(".img")) - Number(a.name.endsWith(".img"))),
+    () => volumes.filter((v) => v.kind === "disk" && !users.has(`${v.pool}/${v.name}`) && !looksLikeVmDisk(v.name)).sort((a, b) => Number(b.name.endsWith(".img")) - Number(a.name.endsWith(".img"))),
     [volumes, users],
   );
   const isos = useMemo(() => volumes.filter((v) => v.kind === "iso"), [volumes]);
@@ -315,6 +315,11 @@ export function NewVmPage({ search }: { search: NewVmSearch }) {
                     <Input id="c-disk" type="number" min={minDiskGib} value={custom.disk} onChange={(e) => setCustom({ ...custom, disk: Math.max(1, +e.target.value) })} />
                   </Field>
                 </div>
+              )}
+              {node?.memory_pressure?.level === "red" && (
+                <Callout tone="warning" className="mt-4" title="The host is short on memory right now">
+                  Prism won't start new machines until the pressure eases. You can still create this one and start it later.
+                </Callout>
               )}
               {memOver && (
                 <Callout tone="warning" className="mt-4" title={`${memLabel(memMib)} is more than the ${bytes(avail!)} this host has free`}>

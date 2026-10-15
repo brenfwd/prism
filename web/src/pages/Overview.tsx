@@ -1,6 +1,6 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { hostAvailableBytes, useAllVolumes, useNode, usePools, useTasks, useVms, volumeUsers } from "../lib/hooks";
+import { hostAvailableBytes, looksLikeVmDisk, useAllVolumes, useNode, usePools, useTasks, useVms, volumeUsers } from "../lib/hooks";
 import { startUpload, uploads } from "../lib/tasks";
 import { useStore } from "../lib/store";
 import { bytes } from "../lib/format";
@@ -92,7 +92,7 @@ export function FirstRun() {
   const users = volumeUsers(vms);
   const ups = useStore(uploads);
   const pool = pools[0]?.name;
-  const images = volumes.filter((v) => v.kind === "disk" && !users.has(`${v.pool}/${v.name}`));
+  const images = volumes.filter((v) => v.kind === "disk" && !users.has(`${v.pool}/${v.name}`) && !looksLikeVmDisk(v.name));
   const isos = volumes.filter((v) => v.kind === "iso");
   const hasMedia = images.length + isos.length > 0;
   const upload = (files: File[]) => pool && files.forEach((f) => void startUpload(qc, pool, f));

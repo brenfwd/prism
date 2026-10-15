@@ -2,6 +2,7 @@
 //! operations that act on this node's VMs.
 
 mod apparmor;
+mod archive_io;
 mod backups;
 mod balloon;
 mod devices;

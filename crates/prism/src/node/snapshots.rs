@@ -145,21 +145,12 @@ impl Node {
         let c = self.client()?;
         let spec = self.local_spec(id)?;
         let dom = domain_ref(&spec);
-        let current_xml = c.get_xml_desc(&dom, flags::DOMAIN_XML_INACTIVE).await?;
         let mut out = Vec::new();
         for snap in c.snapshots(&dom).await? {
             let xml = c.snapshot_xml(&snap, 0).await?;
-            out.push(parse_snapshot(&xml));
-        }
-        // The current snapshot is the one whose overlays are active now.
-        let active: Vec<String> = render::disk_sources(&current_xml)
-            .into_iter()
-            .filter_map(|(_, p)| p.map(|p| p.to_string_lossy().into_owned()))
-            .collect();
-        for s in &mut out {
-            s.current = active
-                .iter()
-                .any(|p| p.contains(&format!(".{}.qcow2", s.name)));
+            let mut view = parse_snapshot(&xml);
+            view.current = c.snapshot_is_current(&snap).await.unwrap_or(false);
+            out.push(view);
         }
         out.sort_by_key(|s| s.created);
         Ok(out)

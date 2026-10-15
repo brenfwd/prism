@@ -35,6 +35,11 @@ impl Node {
             } else if has_memory(&xml) {
                 anyhow::bail!("{}: snapshot memory image has no file", spec.name);
             }
+            let mut xml = xml;
+            if c.snapshot_is_current(&snap).await.unwrap_or(false) {
+                // libvirt keeps "current" outside the XML; carry it along.
+                xml.push_str(CURRENT_MARK);
+            }
             all.push((created(&xml), xml));
         }
         all.sort_by_key(|(t, _)| *t);
@@ -100,19 +105,21 @@ impl Node {
         }
         let c = self.client()?;
         let dom = domain_ref(spec);
-        let tops: Vec<&str> = spec
-            .disks
-            .iter()
-            .filter_map(|d| d.volume.as_deref())
-            .collect();
+        let mut current = None;
         for xml in xmls {
-            let xml = rewrite_files(xml, pool_dir);
-            let mut fl = op::SNAPSHOT_REDEFINE_CURRENT_FLAGS;
-            fl &= !op::SNAPSHOT_CREATE_CURRENT;
-            if is_current(&xml, &tops) {
-                fl |= op::SNAPSHOT_CREATE_CURRENT;
-            }
+            let marked = xml.ends_with(CURRENT_MARK);
+            let xml = rewrite_files(xml.trim_end_matches(CURRENT_MARK), pool_dir);
+            let fl = op::SNAPSHOT_CREATE_REDEFINE;
             c.snapshot_create(&dom, &xml, fl).await?;
+            if marked {
+                current = Some(xml);
+            }
+        }
+        // Redefining the current one last makes it current again; a wrong
+        // current snapshot would make a later revert delete live layers.
+        if let Some(xml) = current {
+            c.snapshot_create(&dom, &xml, op::SNAPSHOT_REDEFINE_CURRENT_FLAGS)
+                .await?;
         }
         Ok(())
     }
@@ -180,6 +187,9 @@ fn referenced_files(xml: &str) -> Vec<std::path::PathBuf> {
     out
 }
 
+/// Trailing marker on the XML of the snapshot that was current.
+const CURRENT_MARK: &str = "\n<!-- prism:current -->";
+
 fn has_memory(xml: &str) -> bool {
     xml.contains("<memory snapshot='external'")
         || xml.contains("<memory snapshot=\"external\"")
@@ -192,19 +202,6 @@ fn created(xml: &str) -> i64 {
         .and_then(|s| s.split('<').next())
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(0)
-}
-
-fn name(xml: &str) -> &str {
-    xml.split("<name>")
-        .nth(1)
-        .and_then(|s| s.split('<').next())
-        .unwrap_or("")
-}
-
-/// The current snapshot is the one whose overlays are the active layers.
-fn is_current(xml: &str, tops: &[&str]) -> bool {
-    let n = name(xml);
-    !n.is_empty() && tops.iter().any(|t| t.contains(&format!(".{n}.")))
 }
 
 /// Points every `file='…'` attribute at `dir`, keeping the file name.

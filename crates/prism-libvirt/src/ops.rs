@@ -353,6 +353,18 @@ impl Client {
         Decoder::new(&r).string()
     }
 
+    /// Whether `snap` is the domain's current snapshot (the one libvirt
+    /// treats as the parent of the next snapshot and as the revert baseline).
+    pub async fn snapshot_is_current(&self, snap: &DomainChild) -> Result<bool, Error> {
+        let r = self
+            .call_with(procs::DOMAIN_SNAPSHOT_IS_CURRENT, |e| {
+                snap.encode(e);
+                e.u32(0);
+            })
+            .await?;
+        Ok(Decoder::new(&r).i32()? == 1)
+    }
+
     pub async fn snapshot_delete(&self, snap: &DomainChild, flags: u32) -> Result<(), Error> {
         self.call_with(procs::DOMAIN_SNAPSHOT_DELETE, |e| {
             snap.encode(e);

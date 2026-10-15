@@ -997,6 +997,7 @@ The VM is shut off. Prism copies the whole disk chain using `SEEK_DATA` / `SEEK_
 - **Delete:** native `SNAPSHOT_DELETE` on libvirt ≥ 9.0. On older libvirt: `BLOCK_COMMIT(ACTIVE)`, wait for `BLOCK_JOB_2` READY, `BLOCK_JOB_ABORT(PIVOT)`, then delete the metadata only.
 - **Revert** of a running VM asks for typed confirmation in the UI.
 - Snapshots form a tree, and the chain is shown as one in the UI.
+- **Known issue, memory-snapshot revert after a move.** Two libvirtd segfaults were seen on a testbed node when reverting a memory snapshot after a cold move. Re-testing with a real Ubuntu cloud-image guest (memory snapshots taken before and after moves, round trips between both nodes, revert of each) did not reproduce it. If it recurs, capture `coredumpctl` output; the mitigation to apply is to refuse reverting a memory snapshot on a moved VM unless the caller confirms discarding its memory state. No guard is in place today. Separately, live migration of a VM that has snapshots fails when the cloud-init seed image is missing from the destination pool.
 
 ### Backups
 

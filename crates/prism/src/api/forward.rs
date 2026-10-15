@@ -31,6 +31,18 @@ fn owner(node: &Node, path: &str, query: Option<&str>) -> Option<Uuid> {
     (owner != node.id).then_some(owner)
 }
 
+/// Marks every response while the cluster is degraded (config read-only).
+pub async fn degraded(State(node): State<AppState>, req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    if node.cluster.get().is_some_and(|c| c.is_degraded()) {
+        res.headers_mut().insert(
+            "x-prism-degraded",
+            axum::http::HeaderValue::from_static("true"),
+        );
+    }
+    res
+}
+
 pub async fn route(State(node): State<AppState>, req: Request, next: Next) -> Response {
     // Already forwarded once, standalone, or a WebSocket (consoles tunnel
     // themselves): handle here.

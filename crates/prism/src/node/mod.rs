@@ -730,6 +730,34 @@ impl Node {
             }
             self.refresh(&spec).await;
         }
+        // A VM never runs on two nodes: stop and undefine (keeping disks)
+        // any Prism VM here that committed state gives to another node.
+        // Ownership is frozen while the cluster is degraded.
+        if self.cluster.get().is_some_and(|c| c.is_degraded()) {
+            return;
+        }
+        for spec in specs.iter().filter(|s| s.node != self.id && !s.node.is_nil()) {
+            let Some(dom) = defined.get(spec.id.as_bytes()) else { continue };
+            if self.migrating(spec.id) {
+                continue;
+            }
+            tracing::warn!(vm = %spec.name, owner = %spec.node, "quarantining a VM owned by another node");
+            if let Err(e) = c.destroy(dom, 0).await
+                && !not_running(&e)
+            {
+                tracing::error!(vm = %spec.name, "stopping quarantined VM: {e}");
+                continue;
+            }
+            if let Err(e) = c.undefine(dom, undefine_flags()).await {
+                tracing::error!(vm = %spec.name, "undefining quarantined VM: {e}");
+            }
+            lock(&self.runtime).remove(&spec.id);
+        }
+    }
+
+    /// Whether a live migration currently allows `id` on this node.
+    pub(crate) fn migrating(&self, _id: Uuid) -> bool {
+        false
     }
 
     async fn autostart(&self) {
@@ -820,6 +848,7 @@ impl Node {
     async fn stats_loop(self: Arc<Self>) {
         let mut tick = tokio::time::interval(STATS_INTERVAL);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut ticks: u64 = 0;
         loop {
             tick.tick().await;
             let Ok(c) = self.client() else { continue };
@@ -841,6 +870,11 @@ impl Node {
                 .collect();
             for id in active {
                 self.refresh_id(id).await;
+            }
+            // Periodic full reconcile in a cluster (every 30 s).
+            ticks += 1;
+            if ticks % 6 == 0 && self.state.clustered() {
+                self.reconcile(&c).await;
             }
         }
     }

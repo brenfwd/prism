@@ -35,7 +35,8 @@ pub fn router(node: AppState) -> Router {
         .merge(cluster::routes())
         .route("/events", get(sse::events))
         .fallback(|| async { ApiError::not_found("no such endpoint") })
-        .layer(axum::middleware::from_fn_with_state(Arc::clone(&node), forward::route));
+        .layer(axum::middleware::from_fn_with_state(Arc::clone(&node), forward::route))
+        .layer(axum::middleware::from_fn_with_state(Arc::clone(&node), forward::degraded));
 
     let hygiene = hygiene::Hygiene::new(&node.cfg.http, &node.name);
     Router::new()

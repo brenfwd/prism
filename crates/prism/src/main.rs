@@ -1,6 +1,7 @@
 //! Prism: a libvirt/KVM manager in one static binary.
 
 mod api;
+mod cli;
 mod cluster;
 mod config;
 mod db;
@@ -60,6 +61,19 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Manage the cluster this node belongs to.
+    Cluster {
+        #[arg(long)]
+        config: PathBuf,
+        #[command(subcommand)]
+        cmd: cli::ClusterCmd,
+    },
+    /// Join a cluster with an invite from `prism cluster invite`.
+    Join {
+        #[arg(long)]
+        config: PathBuf,
+        invite: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -89,6 +103,8 @@ fn main() -> anyhow::Result<()> {
             tokio::runtime::Runtime::new()?.block_on(serve(&config, adopt))
         }
         Command::Doctor { config } => tokio::runtime::Runtime::new()?.block_on(doctor(&config)),
+        Command::Cluster { config, cmd } => tokio::runtime::Runtime::new()?.block_on(cli::cluster(&config, cmd)),
+        Command::Join { config, invite } => tokio::runtime::Runtime::new()?.block_on(cli::join(&config, &invite)),
     }
 }
 

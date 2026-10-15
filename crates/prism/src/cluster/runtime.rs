@@ -657,6 +657,11 @@ impl Cluster {
         })?)
     }
 
+    /// No hub/leader is known: configuration and ownership are frozen.
+    pub fn is_degraded(&self) -> bool {
+        self.raft().is_some_and(|r| r.metrics().current_leader.is_none())
+    }
+
     pub(crate) fn leader_raft_id(&self) -> u64 {
         self.raft().and_then(|r| r.metrics().current_leader).unwrap_or(0)
     }

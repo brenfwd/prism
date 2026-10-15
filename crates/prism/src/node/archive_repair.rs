@@ -69,16 +69,16 @@ impl Node {
         Ok(res)
     }
 
-    /// A byte stream of the file from one of its replicas other than
-    /// `skip`, preferring one on this node.
+    /// A byte stream of the file, preferring replicas other than `skip` and
+    /// then one on this node. `skip` is only a last resort: a draining member
+    /// is often the sole holder, and the copy is verified by hash anyway.
     async fn archive_replica_stream(
         &self,
         file: &ArchiveFileDoc,
         skip: Option<&Replica>,
     ) -> anyhow::Result<ByteStream> {
-        let mut candidates: Vec<&Replica> =
-            file.replicas.iter().filter(|r| Some(*r) != skip).collect();
-        candidates.sort_by_key(|r| r.node != self.id);
+        let mut candidates: Vec<&Replica> = file.replicas.iter().collect();
+        candidates.sort_by_key(|r| (Some(*r) == skip, r.node != self.id));
         let mut last = anyhow::anyhow!("no replicas");
         for r in candidates {
             if r.node == self.id {

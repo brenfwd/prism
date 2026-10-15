@@ -167,8 +167,8 @@ pub struct DnatRule {
     pub guest_port: u16,
 }
 
-/// The `ip prism-nat` table: port-forward DNAT in `prerouting`, then one masquerade rule per
-/// entry in `postrouting`.
+/// The `ip prism-nat` table: port-forward DNAT in `prerouting`, then in `postrouting` a
+/// masquerade for each forward and one per entry in `rules`.
 pub fn nat_ruleset(rules: &[NatRule], forwards: &[DnatRule]) -> Table {
     let mut t = Table::new(Family::Ip, NAT_TABLE);
     let pre = t.chain(Chain::base(
@@ -195,6 +195,20 @@ pub fn nat_ruleset(rules: &[NatRule], forwards: &[DnatRule]) -> Table {
         Hook::Postrouting,
         priority::SRCNAT,
     ));
+    // A forwarded connection leaves with this node's address as its source. A
+    // guest that migrated here still has the old node as its gateway, so
+    // without this the replies would return through the wrong node.
+    for f in forwards {
+        let r = Rule::new(Family::Ip).ip_daddr_eq(f.guest);
+        c.push(
+            if f.udp {
+                r.udp_dport(f.guest_port)
+            } else {
+                r.tcp_dport(f.guest_port)
+            }
+            .masquerade(),
+        );
+    }
     for r in rules {
         c.push(
             Rule::new(Family::Ip)

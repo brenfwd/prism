@@ -24,8 +24,9 @@ use prism_net::link::{
     BridgeConfig, FdbChanges, PortVlan, PortVlans, VXLAN_PORT, VxlanConfig, VxlanFdb,
 };
 use prism_net::nft::{
-    BoundaryConfig, Chain, ChainType, Family, GuestPort, Hook, NatRule, Nft, SwitchServices, Table,
-    boundary_ruleset, bridge_guard_ruleset, guest_input_chain, nat_ruleset, priority,
+    BoundaryConfig, Chain, ChainType, DnatRule, Family, GuestPort, Hook, NatRule, Nft,
+    SwitchServices, Table, boundary_ruleset, bridge_guard_ruleset, guest_input_chain, nat_ruleset,
+    priority,
 };
 use prism_net::wireguard::{InterfaceConfig, KeyPair, PeerChanges, PeerConfig};
 use prism_net::{MacAddr, Netlink};
@@ -485,10 +486,12 @@ const NAT_TEXT: &str = r#"
 table ip prism-nat {
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
+        ip daddr 192.0.2.7 tcp dport 18000 dnat to 10.20.0.5:8000
     }
 
     chain postrouting {
         type nat hook postrouting priority srcnat; policy accept;
+        ip daddr 10.20.0.5 tcp dport 8000 masquerade
         oifname "eth0" ip saddr 10.20.0.0/24 masquerade
         oifname "eth1" ip saddr 10.21.0.0/23 masquerade
     }
@@ -536,7 +539,14 @@ async fn nft_tables_match_cli() {
     }]));
     assert_same_as_cli(&mine, &Ns::new("pnt-nft-r1"), &inet, BOUNDARY_TEXT);
 
-    let nat = nat_ruleset(&nat_rules(), &[]);
+    let forwards = [DnatRule {
+        udp: false,
+        host_addr: Some(Ipv4Addr::new(192, 0, 2, 7)),
+        host_port: 18000,
+        guest: Ipv4Addr::new(10, 20, 0, 5),
+        guest_port: 8000,
+    }];
+    let nat = nat_ruleset(&nat_rules(), &forwards);
     assert_same_as_cli(&mine, &Ns::new("pnt-nft-r2"), &nat, NAT_TEXT);
 
     let bridge = bridge_guard_ruleset(&[GuestPort {

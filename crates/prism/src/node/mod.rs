@@ -1,10 +1,12 @@
 //! The local node: libvirt connection supervision, VM runtime state and the
 //! operations that act on this node's VMs.
 
+mod apparmor;
 mod backups;
 mod balloon;
 mod devices;
 mod migrate;
+mod migrate_setup;
 mod moves;
 mod snapshots;
 mod vms;
@@ -703,6 +705,7 @@ impl Node {
             cpus: n.cpus,
             memory_kib: n.memory_kib,
         };
+        apparmor::allow_migration_sockets();
         self.libvirt.send_replace(Some(c.clone()));
 
         let node = Arc::clone(self);

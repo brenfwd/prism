@@ -86,7 +86,7 @@ pub struct FinishResp {
     pub error: Option<String>,
 }
 
-fn to_params(pairs: &[(String, String)]) -> Vec<TypedParam> {
+pub(super) fn to_params(pairs: &[(String, String)]) -> Vec<TypedParam> {
     pairs
         .iter()
         .map(|(k, v)| TypedParam::string(k.clone(), v.clone()))
@@ -234,66 +234,49 @@ impl Node {
             .filter(|d| d.device == DiskDevice::Disk)
             .map(|d| d.target.clone())
             .collect();
-        let mut begin_params: Vec<TypedParam> = disks
+        let begin_params: Vec<TypedParam> = disks
             .iter()
             .map(|t| TypedParam::string(mp::MIGRATE_DISKS, t.clone()))
             .collect();
         let (cookie, xml) = c.migrate_begin3(&dom, &begin_params, flags).await?;
 
-        // 4. Prepare on the destination (creates images, QEMU listens).
-        let src_pools: HashMap<String, String> = self
-            .storage
-            .list()
-            .iter()
-            .map(|p| (p.name.clone(), p.path.to_string_lossy().into_owned()))
-            .collect();
-        let prep: PrepareResp = self
-            .call_peer(
+        // 4–5. Begin opened a migration job on the source; if setup fails
+        // before Perform, Confirm with `cancelled` closes it, or every later
+        // attempt fails with "another migration job is already running".
+        let setup = self
+            .prepare_migration(
                 cluster,
                 dst,
-                &format!("/api/v1/internal/migrations/{migration}/prepare"),
-                &PrepareReq {
+                migration,
+                &disks,
+                PrepareReq {
                     vm: Box::new(on_destination(spec, dst.node_id, &req.pool)),
                     pool: req.pool.clone(),
                     images: images.clone(),
-                    src_pools,
+                    src_pools: HashMap::new(),
                     begin_xml: xml,
                     cookie: B64.encode(&cookie),
                     flags,
                 },
             )
-            .await?;
+            .await;
+        let (prep, params, splicers) = match setup {
+            Ok(s) => s,
+            Err(e) => {
+                if let Err(ce) = c
+                    .migrate_confirm3(&dom, &begin_params, &[], flags, true)
+                    .await
+                {
+                    tracing::warn!(vm = %spec.name, "cancelling the source job failed: {ce}");
+                }
+                return Err(e);
+            }
+        };
         let image_names: Vec<String> = images
             .iter()
             .map(|i| i.name.clone())
             .chain(copied)
             .collect();
-        let mut params = to_params(&prep.params);
-        params.extend(
-            disks
-                .iter()
-                .map(|t| TypedParam::string(mp::MIGRATE_DISKS, t.clone())),
-        );
-        begin_params.clear();
-
-        // 5. Source-side sockets QEMU connects to, spliced to the destination.
-        let dir = migration_dir(migration);
-        crate::storage::create_traversable(&dir)?;
-        let mut splicers = Vec::new();
-        for which in ["mem", "nbd"] {
-            let path = dir.join(format!("{which}.sock"));
-            let _ = std::fs::remove_file(&path);
-            let listener = UnixListener::bind(&path)?;
-            // QEMU runs as its own user.
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o777))?;
-            splicers.push(tokio::spawn(splice_loop(
-                listener,
-                cluster.channels.clone(),
-                dst.clone(),
-                migration,
-                which,
-            )));
-        }
 
         // 6. Perform, with progress from job stats.
         let _ = c.migrate_set_max_downtime(&dom, MAX_DOWNTIME_MS).await;
@@ -398,7 +381,7 @@ impl Node {
         Ok(serde_json::json!({ "node": dst.node_id }))
     }
 
-    async fn call_peer<T: Serialize, R: serde::de::DeserializeOwned>(
+    pub(super) async fn call_peer<T: Serialize, R: serde::de::DeserializeOwned>(
         &self,
         cluster: &crate::cluster::Cluster,
         member: &MemberDoc,
@@ -537,7 +520,7 @@ fn ctx_id(ctx: &crate::tasks::TaskCtx) -> Uuid {
 
 /// Accepts QEMU's connections on a source socket and splices each one to
 /// the destination over a data-plane session.
-async fn splice_loop(
+pub(super) async fn splice_loop(
     listener: UnixListener,
     channels: prism_cluster::Channels,
     dst: MemberDoc,

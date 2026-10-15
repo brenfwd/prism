@@ -218,6 +218,10 @@ impl TaskCtx {
             .clone()
     }
 
+    pub fn task_id(&self) -> Uuid {
+        self.snapshot().id
+    }
+
     /// Reports progress (0.0–1.0) and a status message; rate-limited.
     pub fn progress(&self, fraction: Option<f64>, message: impl Into<String>) {
         let mut guard = self

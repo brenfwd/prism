@@ -209,6 +209,13 @@ pub fn receive_file(input: &mut impl Read, file: &std::fs::File, progress: &dyn 
 pub enum Purpose {
     /// Receive a volume into a local pool (cold move, copy).
     ReceiveVolume { pool: String, volume: String },
+    /// Splice to a local migration socket that QEMU listens on.
+    MigrationSocket { migration: uuid::Uuid, which: String },
+}
+
+/// Directory of a migration's UNIX sockets on either node.
+pub fn migration_dir(migration: uuid::Uuid) -> std::path::PathBuf {
+    std::path::Path::new("/run/prism/mig").join(migration.simple().to_string())
 }
 
 /// `DataPlane.Open`: registers a session for the calling member.
@@ -267,6 +274,31 @@ impl prism_proto::v1::data_plane_server::DataPlane for DataPlaneService {
                     if let Err(e) = res {
                         tracing::warn!("receiving volume: {e:#}");
                         pool.abort_partial(&partial);
+                    }
+                });
+                Ok(tonic::Response::new(prism_proto::v1::SessionReply {
+                    session_id: id.to_vec(),
+                    detail: Vec::new(),
+                }))
+            }
+            Purpose::MigrationSocket { migration, which } => {
+                if !matches!(which.as_str(), "mem" | "nbd") {
+                    return Err(tonic::Status::invalid_argument("unknown migration socket"));
+                }
+                let path = migration_dir(migration).join(format!("{which}.sock"));
+                let (id, rx) = self.plane.expect(peer);
+                tokio::spawn(async move {
+                    let res: anyhow::Result<()> = async {
+                        let mut tcp = tokio::time::timeout(SESSION_TTL, rx)
+                            .await
+                            .map_err(|_| anyhow::anyhow!("source never connected"))??;
+                        let mut unix = tokio::net::UnixStream::connect(&path).await?;
+                        tokio::io::copy_bidirectional(&mut tcp, &mut unix).await?;
+                        Ok(())
+                    }
+                    .await;
+                    if let Err(e) = res {
+                        tracing::debug!("migration splice {}: {e:#}", path.display());
                     }
                 });
                 Ok(tonic::Response::new(prism_proto::v1::SessionReply {

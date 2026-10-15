@@ -3,6 +3,7 @@
 mod cluster;
 mod console;
 mod forward;
+mod internal;
 mod hygiene;
 mod pools;
 mod sse;
@@ -33,6 +34,7 @@ pub fn router(node: AppState) -> Router {
         .merge(console::routes())
         .merge(tasks::routes())
         .merge(cluster::routes())
+        .merge(internal::routes())
         .route("/events", get(sse::events))
         .fallback(|| async { ApiError::not_found("no such endpoint") })
         .layer(axum::middleware::from_fn_with_state(Arc::clone(&node), forward::route))

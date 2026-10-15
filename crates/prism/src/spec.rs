@@ -30,6 +30,16 @@ pub struct VmSpec {
     pub autostart: bool,
     #[serde(default)]
     pub cloud_init: Option<CloudInit>,
+    /// A live migration in progress: the VM may run on either node until
+    /// it completes, and neither node quarantines it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migrating: Option<Migration>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Migration {
+    pub src: Uuid,
+    pub dst: Uuid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -362,6 +372,7 @@ pub mod tests {
             owner_epoch: 0,
             autostart: false,
             cloud_init: None,
+            migrating: None,
         }
     }
 

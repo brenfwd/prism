@@ -5,6 +5,7 @@
 
 mod client;
 mod events;
+pub mod migrate;
 pub mod ops;
 pub mod proto;
 pub mod typed;

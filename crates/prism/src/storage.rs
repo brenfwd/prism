@@ -322,6 +322,33 @@ impl Pool {
         res
     }
 
+    /// Creates an empty image of `size` bytes, optionally as a qcow2 overlay
+    /// on `backing` (a volume in this pool).
+    pub async fn create_image(
+        &self,
+        qemu_img: &Path,
+        name: &str,
+        format: &str,
+        size: u64,
+        backing: Option<&str>,
+    ) -> Result<Volume, StorageError> {
+        Self::check(name)?;
+        drop(self.create_exclusive(name)?);
+        let mut args: Vec<String> = vec!["create".into(), "-q".into(), "-f".into(), format.into()];
+        if let Some(b) = backing {
+            Self::check(b)?;
+            let bfmt = self.image_format(b).ok_or_else(|| StorageError::NoVolume(b.into()))?;
+            args.extend(["-b".into(), self.path.join(b).to_string_lossy().into_owned(), "-F".into(), bfmt]);
+        }
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        let res = run_qemu_img(qemu_img, &argv, &[self.path.join(name), PathBuf::from(size.to_string())]).await;
+        if let Err(e) = res {
+            let _ = rustix::fs::unlinkat(&self.root, name, AtFlags::empty());
+            return Err(e);
+        }
+        self.volume(name)
+    }
+
     /// Grows a volume to `size` bytes. Shrinking is refused.
     pub async fn resize_volume(
         &self,

@@ -3,6 +3,7 @@
 
 mod balloon;
 mod devices;
+mod migrate;
 mod moves;
 mod snapshots;
 mod vms;
@@ -27,6 +28,7 @@ use crate::tasks::Tasks;
 
 pub use balloon::BalloonStatus;
 pub use devices::{AddDisk, AddNic, UpdateDisk};
+pub use migrate::{FinishReq, MigrateVm, PrepareReq};
 pub use moves::MoveVm;
 pub use snapshots::{CreateSnapshot, SnapshotView};
 
@@ -758,8 +760,13 @@ impl Node {
     }
 
     /// Whether a live migration currently allows `id` on this node.
-    pub(crate) fn migrating(&self, _id: Uuid) -> bool {
-        false
+    pub(crate) fn migrating(&self, id: Uuid) -> bool {
+        self.state
+            .vm(id)
+            .ok()
+            .flatten()
+            .and_then(|v| v.migrating)
+            .is_some_and(|m| m.src == self.id || m.dst == self.id)
     }
 
     async fn autostart(&self) {

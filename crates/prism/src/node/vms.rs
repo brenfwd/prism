@@ -100,6 +100,7 @@ impl Node {
             owner_epoch: 1,
             autostart: req.autostart,
             cloud_init: req.cloud_init,
+            migrating: None,
         };
         spec.assign_targets();
 

@@ -486,6 +486,7 @@ mod tests {
             owner_epoch: 4,
             autostart: false,
             cloud_init: None,
+            migrating: None,
         }
     }
 

@@ -1,0 +1,19 @@
+[package]
+name = "prism-libvirt"
+description = "Native async client for the libvirt remote RPC protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes = "1.12.1"
+thiserror = "2.0.21"
+tokio = { version = "1.53.3", features = ["net", "io-util", "sync", "rt", "time", "macros"] }
+tracing = "0.1.44"
+
+[dev-dependencies]
+tokio = { version = "1.53.3", features = ["full"] }

@@ -38,7 +38,53 @@ impl Node {
             all.push((created(&xml), xml));
         }
         all.sort_by_key(|(t, _)| *t);
+        self.snapshot_layer_files(spec, &all, &mut memory)?;
         Ok((all.into_iter().map(|(_, x)| x).collect(), memory))
+    }
+
+    /// Adds the disk layers the snapshots refer to but the active chain no
+    /// longer contains (after reverting to an earlier snapshot), with their
+    /// backing files, so a later revert on the destination finds them.
+    fn snapshot_layer_files(
+        &self,
+        spec: &VmSpec,
+        snapshots: &[(i64, String)],
+        extra: &mut Vec<(String, String)>,
+    ) -> anyhow::Result<()> {
+        let Some(disk) = spec.disks.iter().find(|d| d.device == DiskDevice::Disk) else {
+            return Ok(());
+        };
+        let pool = self.storage.get(&disk.pool)?;
+        let active: Vec<&String> = spec
+            .disks
+            .iter()
+            .filter(|d| d.device == DiskDevice::Disk)
+            .flat_map(|d| d.volume.iter().chain(d.backing.iter()))
+            .collect();
+        for (_, xml) in snapshots {
+            for file in referenced_files(xml) {
+                let Some(name) = file
+                    .strip_prefix(&pool.path)
+                    .ok()
+                    .and_then(|r| r.to_str())
+                    .filter(|n| !n.starts_with('.'))
+                else {
+                    continue;
+                };
+                if pool.volume(name).is_err() {
+                    continue;
+                }
+                let chain = pool.backing_chain(name).unwrap_or_default();
+                // Backing files first, like the active chain.
+                for n in chain.iter().rev().map(String::as_str).chain([name]) {
+                    let item = (disk.pool.clone(), n.to_string());
+                    if !active.contains(&&item.1) && !extra.contains(&item) {
+                        extra.push(item);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Redefines `xmls` on this node's (already defined) domain for `spec`,
@@ -116,6 +162,24 @@ impl Node {
     }
 }
 
+/// Every `file='…'` path in `xml`.
+fn referenced_files(xml: &str) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(i) = rest.find("file=") {
+        let tail = &rest[i + 5..];
+        let Some(q) = tail.chars().next().filter(|c| *c == '\'' || *c == '"') else {
+            rest = tail;
+            continue;
+        };
+        let body = &tail[1..];
+        let Some(end) = body.find(q) else { break };
+        out.push(std::path::PathBuf::from(&body[..end]));
+        rest = &body[end + 1..];
+    }
+    out
+}
+
 fn has_memory(xml: &str) -> bool {
     xml.contains("<memory snapshot='external'")
         || xml.contains("<memory snapshot=\"external\"")
@@ -176,6 +240,18 @@ fn rewrite_files(xml: &str, dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn finds_referenced_files() {
+        let x = "<a file='/p/x.s1.qcow2'/><b file=\"/p/y.mem\"/><c file=/>";
+        assert_eq!(
+            referenced_files(x),
+            vec![
+                std::path::PathBuf::from("/p/x.s1.qcow2"),
+                std::path::PathBuf::from("/p/y.mem")
+            ]
+        );
+    }
 
     #[test]
     fn rewrites_directories() {

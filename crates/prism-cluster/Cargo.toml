@@ -1,0 +1,28 @@
+[package]
+name = "prism-cluster"
+description = "Prism cluster membership and replicated log (openraft)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.104"
+futures = "0.3.34"
+openraft = { version = "0.9", features = ["serde", "storage-v2"] }
+prism-proto = { version = "0.1.0", path = "../prism-proto" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.53.3", features = ["sync", "time", "rt", "macros"] }
+tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "server", "channel", "transport"] }
+tracing = "0.1.44"
+uuid = { version = "1.26.1", features = ["serde", "v4"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.53.3", features = ["full"] }

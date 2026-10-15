@@ -1,0 +1,100 @@
+// Prism inter-node protocol. Plaintext h2c on the WireGuard mesh only.
+//
+// Changes are additive: never renumber or reuse fields. Opaque `bytes`
+// payloads carry JSON of Prism or openraft types, versioned by those types.
+syntax = "proto3";
+
+package prism.v1;
+
+message Empty {}
+
+message Payload {
+  bytes json = 1;
+}
+
+// openraft RPCs; payloads are JSON of openraft request/response types.
+service Raft {
+  rpc AppendEntries(Payload) returns (Payload);
+  rpc Vote(Payload) returns (Payload);
+  rpc InstallSnapshot(Payload) returns (Payload);
+}
+
+message WriteRequest {
+  // JSON of prism's state Command.
+  bytes command = 1;
+}
+
+message WriteReply {
+  // JSON of the apply result.
+  bytes result = 1;
+  // Log index the command was committed at; callers wait until their own
+  // state machine has applied it for read-your-writes.
+  uint64 log_index = 2;
+}
+
+message StatusReply {
+  // JSON of the node's cluster status.
+  bytes status = 1;
+}
+
+message BootstrapReply {
+  // JSON list of members with keys, endpoints and mesh addresses.
+  bytes members = 1;
+  uint64 leader_raft_id = 2;
+}
+
+service Cluster {
+  // Status of the serving node; allowed for joining members.
+  rpc Status(Empty) returns (StatusReply);
+  // Members for a joining node; allowed for joining members.
+  rpc Bootstrap(Empty) returns (BootstrapReply);
+  // Propose a command; served by the hub or raft leader.
+  rpc ForwardWrite(WriteRequest) returns (WriteReply);
+}
+
+message SubscribeRequest {
+  // `<node>.<boot_epoch>.<seq>` of the last event seen, or empty.
+  string since = 1;
+}
+
+message EventMsg {
+  string id = 1;
+  // JSON SSE envelope.
+  bytes event = 2;
+}
+
+service Events {
+  rpc Subscribe(SubscribeRequest) returns (stream EventMsg);
+}
+
+message HttpHeader {
+  string name = 1;
+  bytes value = 2;
+}
+
+// One frame of a forwarded HTTP exchange: the first frame from the caller
+// carries the request head, the first from the owner the response head;
+// later frames carry body bytes; `end` closes that direction.
+message HttpFrame {
+  string method = 1;
+  string path = 2;
+  uint32 status = 3;
+  repeated HttpHeader headers = 4;
+  bytes body = 5;
+  bool end = 6;
+}
+
+service HttpTunnel {
+  rpc Forward(stream HttpFrame) returns (stream HttpFrame);
+}
+
+message ConsoleFrame {
+  // First frame from the caller: VM ID and kind ("vnc" or "serial").
+  string vm = 1;
+  string kind = 2;
+  bytes data = 3;
+}
+
+service Console {
+  rpc Open(stream ConsoleFrame) returns (stream ConsoleFrame);
+}

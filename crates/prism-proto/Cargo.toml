@@ -1,0 +1,19 @@
+[package]
+name = "prism-proto"
+description = "Prism inter-node gRPC definitions (package prism.v1)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+prost = "0.14"
+tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "server", "channel", "transport"] }
+tonic-prost = "0.14"
+
+[build-dependencies]
+protox = "0.10"
+tonic-prost-build = "0.14"

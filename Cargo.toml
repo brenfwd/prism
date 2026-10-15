@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/prism-libvirt", "crates/prism-iso", "crates/prism", "crates/xtask", "web"]
+members = ["crates/prism-libvirt", "crates/prism-iso", "crates/prism-net","crates/prism", "crates/xtask", "web"]
 
 [workspace.package]
 version = "0.1.0"

@@ -453,7 +453,10 @@ impl Node {
         drop(seed);
         let mem = format!("unix://{}", dir.join("mem.sock").display());
         let nbd = format!("unix://{}", dir.join("nbd.sock").display());
+        // Finish looks the incoming domain up by DEST_NAME; libvirt's own
+        // client always sets it, so Prism must too.
         let pairs = vec![
+            (mp::DEST_NAME.to_string(), req.vm.name.clone()),
             (mp::DEST_XML.to_string(), xml.clone()),
             (mp::PERSIST_XML.to_string(), xml),
             (mp::URI.to_string(), mem),

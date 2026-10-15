@@ -15,13 +15,7 @@ impl Node {
         forwards: Vec<PortForward>,
     ) -> Result<VmView> {
         validate_forwards(&forwards).map_err(NodeError::Invalid)?;
-        if !forwards.is_empty() && !crate::prereqs::passt().ok {
-            return Err(NodeError::Invalid(
-                "port forwarding needs passt on the host. Install the \"passt\" package \
-                 (apt install passt) and try again."
-                    .into(),
-            ));
-        }
+        require_passt(&forwards)?;
         let _guard = self.ops.lock().await;
         let old = self.local_spec(id)?;
         // A host listener can serve one VM only.
@@ -65,4 +59,20 @@ impl Node {
         self.change_devices(&old, spec, |_, _| async { Ok(false) })
             .await
     }
+}
+
+/// Refuses forwards when the host has no passt to implement them.
+pub(super) fn require_passt(forwards: &[PortForward]) -> Result<()> {
+    if forwards.is_empty() {
+        return Ok(());
+    }
+    let p = crate::prereqs::passt();
+    if p.ok {
+        return Ok(());
+    }
+    Err(NodeError::Invalid(format!(
+        "port forwarding is unavailable: {}. {}",
+        p.detail,
+        p.hint.unwrap_or_default()
+    )))
 }

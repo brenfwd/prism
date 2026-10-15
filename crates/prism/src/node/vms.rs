@@ -77,6 +77,10 @@ impl Node {
                 Some(1),
             ));
         }
+        if let Some(crate::spec::NicNetwork::User { forwards }) = &req.network {
+            crate::spec::validate_forwards(forwards).map_err(NodeError::Invalid)?;
+            super::forwards::require_passt(forwards)?;
+        }
         let mut spec = VmSpec {
             id: Uuid::new_v4(),
             name: req.name,

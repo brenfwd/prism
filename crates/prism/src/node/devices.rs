@@ -371,6 +371,7 @@ impl Node {
         }
         if let NicNetwork::User { forwards } = &req.network {
             crate::spec::validate_forwards(forwards).map_err(NodeError::Invalid)?;
+            super::forwards::require_passt(forwards)?;
         }
         let mac = match req.mac {
             Some(m) if valid_mac(&m) => m.to_ascii_lowercase(),

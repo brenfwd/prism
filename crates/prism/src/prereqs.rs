@@ -33,19 +33,48 @@ fn is_exec(p: &Path) -> bool {
         .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
+/// Whether libvirt's `AppArmor` passt sub-profile makes passt unusable.
+///
+/// The sub-profile (`libvirt-<uuid>//passt`) lacks mmap of the binary and
+/// the passt process then cannot `accept` QEMU's connection, so a VM with a
+/// forward either dies with SIGSEGV or boots with a dead NIC. A drop-in
+/// cannot reach the sub-profile (redefining it fails to load). Set
+/// `PRISM_ALLOW_PASST_APPARMOR=1` once the distribution fixes its profile.
+fn passt_blocked_by_apparmor() -> bool {
+    if std::env::var_os("PRISM_ALLOW_PASST_APPARMOR").is_some() {
+        return false;
+    }
+    let enabled = std::fs::read_to_string("/sys/module/apparmor/parameters/enabled")
+        .is_ok_and(|s| s.trim() == "Y");
+    let abstraction =
+        std::fs::read_to_string("/etc/apparmor.d/abstractions/libvirt-qemu").unwrap_or_default();
+    enabled && abstraction.contains("profile passt {")
+}
+
 /// Whether port forwards can work on this host.
 pub fn passt() -> Prereq {
     let found = find_program("passt");
+    let blocked = found.is_some() && passt_blocked_by_apparmor();
     Prereq {
         id: "passt",
         label: "passt (port forwarding)",
-        ok: found.is_some(),
+        ok: found.is_some() && !blocked,
         required: false,
-        detail: found.map_or_else(
-            || "not installed; port forwards are unavailable".into(),
-            |p| p.display().to_string(),
-        ),
-        hint: Some("Install the \"passt\" package (apt install passt), then forward ports again."),
+        detail: match (&found, blocked) {
+            (None, _) => "not installed; port forwards are unavailable".into(),
+            (Some(p), true) => format!(
+                "{} is installed, but libvirt's AppArmor profile for passt breaks it \
+                 on this host; port forwards are unavailable",
+                p.display()
+            ),
+            (Some(p), false) => p.display().to_string(),
+        },
+        hint: Some(if blocked {
+            "libvirt's AppArmor passt sub-profile is broken on this distribution. \
+             Reach the VM through a Prism network instead, or update libvirt/apparmor."
+        } else {
+            "Install the \"passt\" package (apt install passt), then forward ports again."
+        }),
     }
 }
 

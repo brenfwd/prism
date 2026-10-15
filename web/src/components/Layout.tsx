@@ -13,11 +13,12 @@ import { TaskTray } from "./TaskTray";
 import { Toaster } from "./Toaster";
 import { Button, IconButton, Kbd, Meter, cx, modKey } from "./ui";
 
-const nav: { to: "/" | "/vms" | "/storage" | "/networks" | "/tasks"; label: string; icon: IconName; exact?: boolean }[] = [
+const nav: { to: "/" | "/vms" | "/storage" | "/networks" | "/cluster" | "/tasks"; label: string; icon: IconName; exact?: boolean }[] = [
   { to: "/", label: "Overview", icon: "home", exact: true },
   { to: "/vms", label: "Machines", icon: "server" },
   { to: "/storage", label: "Storage", icon: "database" },
   { to: "/networks", label: "Networks", icon: "network" },
+  { to: "/cluster", label: "Cluster", icon: "server" },
   { to: "/tasks", label: "Tasks", icon: "activity" },
 ];
 
@@ -128,7 +129,7 @@ function Sidebar() {
 
 function MobileTabs() {
   return (
-    <nav aria-label="Main" className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-4 border-t border-zinc-200 bg-white/90 pb-[env(safe-area-inset-bottom)] backdrop-blur-lg lg:hidden dark:border-zinc-800 dark:bg-zinc-950/90">
+    <nav aria-label="Main" className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-6 border-t border-zinc-200 bg-white/90 pb-[env(safe-area-inset-bottom)] backdrop-blur-lg lg:hidden dark:border-zinc-800 dark:bg-zinc-950/90">
       {nav.map((n) => (
         <Link
           key={n.to}
@@ -186,6 +187,8 @@ function Breadcrumbs() {
   if (m) crumbs.push({ label: vms?.find((v) => v.id === m[1])?.name ?? "…" });
   if (path === "/storage") crumbs.push({ label: "Storage" });
   if (path === "/networks") crumbs.push({ label: "Networks" });
+  if (path === "/cluster") crumbs.push({ label: "Cluster" });
+  if (path === "/archive") crumbs.push({ label: "Archive", to: "/archive" });
   if (path === "/tasks") crumbs.push({ label: "Tasks" });
   if (path === "/") crumbs.push({ label: "Overview" });
   return (

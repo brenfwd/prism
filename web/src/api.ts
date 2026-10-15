@@ -257,9 +257,49 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
+
+export interface ClusterDoc { cluster_id: string; name: string; mode: "hub_spoke" | "consensus"; mesh_prefix: string; wg_mtu: number; created: number }
+export interface ClusterMember {
+  node_id: string; raft_id: number; name: string; wg_pubkey: string; mesh_addr: string; endpoints: string[];
+  state: "joining" | "active"; voter: boolean; version: string; joined: number;
+}
+export interface ClusterStatus {
+  clustered: boolean; cluster: ClusterDoc | null; me: string; role: string; leader: string | null;
+  members: ClusterMember[]; degraded: boolean; pending_join: boolean;
+}
+export interface InviteView { invite_id: string; blob: string; expires: number; assigned_addr: string }
+export interface InviteDoc { invite_id: string; assigned_addr: string; exp: number; name_hint: string | null; consumed_by: string | null }
+export interface AcceptPreview { node_id: string; name: string; endpoints: string[]; fingerprint: string; invite_id: string; admitted: boolean }
+export interface JoinReply { reply: string; fingerprint: string; cluster_name: string; sponsor: string }
+export interface MeshPeer { pubkey: string; endpoint: string | null; handshake_age_secs: number | null; rx_bytes: number; tx_bytes: number }
+export type ArchiveMemberState = "active" | "draining" | "disabled";
+export interface ArchiveMember {
+  node: string; name: string; pool: string; weight: number; reserve: number; state: ArchiveMemberState;
+  node_name: string; capacity: { total: number; free: number } | null;
+}
+export interface ArchivePool { name: string; replicas: number; members: ArchiveMember[]; files: number; used_bytes: number }
+
 const enc = encodeURIComponent;
 
 export const api = {
+  cluster: () => request<ClusterStatus>("GET", "/cluster"),
+  createCluster: (name: string, mode: "hub_spoke" | "consensus") => request<ClusterStatus>("POST", "/cluster", { name, mode }),
+  invites: () => request<InviteDoc[]>("GET", "/cluster/invites"),
+  createInvite: (name?: string) => request<InviteView>("POST", "/cluster/invites", { name: name || undefined }),
+  revokeInvite: (id: string) => request<void>("DELETE", `/cluster/invites/${id}`),
+  joinCluster: (invite: string) => request<JoinReply>("POST", "/cluster/join", { invite }),
+  acceptReply: (reply: string, confirm: boolean) => request<AcceptPreview>("POST", "/cluster/accept", { reply, confirm }),
+  removeMember: (id: string) => request<void>("DELETE", `/cluster/members/${id}`),
+  leaveCluster: () => request<void>("POST", "/cluster/leave"),
+  setVoter: (id: string, voter: boolean) => request<void>("POST", `/cluster/members/${id}/voter`, { voter }),
+  mesh: () => request<MeshPeer[]>("GET", "/cluster/mesh"),
+  archivePools: () => request<ArchivePool[]>("GET", "/archive/pools"),
+  createArchivePool: (name: string, replicas: number) => request<void>("POST", "/archive/pools", { name, replicas }),
+  setArchiveReplicas: (pool: string, replicas: number) => request<void>("PUT", `/archive/pools/${enc(pool)}`, { replicas }),
+  archiveAction: (pool: string, a: "repair" | "scrub") => request<Task>("POST", `/archive/pools/${enc(pool)}/${a}`),
+  setArchiveMember: (node: string, name: string, state: ArchiveMemberState) =>
+    request<void>("PUT", `/archive/members/${node}/${enc(name)}`, { state }),
+  drainArchiveMember: (node: string, name: string) => request<Task>("POST", `/archive/members/${node}/${enc(name)}/drain`),
   nodes: () => request<NodeView[]>("GET", "/nodes"),
   vms: () => request<Vm[]>("GET", "/vms"),
   vm: (id: string) => request<Vm>("GET", `/vms/${id}`),

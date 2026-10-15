@@ -26,7 +26,37 @@ fn wipe(dir: &Path) -> anyhow::Result<()> {
         .args(["link", "del", "wg-prism"])
         .stderr(std::process::Stdio::null())
         .status();
+    remove_network_leftovers();
     Ok(())
+}
+
+/// Deletes the switches and firewall tables the stopped daemon left behind.
+/// Best effort: all of it is rebuilt by the daemon after a rejoin.
+fn remove_network_leftovers() {
+    use std::process::{Command, Stdio};
+    let quiet = |cmd: &str, args: &[&str]| {
+        let _ = Command::new(cmd)
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    };
+    if let Ok(out) = Command::new("ip").args(["-br", "link"]).output() {
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let name = line.split_whitespace().next().unwrap_or_default();
+            let name = name.split('@').next().unwrap_or_default();
+            let digits = name.get(2..).unwrap_or_default();
+            let ours = (name.starts_with("ps") || name.starts_with("vx"))
+                && !digits.is_empty()
+                && digits.bytes().all(|b| b.is_ascii_digit());
+            if ours {
+                quiet("ip", &["link", "del", name]);
+            }
+        }
+    }
+    for table in [["inet", "prism"], ["ip", "prism-nat"], ["bridge", "prism"]] {
+        quiet("nft", &["delete", "table", table[0], table[1]]);
+    }
 }
 
 pub async fn leave(dir: &Path, force: bool) -> anyhow::Result<()> {

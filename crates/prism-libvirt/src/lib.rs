@@ -4,6 +4,7 @@
 //! `libvirt-sock`) so the libvirt C library is never linked.
 
 mod client;
+mod domain;
 mod events;
 pub mod migrate;
 pub mod ops;

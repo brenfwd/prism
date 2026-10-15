@@ -436,7 +436,9 @@ impl Node {
                     lock(&self.remote_runtime).insert(id, rt);
                 }
             }
-            ("node.status", Some(id)) => {
+            // Peers announce what they learned about other nodes, us
+            // included; this node's own view is never cached as remote.
+            ("node.status", Some(id)) if id != self.id => {
                 if let Ok(v) = serde_json::from_value::<NodeView>(ev.payload.clone()) {
                     lock(&self.remote_nodes).insert(id, v);
                 }

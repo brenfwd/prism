@@ -17,6 +17,26 @@ pub struct Config {
     pub libvirt: LibvirtConfig,
     pub storage: StorageConfig,
     pub pools: BTreeMap<String, PoolConfig>,
+    pub cluster: ClusterSection,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClusterSection {
+    /// Underlay hosts (IPs or names) other members reach this node at, in
+    /// preference order. Empty behind NAT: peers learn it by roaming.
+    pub advertise: Vec<String>,
+    /// UDP port of `wg-prism`; the only port members need between them.
+    pub wireguard_port: u16,
+}
+
+impl Default for ClusterSection {
+    fn default() -> Self {
+        Self {
+            advertise: Vec::new(),
+            wireguard_port: crate::cluster::mesh::DEFAULT_PORT,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -172,6 +192,10 @@ domain_type = "auto"     # kvm when /dev/kvm exists, else qemu (TCG)
 
 [storage]
 pool_roots = []          # directories under which the API may create pools
+
+[cluster]
+advertise = []           # underlay IPs/names other members reach this node at
+wireguard_port = 51820   # the only port members need open between them
 
 [pools.default]
 type = "dir"

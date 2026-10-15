@@ -12,13 +12,18 @@ workspace = true
 [dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws", "macros"] }
+base64 = "0.23.1"
 blake3 = { version = "1.8.7", features = ["pure"] }
 bytes = "1.12.1"
+ciborium = "0.2.2"
 clap = { version = "4.6.7", features = ["derive"] }
 futures = "0.3.34"
 mime_guess = "2.0.5"
+openraft = { version = "0.9", features = ["serde", "storage-v2"] }
+prism-cluster = { version = "0.1.0", path = "../prism-cluster" }
 prism-iso = { version = "0.1.0", path = "../prism-iso" }
 prism-libvirt = { version = "0.1.0", path = "../prism-libvirt" }
+prism-proto = { version = "0.1.0", path = "../prism-proto" }
 prism-web = { version = "0.1.0", path = "../../web" }
 quick-xml = "0.42.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
@@ -30,6 +35,7 @@ tokio = { version = "1.53.3", features = ["full"] }
 tokio-stream = "0.1.19"
 tokio-util = "0.7.20"
 toml = "1.1.8"
+tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "server", "channel", "transport"] }
 tower-http = { version = "0.7.1", features = ["trace", "set-header"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

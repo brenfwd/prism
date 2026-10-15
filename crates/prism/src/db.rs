@@ -122,6 +122,26 @@ impl Docs<'_> {
         Ok(())
     }
 
+    /// Stores an already-encoded document.
+    pub fn put_raw(&self, collection: &str, id: &str, body: &str) -> anyhow::Result<()> {
+        self.tx.execute(
+            "INSERT INTO docs (collection, id, body) VALUES (?1, ?2, ?3)
+             ON CONFLICT (collection, id) DO UPDATE SET body = excluded.body",
+            params![collection, id, body],
+        )?;
+        Ok(())
+    }
+
+    /// Removes every document (before restoring a snapshot).
+    pub fn clear(&self) -> anyhow::Result<()> {
+        self.tx.execute("DELETE FROM docs", [])?;
+        Ok(())
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        set_meta(self.tx, key, value)
+    }
+
     /// Returns whether a document was removed.
     pub fn delete(&self, collection: &str, id: &str) -> anyhow::Result<bool> {
         Ok(self.tx.execute(
@@ -195,6 +215,11 @@ impl StateDb {
         set_meta(&self.db.conn(), key, value)
     }
 
+    pub fn delete_meta(&self, key: &str) -> anyhow::Result<()> {
+        self.db.conn().execute("DELETE FROM meta WHERE key = ?1", [key])?;
+        Ok(())
+    }
+
     pub fn get<T: DeserializeOwned>(
         &self,
         collection: &str,
@@ -205,6 +230,14 @@ impl StateDb {
 
     pub fn list<T: DeserializeOwned>(&self, collection: &str) -> anyhow::Result<Vec<T>> {
         list(&self.db.conn(), collection)
+    }
+
+    /// Every document as `(collection, id, body)`, in a stable order.
+    pub fn export(&self) -> anyhow::Result<Vec<(String, String, String)>> {
+        let conn = self.db.conn();
+        let mut stmt = conn.prepare("SELECT collection, id, body FROM docs ORDER BY collection, id")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// Runs `f` in one transaction, committing only if it succeeds.

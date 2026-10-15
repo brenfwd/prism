@@ -20,7 +20,7 @@ use crate::config::Config;
 use crate::events::{Bus, Op};
 use crate::render::{self, PoolLoc, RenderCtx};
 use crate::spec::VmSpec;
-use crate::state::{Command, State, StateError};
+use crate::state::{Change, Command, State, StateError};
 use crate::storage::{Storage, StorageError};
 use crate::tasks::Tasks;
 
@@ -41,6 +41,9 @@ pub enum NodeError {
     Invalid(String),
     #[error("libvirt is not connected")]
     Unavailable,
+    /// The cluster cannot commit changes (no hub/leader or no quorum).
+    #[error("cluster is degraded: {0}")]
+    Degraded(String),
     #[error(transparent)]
     Libvirt(#[from] prism_libvirt::Error),
     #[error(transparent)]
@@ -54,6 +57,7 @@ impl From<StateError> for NodeError {
         match e {
             StateError::Conflict(m) => Self::Conflict(m),
             StateError::NotFound(m) => Self::NotFound(m),
+            StateError::Degraded(m) => Self::Degraded(m),
             StateError::Internal(e) => Self::Internal(e),
         }
     }
@@ -219,6 +223,8 @@ pub struct Node {
     ops: tokio::sync::Mutex<()>,
     /// Starts autostart VMs on the first libvirt connection after host boot.
     autostart_pending: std::sync::atomic::AtomicBool,
+    /// Cluster membership, once the mesh layer is available.
+    pub cluster: std::sync::OnceLock<Arc<crate::cluster::Cluster>>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -272,6 +278,7 @@ impl Node {
             domain_events: broadcast::channel(1024).0,
             ops: tokio::sync::Mutex::new(()),
             autostart_pending: host_booted.into(),
+            cluster: std::sync::OnceLock::new(),
         })
     }
 
@@ -667,8 +674,16 @@ impl Node {
         let mut rx = self.state.subscribe();
         loop {
             let cmd = match rx.recv().await {
-                Ok(c) => c,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Ok(Change::Applied(c)) => c,
+                // Everything may have changed: re-snapshot clients and
+                // reconcile this node's VMs.
+                Ok(Change::Reset) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                    self.bus.publish("reset", "/".into(), Op::Upsert, serde_json::Value::Null);
+                    if let Ok(c) = self.client() {
+                        self.reconcile(&c).await;
+                    }
+                    continue;
+                }
                 Err(broadcast::error::RecvError::Closed) => return,
             };
             match &*cmd {
@@ -705,6 +720,15 @@ impl Node {
                         Op::Delete,
                         serde_json::Value::Null,
                     );
+                }
+                Command::InitCluster { .. }
+                | Command::CreateInvite { .. }
+                | Command::RevokeInvite { .. }
+                | Command::AddMember { .. }
+                | Command::SetMemberState { .. }
+                | Command::SetVoter { .. }
+                | Command::RemoveMember { .. } => {
+                    self.bus.publish("cluster", "/cluster".into(), Op::Upsert, serde_json::Value::Null);
                 }
             }
         }

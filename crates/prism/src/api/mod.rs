@@ -1,5 +1,6 @@
 //! HTTP API under `/api/v1`, plus the embedded UI.
 
+mod cluster;
 mod console;
 mod hygiene;
 mod pools;
@@ -30,6 +31,7 @@ pub fn router(node: AppState) -> Router {
         .merge(pools::routes())
         .merge(console::routes())
         .merge(tasks::routes())
+        .merge(cluster::routes())
         .route("/events", get(sse::events))
         .fallback(|| async { ApiError::not_found("no such endpoint") });
 
@@ -127,7 +129,7 @@ impl IntoResponse for ApiError {
                 self.status,
                 StatusCode::SERVICE_UNAVAILABLE | StatusCode::BAD_GATEWAY
             ),
-            degraded: false,
+            degraded: self.code == "cluster_degraded",
             detail: self.detail,
         };
         let mut res = (self.status, axum::Json(body)).into_response();
@@ -159,6 +161,11 @@ impl From<NodeError> for ApiError {
             NodeError::Libvirt(e) => Self::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "libvirt_unavailable",
+                e.to_string(),
+            ),
+            NodeError::Degraded(_) => Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "cluster_degraded",
                 e.to_string(),
             ),
             NodeError::Storage(e) => e.into(),

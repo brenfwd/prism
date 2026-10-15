@@ -1,6 +1,7 @@
 //! Prism: a libvirt/KVM manager in one static binary.
 
 mod api;
+mod cluster;
 mod config;
 mod db;
 mod events;

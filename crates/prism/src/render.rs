@@ -227,7 +227,10 @@ pub fn render(spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<String, String> {
         w.push_str(&nic_xml(nic, "    "));
     }
     // Declared first so libvirt numbers the spare ports from 1.
-    let _ = writeln!(w, "    <controller type='pci' index='0' model='pcie-root'/>");
+    let _ = writeln!(
+        w,
+        "    <controller type='pci' index='0' model='pcie-root'/>"
+    );
     for _ in 0..SPARE_ROOT_PORTS {
         let _ = writeln!(w, "    <controller type='pci' model='pcie-root-port'/>");
     }

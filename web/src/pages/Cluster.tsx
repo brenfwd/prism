@@ -3,11 +3,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { api, humanError } from "../api";
 import { dateTime } from "../lib/format";
-import { toast } from "../lib/toast";
-import { confirm } from "../components/Confirm";
 import { Badge, Button, Callout, Card, IconButton } from "../components/ui";
 import { InviteModal } from "./cluster/InviteModal";
 import { Members } from "./cluster/Members";
+import { LeaveCard } from "./cluster/LeaveCard";
 import { Setup } from "./cluster/Setup";
 
 export function ClusterPage() {
@@ -20,11 +19,6 @@ export function ClusterPage() {
   const revoke = useMutation({
     mutationFn: (id: string) => api.revokeInvite(id),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["cluster-invites"] }),
-  });
-  const leave = useMutation({
-    mutationFn: api.leaveCluster,
-    onSuccess: () => toast({ tone: "info", title: "Left the cluster", body: "This node is restarting as standalone." }),
-    onError: (e) => toast({ tone: "error", title: "Could not leave", body: humanError(e) }),
   });
 
   if (status.isLoading) return <div className="h-40 animate-pulse rounded-xl bg-zinc-100 dark:bg-zinc-900" />;
@@ -66,17 +60,7 @@ export function ClusterPage() {
               </ul>
             </Card>
           )}
-          <Card title="Leave cluster" description="Removes this node and returns it to standalone. Its machines stay on this node.">
-            <Button
-              variant="danger"
-              loading={leave.isPending}
-              onClick={async () => {
-                if (await confirm({ title: "Leave this cluster?", body: "The node restarts as standalone.", confirmLabel: "Leave", danger: true })) leave.mutate();
-              }}
-            >
-              Leave cluster
-            </Button>
-          </Card>
+          <LeaveCard status={s} />
         </>
       )}
       {inviting && <InviteModal onClose={() => setInviting(false)} />}

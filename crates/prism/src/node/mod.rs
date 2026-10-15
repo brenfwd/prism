@@ -53,7 +53,7 @@ pub use model::{
     Action, HostInfo, HotplugResult, MemoryStats, NodeView, VmRuntime, VmState, VmView,
 };
 pub use moves::MoveVm;
-pub use networks::NetworkView;
+pub use networks::{NetworkCheck, NetworkView};
 
 pub(crate) use libvirt::undefine_flags;
 pub use snapshots::{CreateSnapshot, SnapshotView};

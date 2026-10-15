@@ -4,12 +4,16 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
+use ipnet::Ipv4Net;
 use serde::Serialize;
 use uuid::Uuid;
 
 use super::backups::unix_now;
 use super::{Node, NodeError, Result};
-use crate::network::{CreateNetwork, DEFAULT_NETWORK, NetworkDoc, UpdateNetwork, host, ipam};
+use crate::network::{
+    CheckNetwork, CreateNetwork, DEFAULT_NETWORK, NetworkDoc, UpdateNetwork, host, ipam,
+    valid_network_name, valid_subnet,
+};
 use crate::spec::NicNetwork;
 use crate::state::Command;
 
@@ -24,7 +28,56 @@ pub struct NetworkView {
     pub vms: Vec<String>,
 }
 
+/// The verdict of a dry-run network check, for live form validation.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct NetworkCheck {
+    pub name_error: Option<String>,
+    pub subnet_error: Option<String>,
+    /// A free subnet to offer when the one asked for does not work.
+    pub suggestion: Option<Ipv4Net>,
+}
+
 impl Node {
+    /// Checks a name and subnet without creating anything. `id` is the
+    /// network being edited, which is not its own conflict.
+    pub fn check_network(&self, req: &CheckNetwork) -> Result<NetworkCheck> {
+        let nets: Vec<_> = self
+            .state
+            .networks()?
+            .into_iter()
+            .filter(|n| Some(n.id) != req.id)
+            .collect();
+        let mut out = NetworkCheck::default();
+        if let Some(name) = req.name.as_deref() {
+            if !valid_network_name(name) {
+                out.name_error = Some(
+                    "Use 1 to 32 lowercase letters, digits or hyphens, not starting or ending with a hyphen.".into(),
+                );
+            } else if nets.iter().any(|n| n.name == name) {
+                out.name_error = Some(format!("A network named {name} already exists."));
+            }
+        }
+        let mut taken: Vec<_> = nets.iter().map(|n| n.subnet).collect();
+        let others = taken.len();
+        taken.extend(host::foreign_subnets(&host::routes()));
+        if let Some(s) = req.subnet {
+            out.subnet_error = valid_subnet(s).err().or_else(|| {
+                let hit = ipam::conflicts(s, &taken)?;
+                let who = if taken[..others].contains(&hit) {
+                    "another Prism network"
+                } else {
+                    "a network this host already routes to"
+                };
+                Some(format!("{s} overlaps {hit}, used by {who}."))
+            });
+            if out.subnet_error.is_some() {
+                taken.push(ipam::CGNAT);
+                out.suggestion = ipam::pick_subnet(&taken);
+            }
+        }
+        Ok(out)
+    }
+
     /// The bridge of each network, for rendering NICs.
     pub(crate) fn network_bridges(&self) -> HashMap<Uuid, String> {
         self.state
@@ -88,6 +141,14 @@ impl Node {
             }
         });
         let subnet = if let Some(s) = req.subnet {
+            let check = self.check_network(&CheckNetwork {
+                id: None,
+                name: None,
+                subnet: Some(s),
+            })?;
+            if let Some(e) = check.subnet_error {
+                return Err(NodeError::Conflict(e));
+            }
             s
         } else {
             let mut taken: Vec<_> = nets.iter().map(|n| n.subnet).collect();

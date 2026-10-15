@@ -1,28 +1,22 @@
+import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { api, humanError, type NetworkInfo, type Vm } from "../api";
 import { useNetworks, useVms } from "../lib/hooks";
 import { toast } from "../lib/toast";
 import { confirm } from "../components/Confirm";
+import { NetworkModal } from "./networks/NetworkModal";
 import { Badge, Button, Card, EmptyState, IconButton } from "../components/ui";
 
 export function NetworksPage() {
-  const qc = useQueryClient();
   const nets = useNetworks();
   const vms = useVms().data ?? [];
   const list = nets.data ?? [];
-  const create = useMutation({
-    mutationFn: () => api.createNetwork({}),
-    onSuccess: (n) => {
-      toast({ tone: "success", title: `Network ${n.name} created on ${n.subnet}` });
-      void qc.invalidateQueries({ queryKey: ["networks"] });
-    },
-    onError: (e) => toast({ tone: "error", title: "Network change failed", body: humanError(e) }),
-  });
+  const [editing, setEditing] = useState<NetworkInfo | "new" | null>(null);
 
   if (nets.isLoading) return <div className="h-40 animate-pulse rounded-xl bg-zinc-100 dark:bg-zinc-900" />;
   const add = (
-    <Button variant="primary" icon="plus" loading={create.isPending} onClick={() => create.mutate()}>
+    <Button variant="primary" icon="plus" onClick={() => setEditing("new")}>
       New network
     </Button>
   );
@@ -31,7 +25,7 @@ export function NetworksPage() {
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Networks</h1>
-          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">Private networks with DHCP, DNS and internet access built in. One click picks a free subnet.</p>
+          <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">Private networks with DHCP, DNS and internet access built in. Defaults pick a free subnet for you.</p>
         </div>
         {add}
       </div>
@@ -44,15 +38,16 @@ export function NetworksPage() {
       ) : (
         <div className="grid gap-4 lg:grid-cols-2">
           {list.map((n) => (
-            <NetworkCard key={n.id} net={n} vms={vms} />
+            <NetworkCard key={n.id} net={n} vms={vms} onRename={() => setEditing(n)} />
           ))}
         </div>
       )}
+      {editing && <NetworkModal existing={editing === "new" ? undefined : editing} onClose={() => setEditing(null)} />}
     </div>
   );
 }
 
-function NetworkCard({ net, vms }: { net: NetworkInfo; vms: Vm[] }) {
+function NetworkCard({ net, vms, onRename }: { net: NetworkInfo; vms: Vm[]; onRename: () => void }) {
   const qc = useQueryClient();
   const members = vms
     .map((vm) => ({ vm, ips: vm.nics.flatMap((n) => (n.network.type === "network" && n.network.network === net.id ? [n.network.ipv4 ?? "pending"] : [])) }))
@@ -65,6 +60,8 @@ function NetworkCard({ net, vms }: { net: NetworkInfo; vms: Vm[] }) {
       title={net.name}
       description={<span className="font-mono">{net.subnet}</span>}
       actions={
+        <>
+        <IconButton icon="pencil" label="Rename network" onClick={onRename} />
         <IconButton
           icon="trash"
           label="Delete network"
@@ -73,6 +70,7 @@ function NetworkCard({ net, vms }: { net: NetworkInfo; vms: Vm[] }) {
             if (await confirm({ title: `Delete ${net.name}?`, body: "Its subnet is released.", confirmLabel: "Delete", danger: true })) del.mutate();
           }}
         />
+        </>
       }
     >
       <div className="mb-3 flex flex-wrap gap-1.5">

@@ -4,15 +4,16 @@ use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 
 use super::{ApiError, AppState, Json};
-use crate::network::{CreateNetwork, UpdateNetwork};
-use crate::node::NetworkView;
+use crate::network::{CheckNetwork, CreateNetwork, UpdateNetwork};
+use crate::node::{NetworkCheck, NetworkView};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/networks", get(list).post(create))
+        .route("/networks/check", post(check))
         .route("/networks/{id}", get(show).patch(update).delete(remove))
 }
 
@@ -31,6 +32,13 @@ async fn create(
         [(header::LOCATION, location)],
         axum::Json(net),
     ))
+}
+
+async fn check(
+    State(node): State<AppState>,
+    Json(req): Json<CheckNetwork>,
+) -> Result<axum::Json<NetworkCheck>, ApiError> {
+    Ok(axum::Json(node.check_network(&req)?))
 }
 
 async fn show(

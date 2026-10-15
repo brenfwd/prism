@@ -13,12 +13,13 @@ import { TaskTray } from "./TaskTray";
 import { Toaster } from "./Toaster";
 import { Button, IconButton, Kbd, Meter, cx, modKey } from "./ui";
 
-const nav: { to: "/" | "/vms" | "/storage" | "/networks" | "/cluster" | "/tasks"; label: string; icon: IconName; exact?: boolean }[] = [
+const nav: { to: "/" | "/vms" | "/storage" | "/networks" | "/cluster" | "/archive" | "/tasks"; label: string; icon: IconName; exact?: boolean }[] = [
   { to: "/", label: "Overview", icon: "home", exact: true },
   { to: "/vms", label: "Machines", icon: "server" },
   { to: "/storage", label: "Storage", icon: "database" },
   { to: "/networks", label: "Networks", icon: "network" },
   { to: "/cluster", label: "Cluster", icon: "server" },
+  { to: "/archive", label: "Archive", icon: "database" },
   { to: "/tasks", label: "Tasks", icon: "activity" },
 ];
 
@@ -129,7 +130,7 @@ function Sidebar() {
 
 function MobileTabs() {
   return (
-    <nav aria-label="Main" className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-6 border-t border-zinc-200 bg-white/90 pb-[env(safe-area-inset-bottom)] backdrop-blur-lg lg:hidden dark:border-zinc-800 dark:bg-zinc-950/90">
+    <nav aria-label="Main" className="fixed inset-x-0 bottom-0 z-40 grid grid-cols-7 border-t border-zinc-200 bg-white/90 pb-[env(safe-area-inset-bottom)] backdrop-blur-lg lg:hidden dark:border-zinc-800 dark:bg-zinc-950/90">
       {nav.map((n) => (
         <Link
           key={n.to}

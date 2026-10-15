@@ -139,6 +139,12 @@ pub const OPERATIONS: &[(&str, &str, &str, &str)] = &[
     ),
     ("get", "/networks", "networks", "List networks"),
     ("post", "/networks", "networks", "Create a network"),
+    (
+        "post",
+        "/networks/check",
+        "networks",
+        "Check a network name and subnet",
+    ),
     ("get", "/networks/{id}", "networks", "Show a network"),
     ("patch", "/networks/{id}", "networks", "Update a network"),
     ("delete", "/networks/{id}", "networks", "Delete a network"),

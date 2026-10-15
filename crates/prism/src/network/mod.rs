@@ -173,6 +173,16 @@ pub struct CreateNetwork {
     pub dhcp: Option<bool>,
 }
 
+/// `POST /api/v1/networks/check` body: what the form has so far.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckNetwork {
+    /// The network being edited, if any.
+    pub id: Option<Uuid>,
+    pub name: Option<String>,
+    pub subnet: Option<Ipv4Net>,
+}
+
 /// `PATCH /api/v1/networks/{id}` body.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]

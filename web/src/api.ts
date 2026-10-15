@@ -80,6 +80,8 @@ export interface Prereq {
   hint: string | null;
 }
 
+export interface NetworkCheck { name_error: string | null; subnet_error: string | null; suggestion: string | null }
+
 export interface NetworkInfo {
   id: string;
   name: string;
@@ -330,6 +332,7 @@ export const api = {
   networks: () => request<NetworkInfo[]>("GET", "/networks"),
   createNetwork: (req: { name?: string; kind?: "nat" | "isolated"; subnet?: string; dhcp?: boolean } = {}) =>
     request<NetworkInfo>("POST", "/networks", req),
+  checkNetwork: (req: { id?: string; name?: string; subnet?: string }) => request<NetworkCheck>("POST", "/networks/check", req),
   updateNetwork: (id: string, req: { name?: string; dhcp?: boolean }) => request<NetworkInfo>("PATCH", `/networks/${id}`, req),
   deleteNetwork: (id: string) => request<void>("DELETE", `/networks/${id}`),
 

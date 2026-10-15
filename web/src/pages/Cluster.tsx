@@ -7,6 +7,7 @@ import { Badge, Button, Callout, Card, IconButton } from "../components/ui";
 import { InviteModal } from "./cluster/InviteModal";
 import { Members } from "./cluster/Members";
 import { LeaveCard } from "./cluster/LeaveCard";
+import { Removals } from "./cluster/Removals";
 import { Setup } from "./cluster/Setup";
 
 export function ClusterPage() {
@@ -60,6 +61,7 @@ export function ClusterPage() {
               </ul>
             </Card>
           )}
+          <Removals />
           <LeaveCard status={s} />
         </>
       )}

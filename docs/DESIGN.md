@@ -307,7 +307,7 @@ Scheduled backups that fall in a degraded window are recorded as failed tasks.
 
 ### Changing the hub and recovering quorum
 
-- **Planned:** `prism cluster promote <node>` adds the target as a voter, removes the old hub's vote and demotes the old hub to learner. These are two membership changes with no data loss.
+- **Planned:** `prism cluster promote <node>` (API `POST /cluster/hub`, also offered by the Leave dialog) adds the target as a voter, removes the old hub's vote and demotes the old hub to learner. These are two membership changes with no data loss.
 - **Forced:** `prism cluster promote --force` (hub dead) or `prism cluster recover --force-single` (quorum lost) re-initialises membership from the most up-to-date survivor and bumps `cluster_generation`.
 - **Fencing:** a returning node that sees a higher generation demotes itself. It writes any un-replicated entries to `data/lost-<gen>.jsonl`; they are reported, never merged.
 

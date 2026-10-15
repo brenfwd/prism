@@ -5,7 +5,7 @@ import { toast } from "../../lib/toast";
 import { confirm } from "../../components/Confirm";
 import { Button, Callout, Card, ErrorText, Modal } from "../../components/ui";
 
-/** Leaving is one click, unless this node is the hub: then explain why and offer the way out. */
+/** Leaving is one click, unless this node is the hub: then offer to hand the hub role over first. */
 export function LeaveCard({ status }: { status: ClusterStatus }) {
   const qc = useQueryClient();
   const [guide, setGuide] = useState(false);
@@ -27,6 +27,19 @@ export function LeaveCard({ status }: { status: ClusterStatus }) {
       setGuide(false);
     },
   });
+  const candidates = others.filter((m) => m.state === "active");
+  const [pick, setTarget] = useState("");
+  const target = pick || candidates[0]?.node_id || "";
+  const handover = useMutation({
+    mutationFn: async () => {
+      await api.transferHub(target);
+      await api.leaveCluster();
+    },
+    onSuccess: () => {
+      setGuide(false);
+      toast({ tone: "success", title: "Hub handed over", body: "This node left and is restarting as standalone." });
+    },
+  });
   const start = async () => {
     if (blocked) return setGuide(true);
     if (await confirm({ title: "Leave this cluster?", body: "The node restarts as standalone.", confirmLabel: "Leave", danger: true })) leave.mutate();
@@ -37,28 +50,49 @@ export function LeaveCard({ status }: { status: ClusterStatus }) {
       {guide && (
         <Modal
           title="This node is the hub"
-          description="The other nodes follow it, so it cannot leave while they depend on it."
+          description="The other nodes follow it. Hand the hub role to one of them and this node can leave."
           onClose={() => setGuide(false)}
           footer={<Button variant="ghost" onClick={() => setGuide(false)}>Not now</Button>}
         >
           <div className="space-y-4 text-sm">
-            <Callout tone="info" title="Two ways forward">
-              Leave from another node instead, or clear the way here by removing the {others.length} other {others.length === 1 ? "node" : "nodes"}. Handing the hub role to another node is not available yet.
-            </Callout>
-            <ol className="list-decimal space-y-1 pl-5 text-zinc-600 dark:text-zinc-400">
-              <li>Remove: {others.map((m) => m.name).join(", ")}. They are cut off and cannot rejoin with the same identity.</li>
-              <li>Come back here and leave. This node restarts as standalone with its machines.</li>
-            </ol>
-            <Button
-              variant="danger"
-              loading={removeOthers.isPending}
-              onClick={async () => {
-                if (await confirm({ title: `Remove ${others.length} other ${others.length === 1 ? "node" : "nodes"}?`, body: "This cannot be undone.", confirmLabel: "Remove them", danger: true })) removeOthers.mutate();
-              }}
-            >
-              Remove the other nodes
-            </Button>
-            <ErrorText error={removeOthers.error} />
+            {candidates.length > 0 ? (
+              <>
+                <label className="block space-y-1">
+                  <span className="text-zinc-600 dark:text-zinc-400">New hub</span>
+                  <select
+                    className="w-full rounded-md border border-zinc-300 bg-transparent px-2 py-1.5 dark:border-zinc-700"
+                    value={target}
+                    onChange={(e) => setTarget(e.target.value)}
+                  >
+                    {candidates.map((m) => <option key={m.node_id} value={m.node_id}>{m.name}</option>)}
+                  </select>
+                </label>
+                <Button variant="primary" loading={handover.isPending} onClick={() => handover.mutate()}>
+                  Hand over the hub and leave
+                </Button>
+                <ErrorText error={handover.error} />
+              </>
+            ) : (
+              <Callout tone="info" title="No node can take over yet">
+                Other nodes are still joining. Wait until one is active, or remove them.
+              </Callout>
+            )}
+            <details className="text-zinc-600 dark:text-zinc-400">
+              <summary className="cursor-pointer">Or remove the other nodes instead</summary>
+              <div className="mt-3 space-y-3">
+                <p>Removes {others.map((m) => m.name).join(", ")}. They are cut off and cannot rejoin with the same identity.</p>
+                <Button
+                  variant="danger"
+                  loading={removeOthers.isPending}
+                  onClick={async () => {
+                    if (await confirm({ title: `Remove ${others.length} other ${others.length === 1 ? "node" : "nodes"}?`, body: "This cannot be undone.", confirmLabel: "Remove them", danger: true })) removeOthers.mutate();
+                  }}
+                >
+                  Remove the other nodes
+                </Button>
+                <ErrorText error={removeOthers.error} />
+              </div>
+            </details>
           </div>
         </Modal>
       )}

@@ -27,6 +27,7 @@ pub fn routes() -> Router<AppState> {
         .route("/cluster/removed", get(removed))
         .route("/cluster/members/{node}", delete(remove))
         .route("/cluster/members/{node}/voter", post(set_voter))
+        .route("/cluster/hub", post(transfer_hub))
         .route("/cluster/mesh", get(mesh))
 }
 
@@ -191,7 +192,7 @@ async fn leave(State(node): State<AppState>) -> Result<StatusCode, ApiError> {
             .any(|m| m.node_id == node.id && m.voter);
     if others > 0 && is_hub {
         return Err(ApiError::bad_request(
-            "this node is the hub; remove the other members first, or run `prism leave --force`",
+            "this node is the hub; hand the hub role to another member first (`prism cluster promote <node>`), or run `prism leave --force`",
         ));
     }
     if others > 0 {
@@ -264,6 +265,22 @@ async fn set_voter(
         })
         .await
         .map_err(NodeError::from)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransferHub {
+    /// The member that becomes the hub.
+    node: Uuid,
+}
+
+/// Hands the hub role (the single raft voter) from this node to another.
+async fn transfer_hub(
+    State(node): State<AppState>,
+    Json(req): Json<TransferHub>,
+) -> Result<StatusCode, ApiError> {
+    cluster(&node)?.transfer_hub(req.node).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

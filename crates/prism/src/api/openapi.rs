@@ -166,6 +166,12 @@ pub const OPERATIONS: &[(&str, &str, &str, &str)] = &[
     ("post", "/cluster/leave", "cluster", "Leave the cluster"),
     ("get", "/cluster/removed", "cluster", "Removed members"),
     (
+        "post",
+        "/cluster/hub",
+        "cluster",
+        "Hand the hub role to another member",
+    ),
+    (
         "delete",
         "/cluster/members/{node}",
         "cluster",

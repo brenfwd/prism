@@ -45,6 +45,8 @@ pub enum ClusterCmd {
     },
     /// Remove a member (its VMs must be moved first).
     Remove { node: String },
+    /// Hand the hub role to another member (run on the current hub).
+    Promote { node: String },
     /// Show removed members, whose keys, IDs and addresses are blocked.
     Removed,
 }
@@ -282,6 +284,10 @@ pub async fn cluster(dir: &Path, cmd: ClusterCmd) -> anyhow::Result<()> {
                     );
                 }
             }
+        }
+        ClusterCmd::Promote { node } => {
+            call(&cfg, "POST", "/cluster/hub", Some(json!({"node": node}))).await?;
+            println!("{node} is now the hub. This node is a spoke and can leave.");
         }
         ClusterCmd::Remove { node } => {
             call(&cfg, "DELETE", &format!("/cluster/members/{node}"), None).await?;

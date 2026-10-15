@@ -50,7 +50,7 @@ pub fn check_removal(mode: ClusterMode, members: &[MemberDoc], target: Uuid) -> 
     }
     match mode {
         ClusterMode::HubSpoke => Err(format!(
-            "{} is the hub, the cluster's only voter; run `prism leave --force` on it after removing the other members",
+            "{} is the hub, the cluster's only voter; hand the hub role over with `prism cluster promote` first",
             m.name
         )),
         ClusterMode::Consensus => {

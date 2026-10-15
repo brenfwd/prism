@@ -1,6 +1,7 @@
 //! The running cluster member: raft, the proposer, reconcilers and the
 //! init/invite/accept/join flows.
 
+mod hub;
 mod join;
 mod membership;
 mod progress;

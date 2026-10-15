@@ -278,6 +278,11 @@ export interface ClusterStatus {
   clustered: boolean; cluster: ClusterDoc | null; me: string; role: string; leader: string | null;
   members: ClusterMember[]; degraded: boolean; pending_join: boolean;
 }
+export interface MemberProgress { node_id: string; name: string; applied_index: number | null }
+export interface RemovalStatus {
+  node_id: string; wg_pubkey: string; mesh_addr: string; removed: number; removed_index: number;
+  pending: MemberProgress[]; complete: boolean;
+}
 export interface InviteView { invite_id: string; blob: string; expires: number; assigned_addr: string }
 export interface InviteDoc { invite_id: string; assigned_addr: string; exp: number; name_hint: string | null; consumed_by: string | null }
 export interface AcceptPreview { node_id: string; name: string; endpoints: string[]; fingerprint: string; invite_id: string; admitted: boolean }
@@ -301,6 +306,8 @@ export const api = {
   joinCluster: (invite: string) => request<JoinReply>("POST", "/cluster/join", { invite }),
   acceptReply: (reply: string, confirm: boolean) => request<AcceptPreview>("POST", "/cluster/accept", { reply, confirm }),
   removeMember: (id: string) => request<void>("DELETE", `/cluster/members/${id}`),
+  removals: () => request<RemovalStatus[]>("GET", "/cluster/removed"),
+  transferHub: (node: string) => request<void>("POST", "/cluster/hub", { node }),
   leaveCluster: () => request<void>("POST", "/cluster/leave"),
   setVoter: (id: string, voter: boolean) => request<void>("POST", `/cluster/members/${id}/voter`, { voter }),
   mesh: () => request<MeshPeer[]>("GET", "/cluster/mesh"),

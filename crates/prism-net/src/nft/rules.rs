@@ -8,6 +8,8 @@ use super::{Chain, ChainType, CtState, Family, Hook, Rule, Table, priority};
 use crate::MacAddr;
 use crate::link::VXLAN_PORT;
 
+const ICMPV6_ECHO_REQUEST: u8 = 128;
+
 /// Name of the `inet` filter table.
 pub const INET_TABLE: &str = "prism";
 /// Name of the `ip` NAT table.
@@ -76,7 +78,6 @@ pub fn boundary_ruleset(cfg: &BoundaryConfig) -> Table {
         Hook::Output,
         priority::FILTER,
     ));
-    out.push(Rule::new(Family::Inet).ip6_daddr(mesh).skuid_ne(0).drop());
     if let Some(uid) = cfg.qemu_uid {
         out.push(
             Rule::new(Family::Inet)
@@ -85,6 +86,17 @@ pub fn boundary_ruleset(cfg: &BoundaryConfig) -> Table {
                 .drop(),
         );
     }
+    // Echo requests to the mesh are harmless and make `ping6` work for
+    // operators; everything else from non-root processes still drops. Only
+    // on wg-prism (it is NOARP, so there is no neighbour discovery to allow).
+    out.push(
+        Rule::new(Family::Inet)
+            .oifname(wg)
+            .ip6_daddr(mesh)
+            .icmpv6_type(ICMPV6_ECHO_REQUEST)
+            .accept(),
+    );
+    out.push(Rule::new(Family::Inet).ip6_daddr(mesh).skuid_ne(0).drop());
     t
 }
 

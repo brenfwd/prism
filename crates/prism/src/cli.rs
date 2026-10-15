@@ -286,15 +286,33 @@ pub async fn cluster(dir: &Path, cmd: ClusterCmd) -> anyhow::Result<()> {
             }
         }
         ClusterCmd::Promote { node } => {
-            call(&cfg, "POST", "/cluster/hub", Some(json!({"node": node}))).await?;
+            let id = resolve_member(&cfg, &node).await?;
+            call(&cfg, "POST", "/cluster/hub", Some(json!({"node": id}))).await?;
             println!("{node} is now the hub. This node is a spoke and can leave.");
         }
         ClusterCmd::Remove { node } => {
-            call(&cfg, "DELETE", &format!("/cluster/members/{node}"), None).await?;
+            let id = resolve_member(&cfg, &node).await?;
+            call(&cfg, "DELETE", &format!("/cluster/members/{id}"), None).await?;
             println!("Removed {node}.");
         }
     }
     Ok(())
+}
+
+/// Maps a member name (or an ID, passed through) to its node ID.
+async fn resolve_member(cfg: &Config, node: &str) -> anyhow::Result<String> {
+    if node.parse::<uuid::Uuid>().is_ok() {
+        return Ok(node.to_string());
+    }
+    let v = call(cfg, "GET", "/cluster", None).await?;
+    v["members"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|m| m["name"].as_str() == Some(node))
+        .and_then(|m| m["node_id"].as_str())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("no cluster member named {node:?}"))
 }
 
 pub async fn join(dir: &Path, invite: &str) -> anyhow::Result<()> {

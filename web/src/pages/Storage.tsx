@@ -8,6 +8,7 @@ import { pickFiles } from "../lib/overlays";
 import { startUpload, uploads } from "../lib/tasks";
 import { useStore } from "../lib/store";
 import { toast } from "../lib/toast";
+import { applyTask } from "../lib/tasks";
 import { confirm } from "../components/Confirm";
 import { WindowDrop } from "../components/DropZone";
 import { Icon, type IconName } from "../components/icons";
@@ -40,6 +41,7 @@ export function StoragePage({ pool: wanted }: { pool?: string }) {
   const navigate = useNavigate();
   const pools = usePools();
   const [creating, setCreating] = useState(false);
+  const [fromUrl, setFromUrl] = useState(false);
   const list = pools.data ?? [];
   const pool = list.find((p) => p.name === wanted) ?? list[0];
   const upload = (files: File[]) => {
@@ -59,6 +61,7 @@ export function StoragePage({ pool: wanted }: { pool?: string }) {
         </div>
         <div className="flex gap-2">
           <Button icon="plus" onClick={() => setCreating(true)}>New pool</Button>
+          {pool && <Button icon="cloud" onClick={() => setFromUrl(true)}>From URL</Button>}
           {pool && <Button variant="primary" icon="upload" onClick={async () => upload(await pickFiles(".iso,.img,.qcow2,.raw"))}>Upload</Button>}
         </div>
       </div>
@@ -81,6 +84,7 @@ export function StoragePage({ pool: wanted }: { pool?: string }) {
           {pool && <PoolView pool={pool} single={list.length === 1} onUpload={upload} />}
         </>
       )}
+      {fromUrl && pool && <FromUrl pool={pool} onClose={() => setFromUrl(false)} />}
       {creating && <CreatePool onClose={() => setCreating(false)} />}
     </div>
   );
@@ -329,6 +333,46 @@ function CreatePool({ onClose }: { onClose: () => void }) {
           <Segmented label="Disk format" value={format} onChange={setFormat} options={[{ value: "qcow2", label: "qcow2" }, { value: "raw", label: "raw" }]} />
         </Field>
         <ErrorText error={create.error} />
+      </form>
+    </Modal>
+  );
+}
+
+function FromUrl({ pool, onClose }: { pool: Pool; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [url, setUrl] = useState("");
+  const [name, setName] = useState("");
+  const guess = url.split(/[?#]/)[0].split("/").pop() ?? "";
+  const start = useMutation({
+    mutationFn: () => api.downloadVolume(pool.name, url.trim(), name || undefined),
+    onSuccess: (t) => {
+      applyTask(qc, t);
+      toast({ tone: "info", title: "Download started", body: "It continues in the background; progress is in the task tray." });
+      onClose();
+    },
+  });
+  const ok = /^https?:\/\/\S+$/.test(url.trim());
+  return (
+    <Modal
+      title={`Download into ${pool.name}`}
+      description="Prism fetches the file itself, so nothing passes through your browser."
+      onClose={onClose}
+      size="sm"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" icon="cloud" loading={start.isPending} disabled={!ok} onClick={() => start.mutate()}>Download</Button>
+        </>
+      }
+    >
+      <form className="space-y-4" onSubmit={(e) => (e.preventDefault(), ok && start.mutate())}>
+        <Field label="Link to an ISO or cloud image" htmlFor="dl-url">
+          <Input id="dl-url" autoFocus value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://cloud-images.ubuntu.com/…/server-cloudimg-amd64.img" />
+        </Field>
+        <Field label="Save as" htmlFor="dl-name" hint={guess ? "Leave empty to use the name from the link." : "The link has no file name, so choose one."}>
+          <Input id="dl-name" value={name} onChange={(e) => setName(e.target.value.replace(/\s/g, "-"))} placeholder={guess || "image.iso"} />
+        </Field>
+        <ErrorText error={start.error} />
       </form>
     </Modal>
   );

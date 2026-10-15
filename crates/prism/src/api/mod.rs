@@ -5,6 +5,7 @@ mod archive_ops;
 mod cluster;
 mod console;
 mod forward;
+mod host;
 mod hygiene;
 mod internal;
 mod networks;
@@ -35,6 +36,7 @@ pub fn router(node: AppState) -> Router {
         .merge(vms::routes())
         .merge(vms::backup_routes())
         .merge(pools::routes())
+        .merge(host::routes())
         .merge(networks::routes())
         .merge(console::routes())
         .merge(tasks::routes())

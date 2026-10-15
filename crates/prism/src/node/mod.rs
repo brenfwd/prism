@@ -6,7 +6,11 @@ mod archive_io;
 mod archive_repair;
 mod backups;
 mod balloon;
+mod clone;
 mod devices;
+mod download;
+mod forwards;
+mod guest;
 mod libvirt;
 mod migrate;
 mod migrate_setup;
@@ -38,9 +42,14 @@ use crate::tasks::Tasks;
 
 pub use backups::{BACKUPS, BackupDoc, CreateBackup, RestoreBackup};
 pub use balloon::BalloonStatus;
+pub use clone::CloneVm;
 pub use devices::{AddDisk, AddNic, UpdateDisk};
+pub use download::DownloadReq;
+pub use guest::GuestNetwork;
 pub use migrate::{FinishReq, MigrateVm, PrepareReq};
-pub use model::{Action, HostInfo, MemoryStats, NodeView, VmRuntime, VmState, VmView};
+pub use model::{
+    Action, HostInfo, HotplugResult, MemoryStats, NodeView, VmRuntime, VmState, VmView,
+};
 pub use moves::MoveVm;
 pub use networks::NetworkView;
 
@@ -257,7 +266,11 @@ impl Node {
         if let Some(ci) = &mut spec.cloud_init {
             ci.user_data = format!("blake3:{}", blake3::hash(ci.user_data.as_bytes()).to_hex());
         }
-        VmView { spec, status }
+        VmView {
+            spec,
+            status,
+            hotplug: None,
+        }
     }
 
     pub fn vms(&self) -> Result<Vec<VmView>> {

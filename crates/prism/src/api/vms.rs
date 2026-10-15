@@ -2,15 +2,16 @@ use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
 use serde::Deserialize;
 use uuid::Uuid;
 
 use super::{ApiError, AppState, Json};
 use crate::node::{
-    Action, AddDisk, AddNic, CreateSnapshot, MigrateVm, MoveVm, SnapshotView, UpdateDisk, VmView,
+    Action, AddDisk, AddNic, CloneVm, CreateSnapshot, GuestNetwork, MigrateVm, MoveVm,
+    SnapshotView, UpdateDisk, VmView,
 };
-use crate::spec::{CreateVm, UpdateVm};
+use crate::spec::{CreateVm, PortForward, UpdateVm};
 use crate::tasks::Task;
 
 pub fn routes() -> Router<AppState> {
@@ -25,9 +26,12 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/vms/{id}/nics", post(add_nic))
         .route("/vms/{id}/nics/{nic}", delete(remove_nic))
+        .route("/vms/{id}/nics/{nic}/forwards", put(set_forwards))
         .route("/vms/{id}/snapshots", get(snapshots).post(create_snapshot))
         .route("/vms/{id}/snapshots/{name}", delete(delete_snapshot))
         .route("/vms/{id}/snapshots/{name}/revert", post(revert_snapshot))
+        .route("/vms/{id}/guest/network", get(guest_network))
+        .route("/vms/{id}/clone", post(clone_vm))
         .route("/vms/{id}/move", post(move_vm))
         .route("/vms/{id}/migrate", post(migrate_vm))
 }
@@ -38,6 +42,32 @@ async fn migrate_vm(
     Json(req): Json<MigrateVm>,
 ) -> Result<impl IntoResponse, ApiError> {
     Ok(accepted(node.migrate_vm(parse_id(&id)?, req)?))
+}
+
+async fn set_forwards(
+    State(node): State<AppState>,
+    Path((id, nic)): Path<(String, String)>,
+    Json(forwards): Json<Vec<PortForward>>,
+) -> Result<axum::Json<VmView>, ApiError> {
+    Ok(axum::Json(
+        node.set_forwards(parse_id(&id)?, parse_sub(&nic, "nic")?, forwards)
+            .await?,
+    ))
+}
+
+async fn guest_network(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<axum::Json<GuestNetwork>, ApiError> {
+    Ok(axum::Json(node.guest_network(parse_id(&id)?).await?))
+}
+
+async fn clone_vm(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<CloneVm>,
+) -> Result<impl IntoResponse, ApiError> {
+    Ok(accepted(node.clone_vm(parse_id(&id)?, req)?))
 }
 
 async fn move_vm(

@@ -1,12 +1,14 @@
-import { lazy, Suspense } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { lazy, Suspense, useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import type { Vm, VmAction } from "../../api";
+import { api, humanError, type Vm, type VmAction } from "../../api";
+import { applyTask } from "../../lib/tasks";
+import { toast } from "../../lib/toast";
 import type { VmTab } from "../../main";
 import { actionMeta, availableActions, powerCycle, usePendingAction, useRunAction, useVm } from "../../lib/hooks";
 import { memLabel } from "../../lib/format";
 import { Icon, type IconName } from "../../components/icons";
-import { Badge, Button, Callout, EmptyState, IconButton, Menu, StateBadge, cx } from "../../components/ui";
+import { Badge, Button, Callout, EmptyState, IconButton, Input, Menu, Modal, StateBadge, cx } from "../../components/ui";
 import { confirm } from "../../components/Confirm";
 
 const VncConsole = lazy(() => import("../../components/VncConsole").then((m) => ({ default: m.VncConsole })));
@@ -168,6 +170,7 @@ function Header({ vm }: { vm: Vm }) {
   const pending = usePendingAction(vm.id);
   const s = vm.status;
   const nic = vm.nics[0];
+  const [cloning, setCloning] = useState(false);
   const boot = vm.disks.find((d) => d.device === "disk");
   return (
     <div className="mb-5">
@@ -194,8 +197,19 @@ function Header({ vm }: { vm: Vm }) {
             </Link>
           )}
           <PowerControls vm={vm} />
+          <Menu
+            label="Machine actions"
+            items={[{
+              label: "Clone…",
+              icon: "copy",
+              disabled: isOn(vm),
+              onSelect: () => setCloning(true),
+            }]}
+            trigger={(p) => <IconButton icon="more" label="Machine actions" variant="secondary" {...p} />}
+          />
         </div>
       </div>
+      {cloning && <CloneVm vm={vm} onClose={() => setCloning(false)} />}
       {s.pending_restart && (
         <Callout
           tone="warning"
@@ -223,5 +237,37 @@ function Meta({ icon, children }: { icon: IconName; children: React.ReactNode })
       <Icon name={icon} className="size-3.5 opacity-70" />
       {children}
     </span>
+  );
+}
+
+function CloneVm({ vm, onClose }: { vm: Vm; onClose: () => void }) {
+  const qc = useQueryClient();
+  const [name, setName] = useState(`${vm.name}-clone`);
+  const clone = useMutation({
+    mutationFn: () => api.cloneVm(vm.id, name),
+    onSuccess: (t) => {
+      applyTask(qc, t);
+      toast({ tone: "info", title: `Cloning ${vm.name}`, body: "Watch the progress in the task tray. The copy appears in Machines when it's ready." });
+      onClose();
+    },
+    onError: (e) => toast({ tone: "error", title: "Couldn't start the clone", body: humanError(e) }),
+  });
+  return (
+    <Modal
+      title={`Clone ${vm.name}`}
+      description="Copies every disk (snapshot history is flattened) into a new machine with its own identity and network addresses."
+      size="sm"
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button variant="primary" icon="copy" loading={clone.isPending} disabled={!name} onClick={() => clone.mutate()}>Clone</Button>
+        </>
+      }
+    >
+      <form onSubmit={(e) => (e.preventDefault(), name && clone.mutate())}>
+        <Input autoFocus aria-label="Name of the clone" value={name} onChange={(e) => setName(e.target.value.replace(/[^A-Za-z0-9._-]/g, "-"))} />
+      </form>
+    </Modal>
   );
 }

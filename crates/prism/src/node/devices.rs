@@ -8,7 +8,7 @@ use prism_libvirt::ops::flags as op;
 use serde::Deserialize;
 use uuid::Uuid;
 
-use super::{Node, NodeError, Result, VmView, domain_ref};
+use super::{HotplugResult, Node, NodeError, Result, VmView, domain_ref};
 use crate::render;
 use crate::spec::{DiskDevice, DiskSpec, NicNetwork, NicSpec, VmSpec, random_mac, valid_ifname};
 
@@ -98,7 +98,7 @@ impl Node {
     }
 
     /// Persists `spec` and, when the VM runs, applies `live` to it.
-    async fn change_devices<F, Fut>(
+    pub(super) async fn change_devices<F, Fut>(
         &self,
         old: &VmSpec,
         mut spec: VmSpec,
@@ -113,20 +113,30 @@ impl Node {
         spec.assign_targets();
         self.define(&c, &spec).await?;
         self.put_spec(&spec, Some(old.generation)).await?;
+        let mut result = HotplugResult {
+            applied: true,
+            restart_required: false,
+            error: None,
+        };
         if self.runtime(spec.id).state.is_active() {
-            let applied = match live(c, domain_ref(&spec)).await {
-                Ok(done) => done,
+            match live(c, domain_ref(&spec)).await {
+                Ok(true) => {}
+                Ok(false) => result.applied = false,
                 Err(e) => {
                     tracing::warn!(vm = %spec.name, "live device change failed: {e}");
-                    false
+                    result.applied = false;
+                    result.error = Some(e.to_string());
                 }
-            };
-            if !applied {
+            }
+            if !result.applied {
+                result.restart_required = true;
                 self.update_runtime(spec.id, |rt| rt.pending_restart = true);
             }
         }
         self.refresh(&spec).await;
-        Ok(self.vm_view(spec))
+        let mut view = self.vm_view(spec);
+        view.hotplug = Some(result);
+        Ok(view)
     }
 
     /// Makes an archive file available as a volume in `pool`, fetching it
@@ -354,6 +364,9 @@ impl Node {
             && !valid_ifname(bridge)
         {
             return Err(NodeError::Invalid("invalid bridge name".into()));
+        }
+        if let NicNetwork::User { forwards } = &req.network {
+            crate::spec::validate_forwards(forwards).map_err(NodeError::Invalid)?;
         }
         let mac = match req.mac {
             Some(m) if valid_mac(&m) => m.to_ascii_lowercase(),

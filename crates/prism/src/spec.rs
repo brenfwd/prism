@@ -139,8 +139,12 @@ pub struct NicSpec {
 pub enum NicNetwork {
     /// An existing host bridge (host bridging).
     Bridge { bridge: String },
-    /// QEMU user-mode networking; no host setup needed.
-    User,
+    /// User-mode networking (passt); no host setup needed.
+    User {
+        /// Host ports forwarded into the guest.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        forwards: Vec<PortForward>,
+    },
     /// A Prism network (switch).
     Network {
         network: Uuid,
@@ -153,7 +157,69 @@ pub enum NicNetwork {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Proto {
+    Tcp,
+    Udp,
+}
+
+impl Proto {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+}
+
+/// One host port forwarded to a guest port on a user-mode NIC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortForward {
+    pub proto: Proto,
+    /// Host address to listen on; loopback when absent.
+    #[serde(default)]
+    pub host_addr: Option<std::net::IpAddr>,
+    pub host_port: u16,
+    pub guest_port: u16,
+}
+
+impl PortForward {
+    /// The address actually bound on the host.
+    pub fn listen_addr(&self) -> std::net::IpAddr {
+        self.host_addr
+            .unwrap_or(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST))
+    }
+}
+
+/// Checks a NIC's forwards: ports in range, no duplicate listeners.
+pub fn validate_forwards(forwards: &[PortForward]) -> Result<(), String> {
+    for (i, f) in forwards.iter().enumerate() {
+        if f.host_port == 0 || f.guest_port == 0 {
+            return Err("ports must be 1..=65535".into());
+        }
+        if forwards[..i].iter().any(|g| {
+            g.proto == f.proto && g.host_port == f.host_port && g.listen_addr() == f.listen_addr()
+        }) {
+            return Err(format!(
+                "{}/{} is forwarded twice",
+                f.proto.as_str(),
+                f.host_port
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl NicNetwork {
+    /// A user-mode NIC without forwards.
+    pub fn user() -> Self {
+        Self::User {
+            forwards: Vec::new(),
+        }
+    }
+
     /// The Prism network this NIC is on, if any.
     pub fn network_id(&self) -> Option<Uuid> {
         match self {

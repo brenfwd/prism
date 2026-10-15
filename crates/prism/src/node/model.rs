@@ -95,6 +95,22 @@ pub struct VmView {
     #[serde(flatten)]
     pub spec: VmSpec,
     pub status: VmRuntime,
+    /// How the device change that produced this view reached the running
+    /// guest; absent for views not returned by a device change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hotplug: Option<HotplugResult>,
+}
+
+/// Whether one device change was applied live or waits for a restart.
+#[derive(Debug, Clone, Serialize)]
+pub struct HotplugResult {
+    /// Applied to the running guest (or the VM is not running).
+    pub applied: bool,
+    /// The guest still needs a restart to see the change.
+    pub restart_required: bool,
+    /// Why the live change did not apply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]

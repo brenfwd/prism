@@ -187,8 +187,9 @@ impl Node {
         Ok(self
             .tasks
             .spawn("snapshot.create", resource, move |ctx| async move {
-                ctx.progress(None, format!("creating snapshot {name}"));
-                node.do_create_snapshot(&spec, &name, &req).await?;
+                ctx.progress(Some(0.05), format!("preparing snapshot {name}"));
+                node.do_create_snapshot(&spec, &name, &req, &ctx).await?;
+                ctx.progress(Some(1.0), format!("snapshot {name} created"));
                 Ok(serde_json::json!({ "name": name }))
             }))
     }
@@ -198,6 +199,7 @@ impl Node {
         spec: &VmSpec,
         name: &str,
         req: &CreateSnapshot,
+        ctx: &crate::tasks::TaskCtx,
     ) -> Result<()> {
         let _guard = self.ops.lock().await;
         let c = self.client()?;
@@ -255,6 +257,14 @@ impl Node {
         }
         xml.push_str("  </disks>\n</domainsnapshot>\n");
 
+        ctx.progress(
+            Some(0.2),
+            if memory_file.is_some() {
+                "saving memory and disks"
+            } else {
+                "freezing disks into overlays"
+            },
+        );
         let mut fl = op::SNAPSHOT_CREATE_ATOMIC;
         if memory_file.is_some() {
             fl |= op::SNAPSHOT_CREATE_LIVE;
@@ -269,11 +279,13 @@ impl Node {
             // Quiescing needs a cooperative agent; fall back to crash-consistent.
             Err(e) if fl & op::SNAPSHOT_CREATE_QUIESCE != 0 => {
                 tracing::warn!(vm = %spec.name, "quiesced snapshot failed ({e}); retrying without");
+                ctx.progress(Some(0.4), "guest agent could not quiesce; retrying");
                 c.snapshot_create(&dom, &xml, fl & !op::SNAPSHOT_CREATE_QUIESCE)
                     .await?;
             }
             Err(e) => return Err(e.into()),
         }
+        ctx.progress(Some(0.85), "updating disk chains");
         tracing::info!(vm = %spec.name, snapshot = name, "snapshot created");
         self.sync_disk_chains(spec.id).await
     }

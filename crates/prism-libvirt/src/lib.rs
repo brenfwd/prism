@@ -14,7 +14,7 @@ pub mod xdr;
 
 pub use client::{Client, Stream, StreamReader, StreamWriter};
 pub use events::{BlockJobStatus, DomainEvent};
-pub use ops::{BlockInfo, BlockJobInfo, DomainChild};
+pub use ops::{AddressSource, BlockInfo, BlockJobInfo, DomainChild, GuestInterface, InterfaceAddr};
 pub use proto::{Domain, DomainInfo, DomainState, LifecycleEvent, NodeInfo, RemoteError};
 pub use typed::{Params, TypedParam, TypedValue};
 

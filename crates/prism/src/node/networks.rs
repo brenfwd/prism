@@ -158,7 +158,7 @@ impl Node {
                 .unwrap_or_default()
                 .into_iter()
                 .find(|n| n.name == DEFAULT_NETWORK)
-                .map_or(NicNetwork::User, |n| NicNetwork::Network {
+                .map_or_else(NicNetwork::user, |n| NicNetwork::Network {
                     network: n.id,
                     ipv4: None,
                     egress: None,

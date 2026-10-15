@@ -121,8 +121,22 @@ pub fn nic_xml(
                 .ok_or_else(|| format!("unknown network {network}"))?;
             tap(w, bridge);
         }
-        NicNetwork::User => {
+        NicNetwork::User { forwards } => {
             let _ = writeln!(w, "{indent}<interface type='user'>");
+            if !forwards.is_empty() {
+                // Only the passt backend can forward ports.
+                let _ = writeln!(w, "{indent}  <backend type='passt'/>");
+                for f in forwards {
+                    let _ = writeln!(
+                        w,
+                        "{indent}  <portForward proto='{}' address='{}'><range start='{}' to='{}'/></portForward>",
+                        f.proto.as_str(),
+                        f.listen_addr(),
+                        f.host_port,
+                        f.guest_port
+                    );
+                }
+            }
         }
     }
     let _ = writeln!(w, "{indent}  <mac address='{}'/>", esc(&nic.mac));

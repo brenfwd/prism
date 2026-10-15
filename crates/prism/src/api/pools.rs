@@ -5,13 +5,13 @@ use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use serde::Deserialize;
 
 use super::{ApiError, AppState, Json, check_node};
 use crate::events::Op;
-use crate::node::Node;
 use crate::node::NodeError;
+use crate::node::{DownloadReq, Node};
 use crate::state::{Command, PoolDoc};
 use crate::storage::{Pool, PoolInfo, Volume};
 
@@ -30,6 +30,59 @@ pub fn routes() -> Router<AppState> {
                 .get(volume)
                 .delete(delete_volume),
         )
+        .route("/nodes/{node}/pools/{pool}/downloads", post(download))
+        .route(
+            "/nodes/{node}/pools/{pool}/volumes/{volume}/users",
+            get(volume_users),
+        )
+}
+
+/// Announces a volume change; `volume` is the full record on upsert and
+/// just the name on delete.
+fn publish_volume(node: &Node, pool: &str, name: &str, volume: Option<&Volume>) {
+    node.bus.publish(
+        "volume",
+        format!("/nodes/{}/pools/{pool}/volumes/{name}", node.id),
+        if volume.is_some() {
+            Op::Upsert
+        } else {
+            Op::Delete
+        },
+        serde_json::json!({ "pool": pool, "name": name, "volume": volume }),
+    );
+}
+
+fn publish_pool_removed(node: &Node, pool: &str) {
+    node.bus.publish(
+        "pool",
+        format!("/nodes/{}/pools/{pool}", node.id),
+        Op::Delete,
+        serde_json::json!({ "name": pool }),
+    );
+}
+
+/// Fetches a URL into the pool as a volume; the task reports progress.
+async fn download(
+    State(node): State<AppState>,
+    Path((n, pool)): Path<(String, String)>,
+    Json(req): Json<DownloadReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    check_node(&node, &n)?;
+    let task = node.download_volume(&pool, req)?;
+    let location = format!("/api/v1/tasks/{}", task.id);
+    Ok((
+        StatusCode::ACCEPTED,
+        [(axum::http::header::LOCATION, location)],
+        axum::Json(task),
+    ))
+}
+
+async fn volume_users(
+    State(node): State<AppState>,
+    Path((n, pool, volume)): Path<(String, String, String)>,
+) -> Result<axum::Json<Vec<String>>, ApiError> {
+    check_node(&node, &n)?;
+    Ok(axum::Json(node.volume_users(&pool, &volume)?))
 }
 
 fn publish_pool(node: &Node, pool: &str, op: Op) {
@@ -95,6 +148,7 @@ async fn create(
     let pool = Pool::open(&req.name, &path, &req.format, false)?;
     let info = pool.info();
     node.storage.insert(pool);
+    publish_pool(&node, &req.name, Op::Upsert);
     node.state
         .apply(Command::PutPool {
             pool: PoolDoc {
@@ -139,6 +193,7 @@ async fn remove(
         .await
         .map_err(NodeError::from)?;
     node.storage.remove(&pool);
+    publish_pool_removed(&node, &pool);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -192,6 +247,7 @@ async fn create_volume(
         )
         .await?;
     publish_pool(&node, &pool, Op::Upsert);
+    publish_volume(&node, &pool, &v.name, Some(&v));
     Ok((StatusCode::CREATED, axum::Json(v)))
 }
 
@@ -206,6 +262,7 @@ async fn upload(
     let v = p.upload(&volume, body.into_data_stream()).await?;
     tracing::info!(pool = %pool, volume = %volume, bytes = v.size_bytes, "upload complete");
     publish_pool(&node, &pool, Op::Upsert);
+    publish_volume(&node, &pool, &volume, Some(&v));
     Ok((StatusCode::CREATED, axum::Json(v)))
 }
 
@@ -224,5 +281,6 @@ async fn delete_volume(
     }
     node.storage.get(&pool)?.delete_volume(&volume)?;
     publish_pool(&node, &pool, Op::Upsert);
+    publish_volume(&node, &pool, &volume, None);
     Ok(StatusCode::NO_CONTENT)
 }

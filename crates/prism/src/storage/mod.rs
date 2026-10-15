@@ -1,6 +1,7 @@
 //! Local `dir` pools. Every file operation is confined beneath the pool's
 //! directory fd with `openat2(RESOLVE_BENEATH | NO_SYMLINKS | NO_MAGICLINKS | NO_XDEV)`.
 
+mod download;
 mod image;
 mod seed;
 mod upload;

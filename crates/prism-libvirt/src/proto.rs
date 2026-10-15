@@ -142,6 +142,7 @@ pub mod procs {
     pub const DOMAIN_SET_VCPUS_FLAGS: u32 = 199;
     pub const DOMAIN_BLOCK_JOB_ABORT: u32 = 237;
     pub const DOMAIN_GET_BLOCK_JOB_INFO: u32 = 238;
+    pub const DOMAIN_INTERFACE_ADDRESSES: u32 = 353;
     pub const DOMAIN_BLOCK_RESIZE: u32 = 251;
     pub const DOMAIN_LIST_ALL_SNAPSHOTS: u32 = 274;
     pub const DOMAIN_GET_JOB_STATS: u32 = 298;

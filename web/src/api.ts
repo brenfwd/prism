@@ -34,9 +34,42 @@ export type BalloonMode = "off" | "manual" | "auto";
 export type CpuModel = "host_model" | "host_passthrough";
 export type Firmware = "bios" | "uefi";
 export type NicNetwork =
-  | { type: "user" }
+  | { type: "user"; forwards?: PortForward[] }
   | { type: "bridge"; bridge: string }
   | { type: "network"; network: string; ipv4?: string | null; egress?: string | null };
+
+export interface PortForward {
+  proto: "tcp" | "udp";
+  /** Host address to listen on; loopback when absent. */
+  host_addr?: string | null;
+  host_port: number;
+  guest_port: number;
+}
+
+/** How a device change reached the running guest. */
+export interface HotplugResult {
+  applied: boolean;
+  restart_required: boolean;
+  error?: string;
+}
+
+export interface GuestNic {
+  name: string;
+  mac: string | null;
+  addrs: { addr: string; prefix: number; ipv6: boolean }[];
+}
+
+export interface GuestNetwork {
+  agent: boolean;
+  interfaces: GuestNic[];
+}
+
+export interface HostBridge {
+  name: string;
+  up: boolean;
+  prism: boolean;
+  ports: string[];
+}
 
 export interface NetworkInfo {
   id: string;
@@ -88,6 +121,8 @@ export interface Vm {
   /** `user_data` is a `blake3:` fingerprint; the API never returns secrets. */
   cloud_init?: { user_data: string; network_config?: string | null } | null;
   status: VmRuntime;
+  /** Present only on responses to device changes. */
+  hotplug?: HotplugResult;
 }
 
 export type PressureLevel = "green" | "yellow" | "red";
@@ -233,6 +268,14 @@ export const api = {
   deleteVm: (id: string, deleteDisks: boolean) =>
     request<void>("DELETE", `/vms/${id}?delete_disks=${deleteDisks}`),
   action: (id: string, action: VmAction) => request<Vm>("POST", `/vms/${id}/actions/${action}`),
+
+  cloneVm: (id: string, name: string) => request<Task>("POST", `/vms/${id}/clone`, { name }),
+  guestNetwork: (id: string) => request<GuestNetwork>("GET", `/vms/${id}/guest/network`),
+  setForwards: (id: string, nic: string, forwards: PortForward[]) =>
+    request<Vm>("PUT", `/vms/${id}/nics/${nic}/forwards`, forwards),
+  bridges: () => request<HostBridge[]>("GET", "/nodes/local/bridges"),
+  downloadVolume: (pool: string, url: string, name?: string) =>
+    request<Task>("POST", `/nodes/local/pools/${enc(pool)}/downloads`, { url, name: name || undefined }),
 
   networks: () => request<NetworkInfo[]>("GET", "/networks"),
   createNetwork: (req: { name?: string; kind?: "nat" | "isolated"; subnet?: string; dhcp?: boolean } = {}) =>

@@ -13,6 +13,10 @@ export function taskLabel(t: Pick<Task, "kind" | "result">): { running: string; 
       return { running: "Reverting to snapshot", done: "Reverted to snapshot", failed: "Revert failed" };
     case "snapshot.delete":
       return { running: "Deleting snapshot", done: "Snapshot deleted", failed: "Couldn't delete snapshot" };
+    case "vm.clone":
+      return { running: "Cloning machine", done: "Clone ready", failed: "Clone failed" };
+    case "volume.download":
+      return { running: "Downloading", done: name ? `${name} downloaded` : "Download finished", failed: "Download failed" };
     default: {
       const k = t.kind.replace(/[._]/g, " ");
       return { running: k[0].toUpperCase() + k.slice(1), done: `${k} finished`, failed: `${k} failed` };
@@ -44,6 +48,8 @@ export function applyTask(qc: QueryClient, t: Task) {
     return;
   }
   if (vmId && t.kind.startsWith("snapshot.")) qc.invalidateQueries({ queryKey: ["snapshots", vmId] });
+  if (t.kind === "volume.download") qc.invalidateQueries({ queryKey: ["volumes"] });
+  if (t.kind === "vm.clone") qc.invalidateQueries({ queryKey: ["vms"] });
   if (!seenRunning.delete(t.id)) return;
   const vm = vmId ? qc.getQueryData<Vm[]>(["vms"])?.find((v) => v.id === vmId) : undefined;
   const label = taskLabel(t);

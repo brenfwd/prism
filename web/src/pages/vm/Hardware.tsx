@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { api, humanError, type Disk, type Nic, type Vm } from "../../api";
 import { putVm } from "../../events";
@@ -13,19 +13,22 @@ import {
   Badge, Button, Card, Checkbox, EmptyState, ErrorText, Field, IconButton, Input, Menu, Modal, Segmented, Select, cx,
 } from "../../components/ui";
 import { isOn } from "./VmPage";
+import { Forwards, NicSub } from "./Nics";
 
 /** Applies a device change and explains what happened. */
-async function deviceChange(qc: QueryClient, vm: Vm, what: string, run: () => Promise<Vm>): Promise<boolean> {
+async function deviceChange(qc: QueryClient, _vm: Vm, what: string, run: () => Promise<Vm>): Promise<boolean> {
   try {
     const view = await run();
     putVm(qc, view);
-    if (!isOn(view)) toast({ tone: "success", title: `${what}` });
-    else if (view.status.pending_restart && !vm.status.pending_restart)
-      toast({ tone: "warning", title: `${what}: saved for the next power cycle`, body: "The running machine couldn't take this change live. It applies after it powers off and starts again." });
-    else if (view.status.pending_restart)
-      // Other changes were already waiting, so we can't tell whether this one applied live.
-      toast({ tone: "success", title: what, body: "If the guest doesn't see it yet, it will after the next power cycle." });
-    else toast({ tone: "success", title: `${what} live`, body: "The running guest sees the change now." });
+    const h = view.hotplug;
+    if (!isOn(view) || !h) toast({ tone: "success", title: what });
+    else if (h.applied) toast({ tone: "success", title: `${what} live`, body: "The running guest sees the change now." });
+    else
+      toast({
+        tone: "warning",
+        title: `${what}: saved for the next power cycle`,
+        body: h.error ? `The running machine refused it live (${h.error}). It applies after it powers off and starts again.` : "The running machine couldn't take this change live. It applies after it powers off and starts again.",
+      });
     return true;
   } catch (e) {
     toast({ tone: "error", title: `${what} failed`, body: humanError(e) });
@@ -39,7 +42,7 @@ export function HardwareTab({ vm }: { vm: Vm }) {
   const size = (d: Disk) => volumes.find((v) => v.pool === d.pool && v.name === d.volume);
   const disks = vm.disks.filter((d) => d.device === "disk");
   const cdroms = vm.disks.filter((d) => d.device === "cdrom");
-  const [modal, setModal] = useState<null | { kind: "addDisk" } | { kind: "addNic" } | { kind: "grow"; disk: Disk } | { kind: "insert"; disk: Disk } | { kind: "detach"; disk: Disk }>(null);
+  const [modal, setModal] = useState<null | { kind: "addDisk" } | { kind: "addNic" } | { kind: "grow"; disk: Disk } | { kind: "insert"; disk: Disk } | { kind: "detach"; disk: Disk } | { kind: "forwards"; nic: Nic }>(null);
   const qc = useQueryClient();
   const close = () => setModal(null);
 
@@ -159,9 +162,11 @@ export function HardwareTab({ vm }: { vm: Vm }) {
                     key={n.id}
                     icon="network"
                     title={n.network.type === "bridge" ? <>Bridge <span className="font-mono">{n.network.bridge}</span></> : nicLabel(n.network, nets)}
-                    sub={<span className="font-mono">{n.mac}</span>}
+                    sub={<NicSub vm={vm} nic={n} />}
                     badge={n.boot_order != null ? <Badge tone="indigo">boot #{n.boot_order}</Badge> : undefined}
                     actions={
+                      <>
+                      {n.network.type === "user" && <IconButton icon="link" label="Port forwards" size="xs" onClick={() => setModal({ kind: "forwards", nic: n })} />}
                       <IconButton
                         icon="trash"
                         label="Remove adapter"
@@ -171,6 +176,7 @@ export function HardwareTab({ vm }: { vm: Vm }) {
                             void deviceChange(qc, vm, "Network adapter removed", () => api.removeNic(vm.id, n.id));
                         }}
                       />
+                      </>
                     }
                   />
                 ))}
@@ -182,6 +188,7 @@ export function HardwareTab({ vm }: { vm: Vm }) {
       </div>
 
       {modal?.kind === "addDisk" && <AddDisk vm={vm} onClose={close} />}
+      {modal?.kind === "forwards" && <Forwards vm={vm} nic={modal.nic} onClose={close} />}
       {modal?.kind === "addNic" && <AddNic vm={vm} onClose={close} />}
       {modal?.kind === "grow" && <Grow vm={vm} disk={modal.disk} current={size(modal.disk)?.size_bytes} onClose={close} />}
       {modal?.kind === "insert" && <Insert vm={vm} disk={modal.disk} onClose={close} />}
@@ -417,7 +424,10 @@ function AddNic({ vm, onClose }: { vm: Vm; onClose: () => void }) {
   const [type, setType] = useState<"network" | "user" | "bridge">("network");
   const [netId, setNetId] = useState<string | undefined>();
   const chosen = netId ?? nets[0]?.id;
-  const [bridge, setBridge] = useState("br0");
+  const bridges = useQuery({ queryKey: ["bridges"], queryFn: api.bridges }).data ?? [];
+  const [bridgeSel, setBridgeSel] = useState<string | undefined>();
+  const bridge = bridgeSel ?? bridges.find((b) => !b.prism)?.name ?? bridges[0]?.name ?? "br0";
+  const setBridge = setBridgeSel;
   const [mac, setMac] = useState("");
   const macOk = !mac || /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(mac);
   const m = useMutation({
@@ -452,7 +462,13 @@ function AddNic({ vm, onClose }: { vm: Vm; onClose: () => void }) {
         </p>
         {type === "bridge" && (
           <Field label="Host bridge" htmlFor="nic-br">
-            <Input id="nic-br" value={bridge} onChange={(e) => setBridge(e.target.value)} className="font-mono" autoFocus />
+            {bridges.length > 0 ? (
+              <Select id="nic-br" value={bridge} onChange={(e) => setBridge(e.target.value)}>
+                {bridges.map((b) => <option key={b.name} value={b.name}>{b.name}{b.prism ? " (Prism network)" : ""}{b.up ? "" : " (down)"}{b.ports.length ? `, ${b.ports.length} port${b.ports.length === 1 ? "" : "s"}` : ""}</option>)}
+              </Select>
+            ) : (
+              <Input id="nic-br" value={bridge} onChange={(e) => setBridge(e.target.value)} className="font-mono" autoFocus placeholder="No bridges found; type a name" />
+            )}
           </Field>
         )}
         <Field label="MAC address" htmlFor="nic-mac" hint="Leave empty to pick a random one." error={macOk ? undefined : "Format: 52:54:00:12:34:56"}>

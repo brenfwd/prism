@@ -47,6 +47,33 @@ pub struct BlockInfo {
     pub physical: u64,
 }
 
+/// Where `interface_addresses` learns addresses from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressSource {
+    /// The hypervisor's DHCP leases.
+    Lease = 0,
+    /// The QEMU guest agent.
+    Agent = 1,
+    /// The host ARP table.
+    Arp = 2,
+}
+
+/// One address of a guest interface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceAddr {
+    pub ipv6: bool,
+    pub addr: String,
+    pub prefix: u32,
+}
+
+/// A guest network interface with its addresses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestInterface {
+    pub name: String,
+    pub hwaddr: Option<String>,
+    pub addrs: Vec<InterfaceAddr>,
+}
+
 /// Flag values for the procedures in this module.
 pub mod flags {
     pub const AFFECT_LIVE: u32 = 1;
@@ -116,6 +143,34 @@ impl Client {
         self.dom_xml_flags(procs::DOMAIN_DETACH_DEVICE_FLAGS, dom, xml, flags)
             .await
             .map(drop)
+    }
+
+    /// The guest's interfaces and addresses from `source`.
+    pub async fn interface_addresses(
+        &self,
+        dom: &Domain,
+        source: AddressSource,
+    ) -> Result<Vec<GuestInterface>, Error> {
+        let r = self
+            .call_with(procs::DOMAIN_INTERFACE_ADDRESSES, |e| {
+                dom.encode(e);
+                e.u32(source as u32).u32(0);
+            })
+            .await?;
+        let mut d = Decoder::new(&r);
+        d.array(256, |d| {
+            Ok(GuestInterface {
+                name: d.string()?,
+                hwaddr: d.opt_string()?,
+                addrs: d.array(2048, |d| {
+                    Ok(InterfaceAddr {
+                        ipv6: d.i32()? == 1,
+                        addr: d.string()?,
+                        prefix: d.u32()?,
+                    })
+                })?,
+            })
+        })
     }
 
     /// Changes a device in place, for example CD-ROM media.

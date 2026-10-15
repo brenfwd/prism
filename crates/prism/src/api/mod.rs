@@ -9,6 +9,7 @@ mod host;
 mod hygiene;
 mod internal;
 mod networks;
+mod openapi;
 mod pools;
 mod sse;
 mod tasks;
@@ -45,6 +46,7 @@ pub fn router(node: AppState) -> Router {
         .merge(archive::routes())
         .merge(archive_ops::routes())
         .route("/events", get(sse::events))
+        .route("/openapi.json", get(openapi::serve))
         .fallback(|| async { ApiError::not_found("no such endpoint") })
         .layer(axum::middleware::from_fn_with_state(
             Arc::clone(&node),

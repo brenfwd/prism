@@ -14,6 +14,19 @@ pub const TOMBSTONES: &str = "tombstone";
 /// Cluster feature level; peers must be within one of each other.
 pub const FEATURE_LEVEL: u32 = 1;
 
+/// Rolling-upgrade rule: nodes may differ by at most one feature level.
+pub fn levels_compatible(a: u32, b: u32) -> bool {
+    a.abs_diff(b) <= 1
+}
+
+/// A feature gated on `required` is usable once the cluster level (the
+/// minimum all nodes support, raised explicitly) has reached it and this
+/// node supports it too.
+#[cfg_attr(not(test), allow(dead_code))] // gate for future Command variants
+pub fn feature_enabled(cluster_level: u32, required: u32) -> bool {
+    cluster_level >= required && FEATURE_LEVEL >= required
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClusterMode {
@@ -137,5 +150,18 @@ mod tests {
         };
         assert_eq!(c.mesh_addr(1).to_string(), "fd12:3456:789a:1::1");
         assert_eq!(c.mesh_addr(0x1_0002).to_string(), "fd12:3456:789a:1::1:2");
+    }
+}
+
+#[cfg(test)]
+mod level_tests {
+    use super::*;
+
+    #[test]
+    fn skew_rules() {
+        assert!(levels_compatible(1, 2));
+        assert!(!levels_compatible(1, 3));
+        assert!(feature_enabled(1, 1));
+        assert!(!feature_enabled(1, 2));
     }
 }

@@ -18,7 +18,7 @@ use super::{
 use crate::cluster::blob::{self, Invite, Reply, Sponsor};
 use crate::cluster::mesh::DEFAULT_MTU;
 use crate::cluster::model::{
-    ClusterDoc, ClusterMode, FEATURE_LEVEL, InviteDoc, MemberDoc, MemberState,
+    ClusterDoc, ClusterMode, FEATURE_LEVEL, InviteDoc, MemberDoc, MemberState, levels_compatible,
 };
 use crate::spec::VmSpec;
 use crate::state::{Command, PoolDoc, StateError};
@@ -265,7 +265,7 @@ impl Cluster {
                 "cluster_mismatch: this reply belongs to a different cluster".into(),
             ));
         }
-        if reply.feature_level.abs_diff(FEATURE_LEVEL) > 1 {
+        if !levels_compatible(reply.feature_level, FEATURE_LEVEL) {
             return Err(ClusterOpError::Invalid(format!(
                 "version_skew: the node runs prism {} (feature level {}); upgrade one side",
                 reply.version, reply.feature_level
@@ -329,7 +329,7 @@ impl Cluster {
                 "the invite has expired by this node's clock; the cluster decides"
             );
         }
-        if invite.feature_level.abs_diff(FEATURE_LEVEL) > 1 {
+        if !levels_compatible(invite.feature_level, FEATURE_LEVEL) {
             return Err(ClusterOpError::Invalid(format!(
                 "version_skew: the cluster runs prism {}; upgrade one side",
                 invite.version

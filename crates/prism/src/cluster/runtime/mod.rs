@@ -129,6 +129,8 @@ pub struct ClusterStatus {
     pub members: Vec<MemberDoc>,
     pub degraded: bool,
     pub pending_join: bool,
+    /// Highest feature level this binary supports.
+    pub supported_feature_level: u32,
 }
 impl Cluster {
     pub fn new(
@@ -298,6 +300,7 @@ impl Cluster {
             members,
             degraded,
             pending_join: self.state.db().meta(META_PENDING)?.is_some(),
+            supported_feature_level: super::model::FEATURE_LEVEL,
         })
     }
 

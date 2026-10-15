@@ -17,3 +17,9 @@ tracing = "0.1.44"
 
 [dev-dependencies]
 tokio = { version = "1.53.3", features = ["full"] }
+
+[build-dependencies]
+prettyplease = "0.2.37"
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+syn = { version = "2.0.119", features = ["full"] }

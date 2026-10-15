@@ -1795,6 +1795,10 @@ name = "prism-libvirt"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

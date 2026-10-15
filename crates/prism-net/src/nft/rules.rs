@@ -198,7 +198,11 @@ pub fn nat_ruleset(rules: &[NatRule], forwards: &[DnatRule]) -> Table {
     // A forwarded connection leaves with this node's address as its source. A
     // guest that migrated here still has the old node as its gateway, so
     // without this the replies would return through the wrong node.
+    let mut seen = std::collections::HashSet::new();
     for f in forwards {
+        if !seen.insert((f.udp, f.guest, f.guest_port)) {
+            continue;
+        }
         let r = Rule::new(Family::Ip).ip_daddr_eq(f.guest);
         c.push(
             if f.udp {

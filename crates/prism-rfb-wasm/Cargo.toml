@@ -1,0 +1,32 @@
+[package]
+name = "prism-rfb-wasm"
+description = "Sans-IO RFB (VNC) client core for Prism's browser console, compiled to WebAssembly"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+miniz_oxide = { version = "0.9.1", default-features = false, features = ["with-alloc"] }
+
+# Mirrors [workspace.lints] except `unsafe_code`, which is `deny` rather than
+# `forbid` so the WebAssembly export module (src/ffi.rs) can allow
+# `#[unsafe(no_mangle)]`. Nothing in this crate uses `unsafe` blocks.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+too_many_lines = "allow"

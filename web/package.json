@@ -6,10 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "typecheck": "tsc"
+    "typecheck": "tsc",
+    "wasm": "cargo build -p prism-rfb-wasm --target wasm32-unknown-unknown --release"
   },
   "dependencies": {
-    "@novnc/novnc": "^1.7.0",
     "@tanstack/react-query": "^5.104.2",
     "@tanstack/react-router": "^1.170.44",
     "@xterm/addon-fit": "^0.11.0",

@@ -1,0 +1,13 @@
+[package]
+name = "prism-iso"
+description = "Minimal ISO 9660 + Joliet image writer (cloud-init NoCloud seeds)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = "2.0.21"

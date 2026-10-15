@@ -70,5 +70,10 @@ fn run(bun: &Path, args: &[&str], dir: &Path, out: &Path) {
         .env("PRISM_WEB_OUT_DIR", out)
         .status()
         .unwrap_or_else(|e| panic!("running {} {}: {e}", bun.display(), args.join(" ")));
-    assert!(status.success(), "{} {} failed: {status}", bun.display(), args.join(" "));
+    assert!(
+        status.success(),
+        "{} {} failed: {status}",
+        bun.display(),
+        args.join(" ")
+    );
 }

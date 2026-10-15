@@ -17,10 +17,7 @@ pub async fn serve(uri: Uri) -> Response {
         _ => match prism_web::get("index.html") {
             Some(f) => (f, "index.html"),
             None => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    "UI assets missing from this build",
-                )
+                return (StatusCode::NOT_FOUND, "UI assets missing from this build")
                     .into_response();
             }
         },

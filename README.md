@@ -115,6 +115,38 @@ Pool directories must support `O_DIRECT` (disks use `cache=none,io=native`), so 
 
 For UI work, run `bun run dev` in `web/` for hot reload. It proxies `/api` to `127.0.0.1:8080`.
 
+## Testbed
+
+`cargo xtask testbed` runs Prism as root inside Ubuntu 26.04 VMs, for testing clustering,
+WireGuard, bridges, VXLAN and nftables. You need membership in the `libvirt` group (it uses
+`qemu:///system`), nested KVM, `ssh`, `ssh-keygen`, `curl` and `sha256sum`. You don't need sudo.
+
+```sh
+cargo xtask testbed up --nodes 3     # pool, networks, image, VMs; waits for cloud-init
+cargo xtask testbed status           # state, IPs, cloud-init and prism.service per node
+cargo xtask testbed ssh 1 -- sudo virsh list
+cargo zigbuild --release --target x86_64-unknown-linux-musl -p prism
+cargo xtask testbed deploy           # install the binary + prism.service on every node
+curl http://<mgmt-ip>:8080/api/v1/nodes
+cargo xtask testbed down             # remove the nodes (--all also removes image, pool and network)
+```
+
+- Each node `prism-tb-N` (hostname `tb-N`) has 4 GiB of RAM, 4 vCPUs with host-passthrough
+  (nested KVM), and a 20 GiB qcow2 overlay on the cloud image. Disks live in the libvirt pool
+  `prism-testbed` (`/var/lib/libvirt/images/prism-testbed`).
+- NIC 1 is on libvirt's `default` NAT network and gets its address from DHCP.
+  NIC 2 is on the isolated network `prism-tb` (no forwarding, no DHCP) with a static
+  address `10.77.0.N/24`, to act as an extra L2 segment.
+- cloud-init comes from a NoCloud seed ISO built by `crates/prism-iso`. It installs
+  QEMU, libvirt, OVMF, wireguard-tools, nftables, iproute2 and bridge-utils, and gives user
+  `ubuntu` passwordless sudo. The password `ubuntu` works for `virsh console` only.
+- The SSH key, the cached image (checked against `SHA256SUMS`) and the generated XML and
+  seeds are kept in `target/testbed/`.
+- `deploy` adds the node's NAT address to `http.listen` and `allowed_hosts` in
+  `/etc/prism/prism.toml`, so the host can reach each node's API on port 8080.
+
+Every subcommand is idempotent. Running `up` again starts stopped nodes and adds missing ones.
+
 ## Checks
 
 ```sh

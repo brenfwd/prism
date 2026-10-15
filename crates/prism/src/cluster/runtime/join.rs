@@ -131,6 +131,7 @@ impl Cluster {
             state: MemberState::Active,
             voter: true,
             version: env!("CARGO_PKG_VERSION").into(),
+            feature_level: crate::cluster::model::FEATURE_LEVEL,
             joined: now(),
         };
         // Wait for this single voter to become leader, then commit.
@@ -299,6 +300,7 @@ impl Cluster {
             state: MemberState::Joining,
             voter: false,
             version: reply.version,
+            feature_level: crate::cluster::model::FEATURE_LEVEL,
             joined: now(),
         };
         self.state

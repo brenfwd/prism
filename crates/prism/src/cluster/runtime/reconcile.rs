@@ -81,6 +81,20 @@ impl Cluster {
                 tracing::info!(member = %m.name, "member is active");
             }
         }
+        // Raise the cluster feature level once every member runs this binary.
+        if let Some(c) = &cluster
+            && c.feature_level < crate::cluster::model::FEATURE_LEVEL
+            && members
+                .iter()
+                .all(|m| m.feature_level >= crate::cluster::model::FEATURE_LEVEL)
+        {
+            self.state
+                .apply(Command::SetFeatureLevel {
+                    level: crate::cluster::model::FEATURE_LEVEL,
+                })
+                .await?;
+            tracing::info!("cluster feature level raised");
+        }
         // Demote removed voters first, then drop them. A removed leader
         // steps down once the new voter set commits; the next leader drops it.
         let plan = membership::plan(&in_raft, &membership.voter_ids().collect(), &members);
@@ -98,6 +112,27 @@ impl Cluster {
         Ok(())
     }
 
+    /// Reports this node's feature level once its binary was upgraded.
+    async fn report_feature_level(&self) {
+        let Ok(members) = self.state.members() else {
+            return;
+        };
+        let level = crate::cluster::model::FEATURE_LEVEL;
+        if members
+            .iter()
+            .any(|m| m.node_id == self.me && m.feature_level < level)
+            && let Err(e) = self
+                .state
+                .apply(Command::SetMemberFeatureLevel {
+                    node_id: self.me,
+                    level,
+                })
+                .await
+        {
+            tracing::debug!("reporting feature level: {e:#}");
+        }
+    }
+
     pub(super) async fn reconcile_loop(self: Arc<Self>) {
         let mut changes = self.state.subscribe();
         loop {
@@ -112,6 +147,7 @@ impl Cluster {
                 }
                 () = tokio::time::sleep(RECONCILE_EVERY) => {}
             }
+            self.report_feature_level().await;
             if let Err(e) = self.reconcile_membership().await {
                 tracing::debug!("membership reconcile: {e:#}");
             }

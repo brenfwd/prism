@@ -85,6 +85,7 @@ mod tests {
             state: MemberState::Active,
             voter,
             version: String::new(),
+            feature_level: 1,
             joined: 0,
         }
     }

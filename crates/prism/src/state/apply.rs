@@ -268,6 +268,21 @@ pub(super) fn apply_command(
             return networks::put_network(d, local, network, *now);
         }
         Command::DeleteNetwork { id, now } => return networks::delete_network(d, *id, *now),
+        Command::SetMemberFeatureLevel { node_id, level } => {
+            let Some(mut m) = d.get::<MemberDoc>(MEMBERS, &node_id.to_string())? else {
+                return Ok(Outcome::NotFound(format!("member {node_id}")));
+            };
+            m.feature_level = *level;
+            d.put(MEMBERS, &node_id.to_string(), &m)?;
+        }
+        Command::SetFeatureLevel { level } => {
+            if let Some(mut c) = d.get::<ClusterDoc>(CLUSTER, CLUSTER_ID)?
+                && *level > c.feature_level
+            {
+                c.feature_level = *level;
+                d.put(CLUSTER, CLUSTER_ID, &c)?;
+            }
+        }
     }
     Ok(Outcome::Ok)
 }

@@ -141,6 +141,7 @@ impl Node {
                         serde_json::Value::Null,
                     );
                 }
+                Command::SetFeatureLevel { .. } | Command::SetMemberFeatureLevel { .. } => {}
             }
         }
     }

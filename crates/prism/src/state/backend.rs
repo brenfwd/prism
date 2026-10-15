@@ -34,14 +34,14 @@ impl prism_cluster::Backend for StateBackend {
         };
         let cmd: Command = match serde_json::from_str(json) {
             Ok(c) => c,
+            // Skipping a command this binary cannot read would silently
+            // diverge from the rest of the cluster: halt the state machine
+            // instead, loudly, until the node is upgraded.
             Err(e) => {
-                // A newer peer's command this binary cannot read: record
-                // progress so the log keeps moving, and report it.
-                tracing::error!("unreadable replicated command (upgrade prism): {e}");
-                s.db.set_meta(APPLIED_META, &meta_json)?;
-                return Ok(serde_json::to_string(&Outcome::Conflict(format!(
-                    "unreadable command: {e}"
-                )))?);
+                tracing::error!(
+                    "unreadable replicated command; halting, upgrade prism on this node: {e}"
+                );
+                anyhow::bail!("unreadable replicated command (upgrade prism): {e}");
             }
         };
         let outcome = s.db.transaction(|d| {

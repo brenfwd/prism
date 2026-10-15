@@ -106,6 +106,31 @@ pub enum Command {
         id: Uuid,
         now: i64,
     },
+    /// Raises the cluster feature level once every member runs a binary
+    /// that supports it. Never lowers it.
+    SetFeatureLevel {
+        level: u32,
+    },
+    /// A member reports the feature level its (upgraded) binary supports.
+    SetMemberFeatureLevel {
+        node_id: Uuid,
+        level: u32,
+    },
+}
+
+impl Command {
+    /// The cluster feature level this command needs. A node that cannot
+    /// read a command must never see it, so commands above the cluster's
+    /// level are refused before they reach the log.
+    pub fn required_level(&self) -> u32 {
+        match self {
+            Self::PutNetwork { .. }
+            | Self::DeleteNetwork { .. }
+            | Self::SetFeatureLevel { .. }
+            | Self::SetMemberFeatureLevel { .. } => 2,
+            _ => 1,
+        }
+    }
 }
 
 /// A command's outcome as it travels through the log.

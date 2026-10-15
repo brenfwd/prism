@@ -136,6 +136,7 @@ impl State {
     /// Applies a command: directly when standalone, through raft when
     /// clustered (returning once the local state reflects it).
     pub async fn apply(&self, cmd: Command) -> Result<(), StateError> {
+        self.check_level(&cmd)?;
         if let Some(p) = self.proposer.get() {
             let json = serde_json::to_string(&cmd).map_err(anyhow::Error::from)?;
             let outcome: Outcome =
@@ -153,6 +154,28 @@ impl State {
             let _ = self.changes.send(Change::Applied(Arc::new(cmd)));
         }
         outcome.into_result()
+    }
+
+    /// Refuses commands newer than the cluster's feature level, so that
+    /// nodes still on an older level never receive them.
+    fn check_level(&self, cmd: &Command) -> Result<(), StateError> {
+        let need = cmd.required_level();
+        if matches!(
+            cmd,
+            Command::SetFeatureLevel { .. } | Command::SetMemberFeatureLevel { .. }
+        ) {
+            return Ok(());
+        }
+        let level = self
+            .cluster()?
+            .map_or(crate::cluster::model::FEATURE_LEVEL, |c| c.feature_level);
+        if !crate::cluster::model::feature_enabled(level, need) {
+            return Err(StateError::Conflict(format!(
+                "the cluster is at feature level {level} but this needs {need}: \
+                 upgrade every node to the same prism version, and the level rises automatically"
+            )));
+        }
+        Ok(())
     }
 
     /// The raft state machine backend over this state.

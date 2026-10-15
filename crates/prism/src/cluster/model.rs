@@ -12,7 +12,8 @@ pub const INVITES: &str = "invite";
 pub const TOMBSTONES: &str = "tombstone";
 
 /// Cluster feature level; peers must be within one of each other.
-pub const FEATURE_LEVEL: u32 = 1;
+/// Level 2 adds networks (`PutNetwork`, `DeleteNetwork`, `SetFeatureLevel`).
+pub const FEATURE_LEVEL: u32 = 2;
 
 /// Rolling-upgrade rule: nodes may differ by at most one feature level.
 pub fn levels_compatible(a: u32, b: u32) -> bool {
@@ -22,7 +23,6 @@ pub fn levels_compatible(a: u32, b: u32) -> bool {
 /// A feature gated on `required` is usable once the cluster level (the
 /// minimum all nodes support, raised explicitly) has reached it and this
 /// node supports it too.
-#[cfg_attr(not(test), allow(dead_code))] // gate for future Command variants
 pub fn feature_enabled(cluster_level: u32, required: u32) -> bool {
     cluster_level >= required && FEATURE_LEVEL >= required
 }
@@ -90,7 +90,15 @@ pub struct MemberDoc {
     /// Votes in raft (the hub, or a consensus voter).
     pub voter: bool,
     pub version: String,
+    /// Highest feature level this member's binary supports; documents from
+    /// before levels were tracked read as 1.
+    #[serde(default = "one")]
+    pub feature_level: u32,
     pub joined: i64,
+}
+
+fn one() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

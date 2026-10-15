@@ -86,6 +86,7 @@ fn member(c: &ClusterDoc, n: u128, raft_id: u64) -> MemberDoc {
         state: MemberState::Joining,
         voter: false,
         version: "0.1.0".into(),
+        feature_level: 1,
         joined: 0,
     }
 }
@@ -247,5 +248,29 @@ fn backend_records_progress_for_rejected_commands_and_restores() {
             .unwrap()
             .index,
         6
+    );
+}
+
+#[test]
+fn backend_halts_on_unreadable_commands() {
+    let s = state();
+    let b = s.backend();
+    let meta = prism_cluster::AppliedMeta::default();
+    let err = b
+        .apply(Some(r#"{"op":"from_the_future"}"#), &meta)
+        .unwrap_err();
+    assert!(err.to_string().contains("unreadable"));
+}
+
+#[test]
+fn level_two_commands_are_refused_at_level_one() {
+    assert_eq!(Command::DeleteVm { id: Uuid::nil() }.required_level(), 1);
+    assert_eq!(
+        Command::DeleteNetwork {
+            id: Uuid::nil(),
+            now: 0
+        }
+        .required_level(),
+        2
     );
 }

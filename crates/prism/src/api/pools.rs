@@ -148,6 +148,7 @@ async fn create(
     let pool = Pool::open(&req.name, &path, &req.format, false)?;
     let info = pool.info();
     node.storage.insert(pool);
+    node.sync_pool_apparmor();
     publish_pool(&node, &req.name, Op::Upsert);
     node.state
         .apply(Command::PutPool {
@@ -193,6 +194,7 @@ async fn remove(
         .await
         .map_err(NodeError::from)?;
     node.storage.remove(&pool);
+    node.sync_pool_apparmor();
     publish_pool_removed(&node, &pool);
     Ok(StatusCode::NO_CONTENT)
 }

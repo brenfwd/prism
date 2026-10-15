@@ -350,6 +350,12 @@ impl Node {
         }
     }
 
+    /// Re-grants `virt-aa-helper` read access to every pool directory.
+    pub(crate) fn sync_pool_apparmor(&self) {
+        let dirs: Vec<_> = self.storage.list().iter().map(|p| p.path.clone()).collect();
+        apparmor::allow_pool_dirs(&dirs);
+    }
+
     pub(crate) async fn define(&self, c: &Client, spec: &VmSpec) -> Result<Domain> {
         let seed = self.seed_iso(spec)?;
         let pool = |p: &str| self.pool_loc(p);

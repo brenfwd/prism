@@ -100,6 +100,7 @@ impl Node {
             memory_kib: n.memory_kib,
         };
         apparmor::allow_migration_sockets();
+        self.sync_pool_apparmor();
         self.libvirt.send_replace(Some(c.clone()));
 
         let node = Arc::clone(self);

@@ -215,6 +215,8 @@ export interface Snapshot {
   parent: string | null;
   memory: boolean;
   current: boolean;
+  /** Memory revert after a move: needs explicit confirmation. */
+  confirm_required?: boolean;
 }
 
 export type TaskState = "running" | "succeeded" | "failed" | "cancelled";
@@ -357,7 +359,8 @@ export const api = {
   createSnapshot: (id: string, req: { name?: string; description: string; memory: boolean }) =>
     request<Task>("POST", `/vms/${id}/snapshots`, req),
   deleteSnapshot: (id: string, name: string) => request<Task>("DELETE", `/vms/${id}/snapshots/${enc(name)}`),
-  revertSnapshot: (id: string, name: string) => request<Task>("POST", `/vms/${id}/snapshots/${enc(name)}/revert`),
+  revertSnapshot: (id: string, name: string, confirmMemory = false) =>
+    request<Task>("POST", `/vms/${id}/snapshots/${enc(name)}/revert${confirmMemory ? "?confirm_memory=true" : ""}`),
 
   tasks: () => request<Task[]>("GET", "/tasks?limit=100"),
   cancelTask: (id: string) => request<void>("POST", `/tasks/${id}/cancel`),

@@ -47,6 +47,10 @@ pub struct SnapshotView {
     pub parent: Option<String>,
     pub memory: bool,
     pub current: bool,
+    /// Reverting needs an explicit confirmation: the VM has moved between
+    /// nodes and this snapshot restores RAM, a path where libvirtd has
+    /// crashed in testing.
+    pub confirm_required: bool,
 }
 
 /// Text of the first `<tag>` directly or indirectly under the root, and
@@ -65,6 +69,7 @@ fn parse_snapshot(xml: &str) -> SnapshotView {
         state: String::new(),
         parent: None,
         memory: false,
+        confirm_required: false,
         current: false,
     };
     while let Ok(ev) = reader.read_event() {
@@ -150,6 +155,7 @@ impl Node {
             let xml = c.snapshot_xml(&snap, 0).await?;
             let mut view = parse_snapshot(&xml);
             view.current = c.snapshot_is_current(&snap).await.unwrap_or(false);
+            view.confirm_required = view.memory && spec.owner_epoch > 0;
             out.push(view);
         }
         out.sort_by_key(|s| s.created);
@@ -281,9 +287,28 @@ impl Node {
         self.sync_disk_chains(spec.id).await
     }
 
-    pub fn revert_snapshot(self: &std::sync::Arc<Self>, id: Uuid, name: String) -> Result<Task> {
+    /// `confirm_memory` acknowledges the risk of restoring RAM after a move.
+    pub async fn revert_snapshot(
+        self: &std::sync::Arc<Self>,
+        id: Uuid,
+        name: String,
+        confirm_memory: bool,
+    ) -> Result<Task> {
         self.snapshot_api_check()?;
         let spec = self.local_spec(id)?;
+        if !confirm_memory
+            && self
+                .snapshots(id)
+                .await?
+                .iter()
+                .any(|s| s.name == name && s.confirm_required)
+        {
+            return Err(NodeError::Conflict(format!(
+                "snapshot {name} restores memory on a VM that has moved between nodes, \
+                 which has crashed libvirtd before; stop the VM and revert again, \
+                 or confirm with confirm_memory=true"
+            )));
+        }
         let node = std::sync::Arc::clone(self);
         let resource = format!("/vms/{id}");
         if self.tasks.busy(&resource) {

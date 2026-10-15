@@ -62,16 +62,21 @@ export function SnapshotsTab({ vm, openForm }: { vm: Vm; openForm: boolean }) {
       body: (
         <div className="space-y-2">
           <p>Disks go back to how they were {s.created ? ago(s.created * 1000) : "when it was taken"}. Anything written since is lost, unless you take a snapshot first.</p>
+          {s.confirm_required && (
+            <p className="font-medium text-amber-700 dark:text-amber-300">
+              This machine has moved between nodes, and restoring memory afterwards has crashed the hypervisor in testing. The safe route is to shut the machine down first, then revert; the disks are restored either way. Continue only if you accept the risk.
+            </p>
+          )}
           {on && <p>{s.memory ? "The machine resumes exactly where it was, with its memory." : "This snapshot has no memory, so the running machine restarts from the saved disks."}</p>}
         </div>
       ),
-      confirmLabel: "Revert",
+      confirmLabel: s.confirm_required ? "Revert anyway" : "Revert",
       danger: true,
       typeToConfirm: on ? vm.name : undefined,
     });
     if (!ok) return;
     try {
-      track(await api.revertSnapshot(vm.id, s.name));
+      track(await api.revertSnapshot(vm.id, s.name, !!s.confirm_required));
     } catch (e) {
       toast({ tone: "error", title: "Couldn't revert", body: humanError(e) });
     }

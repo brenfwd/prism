@@ -168,11 +168,21 @@ async fn delete_snapshot(
     Ok(accepted(node.delete_snapshot(parse_id(&id)?, name)?))
 }
 
+#[derive(Debug, Deserialize)]
+struct RevertQuery {
+    #[serde(default)]
+    confirm_memory: bool,
+}
+
 async fn revert_snapshot(
     State(node): State<AppState>,
     Path((id, name)): Path<(String, String)>,
+    Query(q): Query<RevertQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    Ok(accepted(node.revert_snapshot(parse_id(&id)?, name)?))
+    Ok(accepted(
+        node.revert_snapshot(parse_id(&id)?, name, q.confirm_memory)
+            .await?,
+    ))
 }
 
 fn parse_id(id: &str) -> Result<Uuid, ApiError> {

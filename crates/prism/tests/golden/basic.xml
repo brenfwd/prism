@@ -59,6 +59,7 @@
       <model type='virtio'/>
       <alias name='ua-abcdef01-2222-3333-4444-555555555555'/>
     </interface>
+    <controller type='pci' index='0' model='pcie-root'/>
     <controller type='pci' model='pcie-root-port'/>
     <controller type='pci' model='pcie-root-port'/>
     <controller type='pci' model='pcie-root-port'/>

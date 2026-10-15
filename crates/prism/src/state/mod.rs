@@ -144,10 +144,11 @@ impl State {
         }
         let (db, node) = (Arc::clone(&self.db), self.node);
         let cmd2 = cmd.clone();
-        let outcome =
-            tokio::task::spawn_blocking(move || db.transaction(|d| apply_command(d, node, &cmd2)))
-                .await
-                .map_err(|e| StateError::Internal(e.into()))??;
+        let outcome = tokio::task::spawn_blocking(move || {
+            db.transaction(|d| apply_command(d, node, 0, &cmd2))
+        })
+        .await
+        .map_err(|e| StateError::Internal(e.into()))??;
         if outcome == Outcome::Ok {
             let _ = self.changes.send(Change::Applied(Arc::new(cmd)));
         }

@@ -296,7 +296,7 @@ export const api = {
   archivePools: () => request<ArchivePool[]>("GET", "/archive/pools"),
   createArchivePool: (name: string, replicas: number) => request<void>("POST", "/archive/pools", { name, replicas }),
   setArchiveReplicas: (pool: string, replicas: number) => request<void>("PUT", `/archive/pools/${enc(pool)}`, { replicas }),
-  archiveAction: (pool: string, a: "repair" | "scrub") => request<Task>("POST", `/archive/pools/${enc(pool)}/${a}`),
+  archiveAction: (pool: string, a: "repair" | "scrub" | "rebalance") => request<Task>("POST", `/archive/pools/${enc(pool)}/${a}`),
   setArchiveMember: (node: string, name: string, state: ArchiveMemberState) =>
     request<void>("PUT", `/archive/members/${node}/${enc(name)}`, { state }),
   drainArchiveMember: (node: string, name: string) => request<Task>("POST", `/archive/members/${node}/${enc(name)}/drain`),

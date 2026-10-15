@@ -1,7 +1,7 @@
 //! `/api/v1/archive` maintenance: replica count, repair, drain and scrub.
 
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{post, put};
@@ -18,6 +18,7 @@ pub fn routes() -> Router<AppState> {
         .route("/archive/pools/{pool}", put(set_replicas))
         .route("/archive/pools/{pool}/repair", post(repair))
         .route("/archive/pools/{pool}/scrub", post(scrub))
+        .route("/archive/pools/{pool}/rebalance", post(rebalance))
         .route("/archive/members/{node}/{name}", put(set_state))
         .route("/archive/members/{node}/{name}/drain", post(drain))
 }
@@ -80,8 +81,43 @@ async fn repair(
     Ok((StatusCode::ACCEPTED, axum::Json(task)))
 }
 
-/// Re-hashes this node's replicas of the pool.
+#[derive(Debug, Deserialize)]
+struct ScrubQuery {
+    /// Scrub only this node's replicas and answer with the report (used by
+    /// peers during a cluster-wide scrub).
+    local: Option<u8>,
+}
+
+/// Re-hashes every node's replicas of the pool.
 async fn scrub(
+    State(node): State<AppState>,
+    Path(pool): Path<String>,
+    Query(q): Query<ScrubQuery>,
+) -> Result<axum::response::Response, ApiError> {
+    if q.local.is_some() {
+        let report = node
+            .archive_scrub_local(&pool)
+            .await
+            .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
+        return Ok(axum::Json(report).into_response());
+    }
+    let resource = format!("/archive/pools/{pool}");
+    if node.tasks.busy(&resource) {
+        return Err(
+            NodeError::Conflict("another archive task is running on this pool".into()).into(),
+        );
+    }
+    let n = std::sync::Arc::clone(&node);
+    let task = node
+        .tasks
+        .spawn("archive.scrub", resource, move |_| async move {
+            Ok(serde_json::to_value(n.archive_scrub(&pool).await?)?)
+        });
+    Ok((StatusCode::ACCEPTED, axum::Json(task)).into_response())
+}
+
+/// Moves files from fuller members toward lighter ones.
+async fn rebalance(
     State(node): State<AppState>,
     Path(pool): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -94,8 +130,10 @@ async fn scrub(
     let n = std::sync::Arc::clone(&node);
     let task = node
         .tasks
-        .spawn("archive.scrub", resource, move |_| async move {
-            Ok(serde_json::to_value(n.archive_scrub(&pool).await?)?)
+        .spawn("archive.rebalance", resource, move |_| async move {
+            Ok(serde_json::to_value(
+                n.archive_rebalance_pool(&pool).await?,
+            )?)
         });
     Ok((StatusCode::ACCEPTED, axum::Json(task)))
 }

@@ -153,20 +153,33 @@ impl ClusterNode {
 
     /// Sets the voter set (consensus mode); others stay learners.
     pub async fn set_voters(&self, voters: BTreeSet<RaftId>) -> Result<(), ClusterError> {
-        self.raft
-            .change_membership(ChangeMembers::ReplaceAllVoters(voters), true)
-            .await
-            .map(drop)
-            .map_err(|e| ClusterError::Other(e.to_string()))
+        let change = self
+            .raft
+            .change_membership(ChangeMembers::ReplaceAllVoters(voters), true);
+        membership_change(change).await
     }
 
     /// Removes members entirely (voters must be removed from the voter set first).
     pub async fn remove_nodes(&self, ids: BTreeSet<RaftId>) -> Result<(), ClusterError> {
-        self.raft
-            .change_membership(ChangeMembers::RemoveNodes(ids), false)
-            .await
-            .map(drop)
-            .map_err(|e| ClusterError::Other(e.to_string()))
+        let change = self
+            .raft
+            .change_membership(ChangeMembers::RemoveNodes(ids), false);
+        membership_change(change).await
+    }
+}
+
+/// Runs a membership change with a deadline so a lost quorum cannot wedge
+/// the caller.
+async fn membership_change<F, T, E>(change: F) -> Result<(), ClusterError>
+where
+    F: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    match tokio::time::timeout(WRITE_TIMEOUT * 3, change).await {
+        Err(_) => Err(ClusterError::Degraded(
+            "no quorum to change raft membership".into(),
+        )),
+        Ok(r) => r.map(drop).map_err(|e| ClusterError::Other(e.to_string())),
     }
 }
 

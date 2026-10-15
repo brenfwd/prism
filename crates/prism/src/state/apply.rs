@@ -15,7 +15,12 @@ use crate::db::Docs;
 use crate::spec::VmSpec;
 
 /// Applies one command inside a transaction. Deterministic.
-pub(super) fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow::Result<Outcome> {
+pub(super) fn apply_command(
+    d: &Docs<'_>,
+    local: Uuid,
+    index: u64,
+    cmd: &Command,
+) -> anyhow::Result<Outcome> {
     match cmd {
         Command::PutVm {
             vm,
@@ -170,6 +175,7 @@ pub(super) fn apply_command(d: &Docs<'_>, local: Uuid, cmd: &Command) -> anyhow:
                     wg_pubkey: m.wg_pubkey,
                     mesh_addr: m.mesh_addr,
                     removed: *now,
+                    removed_index: index,
                 },
             )?;
             for pool in d

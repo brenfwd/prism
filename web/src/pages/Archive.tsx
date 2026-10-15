@@ -55,7 +55,7 @@ function PoolCard({ pool }: { pool: ArchivePool }) {
   const err = (e: unknown) => toast({ tone: "error", title: "Archive change failed", body: humanError(e) });
   const replicas = useMutation({ mutationFn: (n: number) => api.setArchiveReplicas(pool.name, n), onSuccess: refresh, onError: err });
   const task = useMutation({
-    mutationFn: (a: "repair" | "scrub") => api.archiveAction(pool.name, a),
+    mutationFn: (a: "repair" | "scrub" | "rebalance") => api.archiveAction(pool.name, a),
     onSuccess: (_t, a) => toast({ tone: "info", title: a === "repair" ? "Repair started" : "Scrub started", body: "Progress shows in the task tray." }),
     onError: err,
   });
@@ -68,6 +68,7 @@ function PoolCard({ pool }: { pool: ArchivePool }) {
           <Segmented label="Copies" size="sm" value={String(pool.replicas)} onChange={(v) => replicas.mutate(Number(v))} options={[{ value: "1", label: "1x" }, { value: "2", label: "2x" }, { value: "3", label: "3x" }]} />
           <Button size="sm" loading={task.isPending && task.variables === "repair"} onClick={() => task.mutate("repair")}>Repair</Button>
           <Button size="sm" loading={task.isPending && task.variables === "scrub"} onClick={() => task.mutate("scrub")}>Scrub</Button>
+          <Button size="sm" loading={task.isPending && task.variables === "rebalance"} onClick={() => task.mutate("rebalance")}>Rebalance</Button>
         </div>
       }
       padded={false}

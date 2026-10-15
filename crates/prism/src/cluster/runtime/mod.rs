@@ -2,6 +2,8 @@
 //! init/invite/accept/join flows.
 
 mod join;
+mod membership;
+mod progress;
 mod proposer;
 mod reconcile;
 
@@ -310,6 +312,11 @@ impl Cluster {
             .is_some_and(|r| r.metrics().current_leader.is_none())
     }
 
+    /// This node leads raft (one node runs cluster-wide background jobs).
+    pub fn is_leader(&self) -> bool {
+        self.raft().is_some_and(|r| r.is_leader())
+    }
+
     pub(crate) fn leader_raft_id(&self) -> u64 {
         self.raft()
             .and_then(|r| r.metrics().current_leader)
@@ -331,6 +338,15 @@ impl Cluster {
             .ok()?
             .into_iter()
             .find(|m| m.mesh_addr == addr)
+    }
+
+    /// Refuses removals that would break raft (the hub, or an even voter set).
+    pub fn check_removal(&self, node_id: Uuid) -> Result<(), String> {
+        let Some(doc) = self.state.cluster().map_err(|e| e.to_string())? else {
+            return Ok(());
+        };
+        let members = self.state.members().map_err(|e| e.to_string())?;
+        membership::check_removal(doc.mode, &members, node_id)
     }
 
     pub(crate) fn pending_join(&self) -> bool {

@@ -149,8 +149,10 @@ impl Node {
         let pool = self.storage.get(pool)?;
         let name = format!("archive-{}.iso", &file.blake3[..16.min(file.blake3.len())]);
         if pool.volume(&name).is_ok() {
+            let _ = pool.touch_volume(&name);
             return Ok(name);
         }
+        self.iso_cache_make_room(&pool, file.size);
         let partial = self.archive_fetch(&file, &pool).await?;
         match pool.commit_partial(&partial, &name) {
             Ok(()) | Err(crate::storage::StorageError::Exists(_)) => Ok(name),

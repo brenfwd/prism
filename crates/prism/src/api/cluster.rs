@@ -158,6 +158,9 @@ async fn remove(
             "remove this node from another member",
         ));
     }
+    cluster(&node)?
+        .check_removal(node_id)
+        .map_err(ApiError::bad_request)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
@@ -192,6 +195,7 @@ async fn leave(State(node): State<AppState>) -> Result<StatusCode, ApiError> {
         ));
     }
     if others > 0 {
+        c.check_removal(node.id).map_err(ApiError::bad_request)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
@@ -212,7 +216,12 @@ async fn leave(State(node): State<AppState>) -> Result<StatusCode, ApiError> {
 
 /// Tombstones: removed members whose identity is blocked for good.
 async fn removed(State(node): State<AppState>) -> Result<impl IntoResponse, ApiError> {
-    Ok(axum::Json(node.state.tombstones()?))
+    Ok(axum::Json(
+        cluster(&node)?
+            .removal_status()
+            .await
+            .map_err(|e| ApiError::bad_request(format!("{e:#}")))?,
+    ))
 }
 
 #[derive(Debug, Deserialize)]

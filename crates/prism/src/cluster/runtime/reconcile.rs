@@ -6,7 +6,7 @@ use std::sync::Arc;
 use prism_cluster::{PrismNode, RaftId};
 use tokio::sync::broadcast;
 
-use super::{Cluster, RECONCILE_EVERY, decode_key, grpc_addr};
+use super::{Cluster, RECONCILE_EVERY, decode_key, grpc_addr, membership};
 use crate::cluster::blob::Sponsor;
 use crate::cluster::mesh::MeshPeer;
 use crate::cluster::model::{MemberDoc, MemberState};
@@ -81,27 +81,17 @@ impl Cluster {
                 tracing::info!(member = %m.name, "member is active");
             }
         }
-        // Removed members leave raft.
-        let gone: BTreeSet<RaftId> = in_raft
-            .iter()
-            .copied()
-            .filter(|id| !members.iter().any(|m| m.raft_id == *id))
-            .collect();
-        // Voters: the hub in hub-spoke mode; flagged voters in consensus mode.
-        let want_voters: BTreeSet<RaftId> = members
-            .iter()
-            .filter(|m| m.voter && m.state == MemberState::Active)
-            .map(|m| m.raft_id)
-            .collect();
-        let voters: BTreeSet<RaftId> = membership.voter_ids().collect();
-        if !want_voters.is_empty() && want_voters != voters && cluster.is_some() {
-            tracing::info!(?want_voters, "changing raft voters");
-            raft.set_voters(want_voters)
+        // Demote removed voters first, then drop them. A removed leader
+        // steps down once the new voter set commits; the next leader drops it.
+        let plan = membership::plan(&in_raft, &membership.voter_ids().collect(), &members);
+        if let Some(voters) = plan.set_voters.filter(|_| cluster.is_some()) {
+            tracing::info!(?voters, "changing raft voters");
+            raft.set_voters(voters)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
         }
-        if !gone.is_empty() {
-            raft.remove_nodes(gone)
+        if !plan.remove.is_empty() && raft.is_leader() {
+            raft.remove_nodes(plan.remove)
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
         }

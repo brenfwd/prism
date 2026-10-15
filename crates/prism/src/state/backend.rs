@@ -45,7 +45,7 @@ impl prism_cluster::Backend for StateBackend {
             }
         };
         let outcome = s.db.transaction(|d| {
-            let o = apply_command(d, s.node, &cmd)?;
+            let o = apply_command(d, s.node, applied_index(meta), &cmd)?;
             if o != Outcome::Ok {
                 anyhow::bail!(Rejected(o));
             }
@@ -105,6 +105,11 @@ impl prism_cluster::Backend for StateBackend {
         let _ = self.state.changes.send(Change::Reset);
         Ok(())
     }
+}
+
+/// The log index of the entry being applied.
+fn applied_index(meta: &prism_cluster::AppliedMeta) -> u64 {
+    meta.last_applied.map_or(0, |l| l.index)
 }
 
 /// A command rejected by validation; its transaction is rolled back.

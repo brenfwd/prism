@@ -262,11 +262,25 @@ pub async fn cluster(dir: &Path, cmd: ClusterCmd) -> anyhow::Result<()> {
             }
             for m in list {
                 println!(
-                    "  {}  {}  key {}",
+                    "  {}  {}  key {}  (log index {})",
                     m["node_id"].as_str().unwrap_or_default(),
                     m["mesh_addr"].as_str().unwrap_or_default(),
-                    m["wg_pubkey"].as_str().unwrap_or_default()
+                    m["wg_pubkey"].as_str().unwrap_or_default(),
+                    m["removed_index"]
                 );
+                let pending = m["pending"].as_array().cloned().unwrap_or_default();
+                if pending.is_empty() {
+                    println!("    applied by every member");
+                }
+                for p in pending {
+                    let applied = p["applied_index"]
+                        .as_u64()
+                        .map_or("unreachable".to_string(), |a| format!("at index {a}"));
+                    println!(
+                        "    still trusts it: {} ({applied})",
+                        p["name"].as_str().unwrap_or_default()
+                    );
+                }
             }
         }
         ClusterCmd::Remove { node } => {

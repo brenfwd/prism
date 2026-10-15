@@ -112,6 +112,10 @@ pub struct TombstoneDoc {
     pub wg_pubkey: String,
     pub mesh_addr: Ipv6Addr,
     pub removed: i64,
+    /// Log index of the removal; a member has applied it once its
+    /// `applied_index` reaches this.
+    #[serde(default)]
+    pub removed_index: u64,
 }
 
 /// Reasons a member is not admitted; stable codes for the API.

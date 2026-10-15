@@ -189,7 +189,13 @@ pub const OPERATIONS: &[(&str, &str, &str, &str)] = &[
         "post",
         "/archive/pools/{pool}/scrub",
         "archive",
-        "Scrub files",
+        "Scrub files on every node",
+    ),
+    (
+        "post",
+        "/archive/pools/{pool}/rebalance",
+        "archive",
+        "Rebalance files across members",
     ),
     (
         "get",

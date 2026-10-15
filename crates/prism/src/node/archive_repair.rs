@@ -3,11 +3,13 @@
 //! The BLAKE3 in the replicated index is the trust anchor; every copy is
 //! verified against it before it is recorded.
 
+use std::collections::HashSet;
+
 use axum::body::Body;
 use axum::http::Request;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::Node;
@@ -19,7 +21,7 @@ use crate::state::Command;
 type ByteStream = BoxStream<'static, Result<bytes::Bytes, std::io::Error>>;
 
 /// What a scrub of this node's replicas found.
-#[derive(Debug, Default, Clone, Serialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ScrubReport {
     pub checked: usize,
     pub corrupt: usize,
@@ -28,6 +30,9 @@ pub struct ScrubReport {
     pub repaired: usize,
     /// Bad replicas with no good copy to repair from.
     pub unrecoverable: usize,
+    /// Nodes that could not be scrubbed because they were unreachable.
+    #[serde(default)]
+    pub unreachable: usize,
 }
 
 /// What a repair or drain pass did.
@@ -39,7 +44,7 @@ pub struct MoveReport {
 
 impl Node {
     /// Sends a request to another member's node.
-    async fn archive_peer(
+    pub(super) async fn archive_peer(
         &self,
         target: Uuid,
         req: Request<Body>,
@@ -111,7 +116,7 @@ impl Node {
     }
 
     /// Free bytes per member, from every node's reported capacity.
-    fn archive_free(&self) -> Vec<(Uuid, String, u64)> {
+    pub(super) fn archive_free(&self) -> Vec<(Uuid, String, u64)> {
         self.nodes()
             .into_iter()
             .flat_map(|n| {
@@ -123,7 +128,7 @@ impl Node {
 
     /// Picks a member of `pool` for a new copy of `file`: a node that holds
     /// no copy, or with `same_node_ok` any other member.
-    fn archive_pick_target(
+    pub(super) fn archive_pick_target(
         &self,
         file: &ArchiveFileDoc,
         same_node_ok: bool,
@@ -229,7 +234,7 @@ impl Node {
     }
 
     /// Deletes one replica's bytes, here or on its node.
-    async fn archive_delete_bytes(&self, file: &ArchiveFileDoc, r: &Replica) {
+    pub(super) async fn archive_delete_bytes(&self, file: &ArchiveFileDoc, r: &Replica) {
         if r.node == self.id {
             if let Some(m) = self.archive.member(&r.member) {
                 let _ = m.delete(&file.path);
@@ -251,9 +256,16 @@ impl Node {
     }
 
     /// Replicas of `file` that sit on members still accepting data.
-    fn archive_live_replicas(file: &ArchiveFileDoc, members: &[ArchiveMemberDoc]) -> usize {
+    /// Replicas on nodes in `expired` (offline past the grace period) do
+    /// not count.
+    pub(super) fn archive_live_replicas(
+        file: &ArchiveFileDoc,
+        members: &[ArchiveMemberDoc],
+        expired: &HashSet<Uuid>,
+    ) -> usize {
         file.replicas
             .iter()
+            .filter(|r| !expired.contains(&r.node))
             .filter(|r| {
                 members.iter().any(|m| {
                     m.node == r.node && m.name == r.member && m.state == MemberState::Active
@@ -271,11 +283,14 @@ impl Node {
             .find(|p| p.name == pool)
             .ok_or_else(|| anyhow::anyhow!("no archive pool {pool}"))?;
         let mut report = MoveReport::default();
+        let expired = self.archive_expired_nodes();
         for file in self.state.archive_files(pool, "")? {
             let mut file = file;
             loop {
                 let members = self.state.archive_members()?;
-                if Self::archive_live_replicas(&file, &members) >= usize::from(doc.replicas) {
+                if Self::archive_live_replicas(&file, &members, &expired)
+                    >= usize::from(doc.replicas)
+                {
                     break;
                 }
                 let Some(target) = self.archive_pick_target(&file, false)? else {
@@ -361,7 +376,7 @@ impl Node {
                 format!("moving {}", file.path),
             );
             let members = self.state.archive_members()?;
-            let others = Self::archive_live_replicas(file, &members);
+            let others = Self::archive_live_replicas(file, &members, &HashSet::new());
             if others < need {
                 let target = match self.archive_pick_target(file, false)? {
                     Some(t) => Some(t),
@@ -403,7 +418,7 @@ impl Node {
 
     /// Re-hashes this node's replicas of `pool`; bad ones are dropped from
     /// the index and re-copied from a good replica.
-    pub async fn archive_scrub(&self, pool: &str) -> anyhow::Result<ScrubReport> {
+    pub async fn archive_scrub_local(&self, pool: &str) -> anyhow::Result<ScrubReport> {
         let mut report = ScrubReport::default();
         let mut damaged = Vec::new();
         for file in self.state.archive_files(pool, "")? {
@@ -446,23 +461,5 @@ impl Node {
             let _ = self.archive_repair_pool(pool).await;
         }
         Ok(report)
-    }
-
-    /// Scrubs every pool once a week.
-    pub(super) async fn scrub_loop(self: std::sync::Arc<Self>) {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(7 * 86_400));
-        tick.tick().await;
-        loop {
-            tick.tick().await;
-            for p in self.state.archive_pools().unwrap_or_default() {
-                match self.archive_scrub(&p.name).await {
-                    Ok(r) if r.corrupt + r.missing > 0 => {
-                        tracing::warn!(pool = %p.name, "scrub: {r:?}");
-                    }
-                    Ok(_) => {}
-                    Err(e) => tracing::warn!(pool = %p.name, "scrub failed: {e:#}"),
-                }
-            }
-        }
     }
 }

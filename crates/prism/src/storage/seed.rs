@@ -51,7 +51,36 @@ impl Pool {
         Ok(self.path.join(name))
     }
 
+    /// Names of the files in the pool root starting with `prefix`.
+    fn volumes_hidden(&self, prefix: &str) -> Result<Vec<String>, StorageError> {
+        let dir = rustix::fs::openat2(
+            &self.root,
+            ".",
+            rustix::fs::OFlags::DIRECTORY
+                | rustix::fs::OFlags::RDONLY
+                | rustix::fs::OFlags::CLOEXEC,
+            rustix::fs::Mode::empty(),
+            super::resolve(),
+        )?;
+        let mut out = Vec::new();
+        for entry in rustix::fs::Dir::read_from(&dir)? {
+            if let Ok(name) = entry?.file_name().to_str()
+                && name.starts_with(prefix)
+            {
+                out.push(name.to_string());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Removes the ISO and any snapshot overlays libvirt stacked on it.
     pub fn remove_seed_iso(&self, vm: &uuid::Uuid) {
         let _ = rustix::fs::unlinkat(&self.root, Self::seed_name(vm), AtFlags::empty());
+        let prefix = format!(".prism-seed-{}.", vm.simple());
+        if let Ok(vols) = self.volumes_hidden(&prefix) {
+            for name in vols {
+                let _ = rustix::fs::unlinkat(&self.root, name, AtFlags::empty());
+            }
+        }
     }
 }

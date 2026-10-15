@@ -495,9 +495,11 @@ impl Node {
             xml = xml.replace(&format!("'{src}/"), &format!("'{dst_path}/"));
             xml = xml.replace(&format!("\"{src}/"), &format!("\"{dst_path}/"));
         }
-        // The seed ISO keeps its name, so the rewrite above already points
-        // at the copy written here.
-        drop(seed);
+        // Revert leaves the seed CD-ROM on qcow2 overlays that never travel;
+        // point it at the plain ISO just written here.
+        if let Some(seed) = seed {
+            xml = super::seed_xml::flatten_seed_cdroms(&xml, &seed.to_string_lossy());
+        }
         let mem = format!("unix://{}", dir.join("mem.sock").display());
         let nbd = format!("unix://{}", dir.join("nbd.sock").display());
         // Finish looks the incoming domain up by DEST_NAME; libvirt's own

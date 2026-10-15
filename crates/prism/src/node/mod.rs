@@ -21,6 +21,7 @@ mod moves;
 mod networks;
 mod remote;
 mod runtime;
+mod seed_xml;
 mod snapshot_move;
 mod snapshots;
 mod state_events;

@@ -342,16 +342,17 @@ function FromUrl({ pool, onClose }: { pool: Pool; onClose: () => void }) {
   const qc = useQueryClient();
   const [url, setUrl] = useState("");
   const [name, setName] = useState("");
+  const [sha, setSha] = useState("");
   const guess = url.split(/[?#]/)[0].split("/").pop() ?? "";
   const start = useMutation({
-    mutationFn: () => api.downloadVolume(pool.name, url.trim(), name || undefined),
+    mutationFn: () => api.downloadVolume(pool.name, url.trim(), name || undefined, sha.trim()),
     onSuccess: (t) => {
       applyTask(qc, t);
       toast({ tone: "info", title: "Download started", body: "It continues in the background; progress is in the task tray." });
       onClose();
     },
   });
-  const ok = /^https?:\/\/\S+$/.test(url.trim());
+  const ok = /^https?:\/\/\S+$/.test(url.trim()) && (sha.trim() === "" || /^[0-9a-fA-F]{64}$/.test(sha.trim()));
   return (
     <Modal
       title={`Download into ${pool.name}`}
@@ -371,6 +372,9 @@ function FromUrl({ pool, onClose }: { pool: Pool; onClose: () => void }) {
         </Field>
         <Field label="Save as" htmlFor="dl-name" hint={guess ? "Leave empty to use the name from the link." : "The link has no file name, so choose one."}>
           <Input id="dl-name" value={name} onChange={(e) => setName(e.target.value.replace(/\s/g, "-"))} placeholder={guess || "image.iso"} />
+        </Field>
+        <Field label="SHA-256 checksum (optional)" htmlFor="dl-sha" hint="Paste it from the download page and Prism rejects a corrupted or tampered file.">
+          <Input id="dl-sha" value={sha} onChange={(e) => setSha(e.target.value.trim())} placeholder="64 hex digits" className="font-mono" />
         </Field>
         <ErrorText error={start.error} />
       </form>

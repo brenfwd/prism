@@ -43,6 +43,8 @@ export function Forwards({ vm, nic, onClose }: { vm: Vm; nic: Nic; onClose: () =
   const qc = useQueryClient();
   const [rows, setRows] = useState<PortForward[]>(nic.network.type === "user" ? (nic.network.forwards ?? []) : []);
   const set = (i: number, patch: Partial<PortForward>) => setRows((r) => r.map((x, j) => (j === i ? { ...x, ...patch } : x)));
+  const passt = useQuery({ queryKey: ["prereqs"], queryFn: api.prereqs }).data?.find((p) => p.id === "passt");
+  const missing = passt && !passt.ok;
   const valid = rows.every((r) => r.host_port > 0 && r.host_port < 65536 && r.guest_port > 0 && r.guest_port < 65536);
   const save = useMutation({
     mutationFn: () => api.setForwards(vm.id, nic.id, rows),
@@ -65,11 +67,19 @@ export function Forwards({ vm, nic, onClose }: { vm: Vm; nic: Nic; onClose: () =
       footer={
         <>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" loading={save.isPending} disabled={!valid} onClick={() => save.mutate()}>Save</Button>
+          <Button variant="primary" loading={save.isPending} disabled={!valid || (!!missing && rows.length > 0)} onClick={() => save.mutate()}>Save</Button>
         </>
       }
     >
       <div className="space-y-3">
+        {missing && (
+          <p className="rounded-md bg-amber-50 p-2.5 text-[13px] text-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+            Port forwarding needs <span className="font-mono">passt</span> on this host, and it isn't installed. {passt?.hint}
+          </p>
+        )}
+        {isOn(vm) && !missing && (
+          <p className="text-[13px] text-zinc-500">This machine is running, so changes apply the next time it starts.</p>
+        )}
         {rows.length === 0 && <p className="text-[13px] text-zinc-500">Nothing is forwarded. Add SSH to get started.</p>}
         {rows.map((r, i) => (
           <div key={i} className="flex flex-wrap items-center gap-2">

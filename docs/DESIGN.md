@@ -1403,3 +1403,7 @@ The largest risk is the native libvirt RPC client, since every feature sits on i
 12. **Clustering over a Tailscale-only underlay.** *Default:* allowed with W = 1420 and outer IPv4 fragmentation, flagged `fragmented` with a UI warning, pending the M4 spike.
 13. **WireGuard key rotation.** *Default:* none in place in v1; a suspected compromise is handled by remove, `prism leave --force` and re-invite.
 14. **Removal window.** *Default:* a member offline during a removal trusts the removed key until it catches up; the removal status lists such members.
+
+### Host programs
+
+Downloads from a URL are done in-process (`crates/prism/src/fetch`): HTTP/1.1 over `rustls` (ring provider, bundled webpki roots, no OpenSSL), with redirects, progress, cancellation and optional SHA-256 verification. Port forwards need `passt`; `GET /api/v1/nodes/{node}/prereqs` and `prism doctor` report whether it (and `ip`) are installed, the API refuses forwards without it, and the UI explains the fix. libvirt cannot change a passt forward under a running guest, so changes apply at the next start and the UI says so.

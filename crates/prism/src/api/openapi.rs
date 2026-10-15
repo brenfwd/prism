@@ -11,6 +11,12 @@ pub const OPERATIONS: &[(&str, &str, &str, &str)] = &[
     ("get", "/nodes", "nodes", "List nodes"),
     ("get", "/nodes/{node}", "nodes", "Show a node"),
     ("get", "/nodes/{node}/bridges", "nodes", "List host bridges"),
+    (
+        "get",
+        "/nodes/{node}/prereqs",
+        "nodes",
+        "Check optional host programs",
+    ),
     ("get", "/events", "events", "Server-sent event stream"),
     ("get", "/vms", "vms", "List VMs"),
     ("post", "/vms", "vms", "Create a VM"),

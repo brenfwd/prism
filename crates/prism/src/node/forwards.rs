@@ -15,6 +15,13 @@ impl Node {
         forwards: Vec<PortForward>,
     ) -> Result<VmView> {
         validate_forwards(&forwards).map_err(NodeError::Invalid)?;
+        if !forwards.is_empty() && !crate::prereqs::passt().ok {
+            return Err(NodeError::Invalid(
+                "port forwarding needs passt on the host. Install the \"passt\" package \
+                 (apt install passt) and try again."
+                    .into(),
+            ));
+        }
         let _guard = self.ops.lock().await;
         let old = self.local_spec(id)?;
         // A host listener can serve one VM only.

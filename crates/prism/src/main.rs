@@ -7,9 +7,11 @@ mod cluster;
 mod config;
 mod db;
 mod events;
+mod fetch;
 mod leave;
 mod network;
 mod node;
+mod prereqs;
 mod render;
 mod spec;
 mod state;
@@ -365,6 +367,15 @@ async fn doctor(dir: &Path) -> anyhow::Result<()> {
             Err(e) => Err(format!("{}: {e}", cfg.libvirt.qemu_img.display())),
         },
     );
+    for p in prereqs::all() {
+        // Optional programs only warn: the node runs without them.
+        let line = format!("{}: {}", p.label, p.detail);
+        match (p.ok, p.required) {
+            (true, _) => println!("  ok    {line}"),
+            (false, true) => check(p.label, Err(p.detail)),
+            (false, false) => println!("  warn  {line}\n        {}", p.hint.unwrap_or("")),
+        }
+    }
     for (name, p) in &cfg.pools {
         check(
             &format!("pool {name}"),

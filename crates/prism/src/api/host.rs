@@ -8,7 +8,9 @@ use serde::Serialize;
 use super::{ApiError, AppState, check_node};
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/nodes/{node}/bridges", get(bridges))
+    Router::new()
+        .route("/nodes/{node}/bridges", get(bridges))
+        .route("/nodes/{node}/prereqs", get(prereqs))
 }
 
 #[derive(Debug, Serialize)]
@@ -60,6 +62,18 @@ async fn bridges(
     let list = tokio::task::spawn_blocking(move || list_bridges(&prism))
         .await
         .map_err(anyhow::Error::from)?
+        .map_err(anyhow::Error::from)?;
+    Ok(axum::Json(list))
+}
+
+/// Which optional host programs are installed, with what to do about it.
+async fn prereqs(
+    State(node): State<AppState>,
+    Path(n): Path<String>,
+) -> Result<axum::Json<Vec<crate::prereqs::Prereq>>, ApiError> {
+    check_node(&node, &n)?;
+    let list = tokio::task::spawn_blocking(crate::prereqs::all)
+        .await
         .map_err(anyhow::Error::from)?;
     Ok(axum::Json(list))
 }

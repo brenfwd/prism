@@ -71,6 +71,15 @@ export interface HostBridge {
   ports: string[];
 }
 
+export interface Prereq {
+  id: string;
+  label: string;
+  ok: boolean;
+  required: boolean;
+  detail: string;
+  hint: string | null;
+}
+
 export interface NetworkInfo {
   id: string;
   name: string;
@@ -314,8 +323,9 @@ export const api = {
   setForwards: (id: string, nic: string, forwards: PortForward[]) =>
     request<Vm>("PUT", `/vms/${id}/nics/${nic}/forwards`, forwards),
   bridges: () => request<HostBridge[]>("GET", "/nodes/local/bridges"),
-  downloadVolume: (pool: string, url: string, name?: string) =>
-    request<Task>("POST", `/nodes/local/pools/${enc(pool)}/downloads`, { url, name: name || undefined }),
+  prereqs: () => request<Prereq[]>("GET", "/nodes/local/prereqs"),
+  downloadVolume: (pool: string, url: string, name?: string, sha256?: string) =>
+    request<Task>("POST", `/nodes/local/pools/${enc(pool)}/downloads`, { url, name: name || undefined, sha256: sha256 || undefined }),
 
   networks: () => request<NetworkInfo[]>("GET", "/networks"),
   createNetwork: (req: { name?: string; kind?: "nat" | "isolated"; subnet?: string; dhcp?: boolean } = {}) =>

@@ -110,6 +110,16 @@ async fn create_pool(
     if !(1..=3).contains(&req.replicas) {
         return Err(ApiError::bad_request("replicas must be 1-3"));
     }
+    if node
+        .state
+        .archive_pools()?
+        .iter()
+        .any(|p| p.name == req.name)
+    {
+        return Err(
+            NodeError::Conflict(format!("archive pool {} already exists", req.name)).into(),
+        );
+    }
     let doc = ArchivePoolDoc {
         name: req.name,
         replicas: req.replicas,

@@ -24,26 +24,31 @@ export function ArchivePage() {
       ) : (
         list.map((p) => <PoolCard key={p.name} pool={p} />)
       )}
-      <NewPool />
+      <NewPool existing={list.map((p) => p.name)} />
     </div>
   );
 }
 
-function NewPool() {
+function NewPool({ existing }: { existing: string[] }) {
   const qc = useQueryClient();
+  const [open, setOpen] = useState(false);
   const [name, setName] = useState("archive");
+  const taken = existing.includes(name.trim());
   const [replicas, setReplicas] = useState("2");
   const create = useMutation({
     mutationFn: () => api.createArchivePool(name.trim(), Number(replicas)),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["archive-pools"] }),
     onError: (e) => toast({ tone: "error", title: "Could not create pool", body: humanError(e) }),
   });
+  if (existing.length > 0 && !open) {
+    return <div><Button variant="secondary" icon="plus" onClick={() => setOpen(true)}>Add another pool</Button></div>;
+  }
   return (
     <Card title="New archive pool" description="Two copies is a good default: any one node can fail.">
       <form className="flex flex-wrap items-end gap-3" onSubmit={(e) => { e.preventDefault(); create.mutate(); }}>
-        <Field label="Name" htmlFor="ap-name"><Input id="ap-name" value={name} onChange={(e) => setName(e.target.value)} /></Field>
+        <Field label="Name" htmlFor="ap-name" error={taken ? `A pool named ${name.trim()} already exists` : undefined}><Input id="ap-name" value={name} onChange={(e) => setName(e.target.value)} /></Field>
         <Field label="Copies"><Segmented label="Copies" value={replicas} onChange={setReplicas} options={[{ value: "1", label: "1" }, { value: "2", label: "2" }, { value: "3", label: "3" }]} /></Field>
-        <Button type="submit" variant="primary" icon="plus" loading={create.isPending} disabled={!name.trim()}>Create pool</Button>
+        <Button type="submit" variant="primary" icon="plus" loading={create.isPending} disabled={!name.trim() || taken}>Create pool</Button>
       </form>
     </Card>
   );

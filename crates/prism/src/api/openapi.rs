@@ -336,6 +336,9 @@ mod tests {
                 if !path.starts_with('/') || path == "/openapi.json" {
                     continue;
                 }
+                // axum wildcard captures `{*name}` document as `{name}`.
+                let path = path.replace("{*", "{");
+                let path = path.as_str();
                 assert!(
                     OPERATIONS.iter().any(|(_, p, ..)| *p == path),
                     "route {path} missing from the OpenAPI table"

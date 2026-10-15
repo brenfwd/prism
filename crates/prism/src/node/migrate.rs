@@ -239,9 +239,16 @@ impl Node {
         }
 
         // 3. Begin on the source.
+        // libvirt refuses to migrate with UNDEFINE_SOURCE while the domain
+        // has snapshots; the source is undefined here after the hand-over.
+        let undefine_here = !snapshot_xml.is_empty();
         let flags = mf::LIVE
             | mf::PERSIST_DEST
-            | mf::UNDEFINE_SOURCE
+            | if undefine_here {
+                0
+            } else {
+                mf::UNDEFINE_SOURCE
+            }
             | mf::NON_SHARED_INC
             | mf::AUTO_CONVERGE
             | mf::ABORT_ON_ERROR
@@ -380,6 +387,10 @@ impl Node {
                     .or(fin.error)
                     .unwrap_or_else(|| "unknown error".into())
             );
+        }
+
+        if undefine_here && let Err(e) = c.undefine(&dom, super::libvirt::undefine_flags()).await {
+            tracing::warn!(vm = %spec.name, "undefining the migrated domain: {e}");
         }
 
         // 9. Ownership moves to the destination.

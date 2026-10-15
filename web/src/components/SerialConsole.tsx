@@ -45,10 +45,10 @@ export function SerialConsole({ vmId }: { vmId: string }) {
         <span>· press Enter if the screen is blank</span>
         <div className="flex-1" />
         {status === "disconnected" && (
-          <Button className="px-2 py-1 text-xs" variant="primary" onClick={() => setAttempt((a) => a + 1)}>Reconnect</Button>
+          <Button size="xs" variant="primary" onClick={() => setAttempt((a) => a + 1)}>Reconnect</Button>
         )}
       </div>
-      <div ref={el} className="h-[calc(100vh-15rem)] min-h-[320px] overflow-hidden rounded-md bg-zinc-950 p-2" />
+      <div ref={el} data-console className="h-[calc(100dvh-17rem)] min-h-[320px] overflow-hidden rounded-xl bg-zinc-950 p-3 ring-1 ring-zinc-900/10 dark:ring-white/10" />
     </div>
   );
 }

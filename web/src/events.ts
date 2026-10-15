@@ -1,6 +1,9 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import type { QueryClient } from "@tanstack/react-query";
-import type { NodeView, Pool, Vm, VmRuntime } from "./api";
+import type { NodeView, Pool, Task, Vm, VmRuntime } from "./api";
+import { record } from "./lib/stats";
+import { applyTask } from "./lib/tasks";
+import { createStore, useStore } from "./lib/store";
 
 interface Envelope<T = unknown> {
   type: string;
@@ -25,27 +28,48 @@ function patchVm(qc: QueryClient, id: string, f: (vm: Vm) => Vm) {
   qc.setQueryData<Vm>(["vm", id], (vm) => (vm ? f(vm) : vm));
 }
 
+/** Writes a VM view (from an API response or event) into the cache. */
+export function putVm(qc: QueryClient, vm: Vm) {
+  qc.setQueryData<Vm[]>(["vms"], (vms) => {
+    if (!vms) return [vm];
+    const i = vms.findIndex((v) => v.id === vm.id);
+    return i < 0 ? [...vms, vm].sort((a, b) => a.name.localeCompare(b.name)) : vms.map((v) => (v.id === vm.id ? vm : v));
+  });
+  qc.setQueryData(["vm", vm.id], vm);
+}
+
 export type StreamState = "connecting" | "live" | "down";
+export const stream = createStore<StreamState>("connecting");
+export const useStream = () => useStore(stream);
 
 /** Subscribes to the SSE stream and keeps the query cache current. */
-export function useEventStream(qc: QueryClient): StreamState {
-  const [state, setState] = useState<StreamState>("connecting");
+export function useEventStream(qc: QueryClient) {
   useEffect(() => {
     const es = new EventSource("/api/v1/events?snapshot=1");
-    es.onopen = () => setState("live");
-    es.onerror = () => setState(es.readyState === EventSource.CLOSED ? "down" : "connecting");
+    es.onopen = () => stream.set("live");
+    es.onerror = () => stream.set(es.readyState === EventSource.CLOSED ? "down" : "connecting");
 
     es.addEventListener("snapshot", (e) => {
       const s: Snapshot = JSON.parse((e as MessageEvent).data);
       qc.setQueryData(["nodes"], s.nodes);
       qc.setQueryData(["vms"], s.vms);
       qc.setQueryData(["pools"], s.pools);
-      for (const vm of s.vms) qc.setQueryData(["vm", vm.id], vm);
-      setState("live");
+      for (const vm of s.vms) {
+        qc.setQueryData(["vm", vm.id], vm);
+        record(vm.id, vm.status);
+      }
+      // Tasks may have finished while we were away.
+      qc.invalidateQueries({ queryKey: ["tasks"] });
+      stream.set("live");
+    });
+    es.addEventListener("reset", () => {
+      qc.invalidateQueries();
     });
     const onStatus = (e: Event) => {
       const ev: Envelope<VmRuntime> = JSON.parse((e as MessageEvent).data);
-      patchVm(qc, vmId(ev.resource), (vm) => ({ ...vm, status: ev.payload }));
+      const id = vmId(ev.resource);
+      record(id, ev.payload);
+      patchVm(qc, id, (vm) => ({ ...vm, status: ev.payload }));
     };
     es.addEventListener("vm.state", onStatus);
     es.addEventListener("vm.stats", onStatus);
@@ -57,13 +81,9 @@ export function useEventStream(qc: QueryClient): StreamState {
         qc.removeQueries({ queryKey: ["vm", id] });
         return;
       }
-      const vm = ev.payload;
-      qc.setQueryData<Vm[]>(["vms"], (vms) => {
-        if (!vms) return [vm];
-        const i = vms.findIndex((v) => v.id === id);
-        return i < 0 ? [...vms, vm].sort((a, b) => a.name.localeCompare(b.name)) : vms.map((v) => (v.id === id ? vm : v));
-      });
-      qc.setQueryData(["vm", id], vm);
+      putVm(qc, ev.payload);
+      // Disk changes move volumes around (snapshots, new disks).
+      qc.invalidateQueries({ queryKey: ["volumes"] });
     });
     es.addEventListener("node.status", (e) => {
       const ev: Envelope<NodeView> = JSON.parse((e as MessageEvent).data);
@@ -72,12 +92,22 @@ export function useEventStream(qc: QueryClient): StreamState {
       );
     });
     es.addEventListener("pool", (e) => {
-      const ev: Envelope = JSON.parse((e as MessageEvent).data);
+      const ev: Envelope<Pool | null> = JSON.parse((e as MessageEvent).data);
       const name = decodeURIComponent(ev.resource.split("/").pop() ?? "");
-      qc.invalidateQueries({ queryKey: ["pools"] });
+      if (ev.op === "delete" || !ev.payload) {
+        qc.setQueryData<Pool[]>(["pools"], (ps) => ps?.filter((p) => p.name !== name));
+      } else {
+        const pool = ev.payload;
+        qc.setQueryData<Pool[]>(["pools"], (ps) =>
+          ps?.some((p) => p.name === name) ? ps.map((p) => (p.name === name ? pool : p)) : [...(ps ?? []), pool],
+        );
+      }
       qc.invalidateQueries({ queryKey: ["volumes", name] });
+    });
+    es.addEventListener("task.progress", (e) => {
+      const ev: Envelope<Task> = JSON.parse((e as MessageEvent).data);
+      applyTask(qc, ev.payload);
     });
     return () => es.close();
   }, [qc]);
-  return state;
 }

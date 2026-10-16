@@ -92,13 +92,13 @@ Every subcommand takes `--config <dir>`, the config directory. `--help` works on
 | `prism cluster status` | Shows cluster status and members. |
 | `prism cluster invite [--name <name>] [--ttl <seconds>] [--revoke <id>]` | Creates an invite for a new node. The default lifetime is one hour. `--revoke` cancels an open invite. |
 | `prism join <invite>` | Run on the new node. Prints a reply to give to the hub. |
-| `prism cluster accept <reply> [-y]` | Run on the hub. Admits the node that printed the reply. |
+| `prism cluster accept <reply> [-y]` | Run on the node that created the invite. Admits the node that printed the reply. |
 | `prism cluster remove <node>` | Removes a member. Its VMs must be moved first. |
 | `prism cluster promote <node>` | Hands the hub role to another member. Run it on the current hub. |
 | `prism cluster removed` | Lists removed members, whose keys, IDs and addresses stay blocked. |
 | `prism leave [--force]` | Leaves the cluster and wipes this node's state. `--force` wipes without telling the cluster. Stop `prism serve` first. |
 
-To form a cluster, run `prism cluster init` on the first node, then `prism cluster invite` on it. Paste the invite into `prism join` on the new node, and paste the reply it prints into `prism cluster accept` on the hub. Members need UDP port 51820 (`cluster.wireguard_port`) open between them.
+To form a cluster, run `prism cluster init` on the first node, then `prism cluster invite` on it. Paste the invite into `prism join` on the new node, and paste the reply it prints into `prism cluster accept` on the node that created the invite. Members need UDP port 51820 (`cluster.wireguard_port`) open between them.
 
 ## Configuration
 
@@ -138,7 +138,7 @@ uri = "qemu:///session"
 domain_type = "qemu"
 ```
 
-Pool directories must support `O_DIRECT`, so tmpfs does not work.
+A pool on a file system without `O_DIRECT` support, such as tmpfs, works, but its disks use `cache=writeback` and Prism logs a warning.
 
 ## Development
 

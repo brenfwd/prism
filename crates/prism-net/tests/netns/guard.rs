@@ -1,10 +1,11 @@
 //! The bridge guard against crafted IPv6 frames: extension headers in front of a router
-//! advertisement, a DHCPv6 reply or a neighbour advertisement must not get them past the
+//! advertisement, a `DHCPv6` reply or a neighbour advertisement must not get them past the
 //! drops.
 
 use crate::common::{Ns, require_root};
 use prism_net::nft::{GuestPort, Ipv6Source, bridge_guard_ruleset};
 use std::collections::BTreeSet;
+use std::fmt::Write;
 use std::net::Ipv6Addr;
 
 const MAC: [u8; 6] = [0x52, 0x54, 0, 0, 0, 1];
@@ -119,7 +120,7 @@ fn eth(src_mac: [u8; 6], vlan: Option<u16>, payload: &[u8]) -> Vec<u8> {
     f
 }
 
-/// The ICMPv6 checksum of `msg` sent from `src` to the all-nodes address.
+/// The `ICMPv6` checksum of `msg` sent from `src` to the all-nodes address.
 fn icmp_checksum(src: &str, msg: &[u8]) -> u16 {
     let mut data = addr(src).to_vec();
     data.extend(addr(ALL_NODES));
@@ -147,6 +148,7 @@ struct Frame {
     pass: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn frame(
     name: &str,
     iface: &'static str,
@@ -328,7 +330,7 @@ async fn extension_headers_do_not_bypass_the_ipv6_guard() {
     std::fs::write(script, include_str!("guard.py")).unwrap();
     let mut cmd = format!("python3 {script} r2");
     for f in &frames {
-        cmd.push_str(&format!(" {}={}:{}", f.name, f.iface, hex(&f.bytes)));
+        write!(cmd, " {}={}:{}", f.name, f.iface, hex(&f.bytes)).unwrap();
     }
     let seen: BTreeSet<String> = ns.exec(&cmd).lines().map(str::to_owned).collect();
 
@@ -346,7 +348,6 @@ async fn extension_headers_do_not_bypass_the_ipv6_guard() {
 }
 
 fn hex(b: &[u8]) -> String {
-    use std::fmt::Write;
     b.iter().fold(String::new(), |mut s, x| {
         write!(s, "{x:02x}").unwrap();
         s

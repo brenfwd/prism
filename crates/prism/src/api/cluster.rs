@@ -16,6 +16,7 @@ use crate::cluster::runtime::{ClusterOpError, DEFAULT_INVITE_TTL};
 use crate::node::NodeError;
 use crate::state::Command;
 
+/// The routes of this module, mounted under `/api/v1`.
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/cluster", get(status).post(create))

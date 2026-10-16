@@ -338,6 +338,7 @@ pub fn document() -> Value {
     })
 }
 
+/// Serves the `OpenAPI` document at `GET /api/v1/openapi.json`.
 pub async fn serve() -> Json<Value> {
     Json(document())
 }
@@ -348,7 +349,7 @@ mod tests {
 
     const SOURCES: &[&str] = &[
         include_str!("mod.rs"),
-        include_str!("archive.rs"),
+        include_str!("archive/mod.rs"),
         include_str!("archive_ops.rs"),
         include_str!("cluster.rs"),
         include_str!("console.rs"),

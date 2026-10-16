@@ -12,6 +12,7 @@ use super::{ApiError, AppState, Json};
 use crate::cluster::peers::Tunnelled;
 use crate::node::{FinishReq, PrepareReq};
 
+/// The routes of this module, mounted under `/api/v1`.
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/internal/migrations/{id}/prepare", post(prepare))

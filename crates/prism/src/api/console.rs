@@ -16,6 +16,7 @@ use super::{ApiError, AppState};
 use crate::cluster::peers::open_remote_console;
 use crate::node::Node;
 
+/// The routes of this module, mounted under `/api/v1`.
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/vms/{id}/console", get(vnc))
@@ -74,6 +75,7 @@ async fn tunnel(
                 break;
             }
         }
+        // Teardown: the browser may already be gone.
         let _ = ws_tx.close().await;
     };
     let up = async {
@@ -138,6 +140,7 @@ async fn pump_unix(ws: WebSocket, sock: UnixStream) {
                 }
             }
         }
+        // Teardown: the browser may already be gone.
         let _ = ws_tx.close().await;
     };
     let up = async {
@@ -152,6 +155,7 @@ async fn pump_unix(ws: WebSocket, sock: UnixStream) {
                 break;
             }
         }
+        // Teardown: the guest side may already be gone.
         let _ = wr.shutdown().await;
     };
     tokio::select! {
@@ -179,6 +183,7 @@ async fn serial(
                     break;
                 }
             }
+            // Teardown: the browser may already be gone.
             let _ = ws_tx.close().await;
         };
         let up = async {

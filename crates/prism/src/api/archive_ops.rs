@@ -13,6 +13,7 @@ use crate::archive::{ArchivePoolDoc, MemberState};
 use crate::node::NodeError;
 use crate::state::Command;
 
+/// The routes of this module, mounted under `/api/v1`.
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/archive/pools/{pool}", put(set_replicas))

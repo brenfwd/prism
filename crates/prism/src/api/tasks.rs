@@ -1,3 +1,5 @@
+//! `/api/v1/tasks`: long-running operations (copies, downloads, backups) with
+//! progress, listing and cancellation.
 use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -8,6 +10,7 @@ use uuid::Uuid;
 use super::{ApiError, AppState};
 use crate::tasks::Task;
 
+/// The routes of this module, mounted under `/api/v1`.
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/tasks", get(list))

@@ -1,3 +1,5 @@
+//! `/api/v1/nodes/{node}/pools`: VM disk pools, their volumes, uploads and
+//! downloads of ISO and disk images.
 use std::path::PathBuf;
 
 use axum::Router;
@@ -15,6 +17,7 @@ use crate::node::{DownloadReq, Node};
 use crate::state::{Command, PoolDoc};
 use crate::storage::{Pool, PoolInfo, Volume};
 
+/// The routes of this module, mounted under `/api/v1`.
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/nodes/{node}/pools", get(list).post(create))

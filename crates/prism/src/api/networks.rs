@@ -1,4 +1,5 @@
-//! `/api/v1/networks`.
+//! `/api/v1/networks`: virtual switches, their VLANs and the checks run before
+//! a network is created.
 
 use axum::Router;
 use axum::extract::{Path, State};
@@ -10,6 +11,7 @@ use super::{ApiError, AppState, Json};
 use crate::network::{AddVlanSubnet, CheckNetwork, CreateNetwork, UpdateNetwork};
 use crate::node::{NetworkCheck, NetworkView};
 
+/// The routes of this module, mounted under `/api/v1`.
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/networks", get(list).post(create))

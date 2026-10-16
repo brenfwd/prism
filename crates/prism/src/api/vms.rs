@@ -1,3 +1,5 @@
+//! `/api/v1/vms` and `/api/v1/backups`: VM lifecycle and hardware changes,
+//! snapshots, clone, move, migrate and backups.
 use axum::Router;
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
@@ -14,6 +16,7 @@ use crate::node::{
 use crate::spec::{CreateVm, PortForward, UpdateVm};
 use crate::tasks::Task;
 
+/// The routes of this module, mounted under `/api/v1`.
 pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/vms", get(list).post(create))
@@ -270,6 +273,7 @@ async fn action(
     Ok(axum::Json(node.action(parse_id(&id)?, action).await?))
 }
 
+/// The `/vms/{id}/backups` and `/backups` routes, mounted under `/api/v1`.
 pub(crate) fn backup_routes() -> Router<AppState> {
     Router::new()
         .route("/vms/{id}/backups", get(list_backups).post(create_backup))

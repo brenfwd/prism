@@ -1,10 +1,12 @@
 [package]
 name = "prism"
-description = "libvirt/KVM manager"
+description = "KVM virtual machine manager: one static binary with an embedded web UI"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 rust-version.workspace = true
+publish = false
 
 [lints]
 workspace = true

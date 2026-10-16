@@ -6,7 +6,8 @@ members = ["crates/prism-libvirt", "crates/prism-iso", "crates/prism-net", "crat
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.88"
+authors = ["Brenden Forward"]
+rust-version = "1.89"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

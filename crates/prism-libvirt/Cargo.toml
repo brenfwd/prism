@@ -4,7 +4,10 @@ description = "Native async client for the libvirt remote RPC protocol"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 rust-version.workspace = true
+keywords = ["libvirt", "kvm", "rpc", "async"]
+categories = ["api-bindings", "virtualization"]
 
 [lints]
 workspace = true

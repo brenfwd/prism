@@ -4,7 +4,9 @@ description = "Sans-IO RFB (VNC) client core for Prism's browser console, compil
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 rust-version.workspace = true
+publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]

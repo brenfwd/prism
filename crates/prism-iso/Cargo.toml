@@ -4,7 +4,10 @@ description = "Minimal ISO 9660 + Joliet image writer (cloud-init NoCloud seeds)
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 rust-version.workspace = true
+keywords = ["iso9660", "joliet", "cloud-init"]
+categories = ["filesystem", "encoding"]
 
 [lints]
 workspace = true

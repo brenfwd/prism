@@ -4,7 +4,9 @@ description = "Prism's web UI, built with Bun and embedded"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 rust-version.workspace = true
+publish = false
 build = "build.rs"
 include = ["build.rs", "lib.rs", "index.html", "package.json", "bun.lock", "tsconfig.json", "vite.config.ts", "src/**", "public/**"]
 

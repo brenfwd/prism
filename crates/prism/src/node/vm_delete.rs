@@ -51,6 +51,10 @@ impl Node {
         }
         files.sort();
         files.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
+        let own: Vec<(String, String)> = files
+            .iter()
+            .map(|(p, v, _)| (p.clone(), v.clone()))
+            .collect();
         let mut items = Vec::with_capacity(files.len());
         for (pool, volume, kind) in files {
             let size_bytes = self
@@ -58,11 +62,12 @@ impl Node {
                 .get(&pool)
                 .and_then(|p| p.volume(&volume))
                 .map_or(0, |v| v.file_bytes);
-            let shared_with = self
+            let mut shared_with: Vec<String> = self
                 .volume_users(&pool, &volume)?
                 .into_iter()
                 .filter(|n| *n != spec.name)
                 .collect();
+            shared_with.extend(self.backing_dependents(&pool, &volume, &own));
             items.push(DeleteItem {
                 pool,
                 volume,
@@ -72,6 +77,32 @@ impl Node {
             });
         }
         Ok(DeletePlan { items })
+    }
+
+    /// Volumes in `pool` outside this VM's own files that have `volume` in
+    /// their qcow2 backing chain, such as a standalone clone. Deleting
+    /// `volume` would break them.
+    fn backing_dependents(
+        &self,
+        pool: &str,
+        volume: &str,
+        own: &[(String, String)],
+    ) -> Vec<String> {
+        let Ok(p) = self.storage.get(pool) else {
+            return Vec::new();
+        };
+        let Ok(vols) = p.volumes() else {
+            return Vec::new();
+        };
+        vols.into_iter()
+            .map(|v| v.name)
+            .filter(|n| n != volume && !own.iter().any(|(op, ov)| op == pool && ov == n))
+            .filter(|n| {
+                p.backing_chain(n)
+                    .is_ok_and(|c| c.iter().any(|b| b == volume))
+            })
+            .map(|n| format!("volume {n}"))
+            .collect()
     }
 
     /// Powers the VM off, forgets it (libvirt drops its snapshot metadata,

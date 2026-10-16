@@ -3,11 +3,12 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::{Method, StatusCode};
 
 use super::{ApiError, AppState, LocalQuery, forward_to};
 use crate::archive::LocalMember;
+use crate::cluster::peers::Tunnelled;
 use crate::node::NodeError;
 use crate::state::Command;
 
@@ -20,16 +21,17 @@ async fn delete_local(member: Arc<LocalMember>, path: String) {
     }
 }
 
-/// Deletes the file record and then every replica. With `local` (set by a
-/// peer) it removes only this node's copy.
+/// Deletes the file record and then every replica. With `local` on a request
+/// that came through the mesh tunnel it removes only this node's copy; direct
+/// callers cannot use `local`.
 pub(super) async fn delete_file(
     State(node): State<AppState>,
     Path((pool, path)): Path<(String, String)>,
     Query(q): Query<LocalQuery>,
+    tunnelled: Option<Extension<Tunnelled>>,
 ) -> Result<StatusCode, ApiError> {
-    if q.local.is_some()
-        && let Some(name) = &q.member
-    {
+    let local = q.local.is_some() && tunnelled.is_some();
+    if local && let Some(name) = &q.member {
         if let Some(m) = node.archive.member(name).filter(|m| m.pool == pool) {
             delete_local(m, path.clone()).await;
         }
@@ -39,7 +41,7 @@ pub(super) async fn delete_file(
         .state
         .archive_file(&pool, &path)?
         .ok_or_else(|| ApiError::not_found(format!("{pool}/{path}")))?;
-    if q.local.is_some() {
+    if local {
         for r in file.replicas.iter().filter(|r| r.node == node.id) {
             if let Some(m) = node.archive.member(&r.member) {
                 delete_local(m, path.clone()).await;

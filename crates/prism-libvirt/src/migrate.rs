@@ -100,14 +100,16 @@ impl Client {
         cookie_in: &[u8],
         flags: u32,
     ) -> Result<Vec<u8>, Error> {
+        let mut e = Encoder::new();
+        dom.encode(&mut e);
+        e.opt_string(None);
+        encode_params(&mut e, p);
+        cookie(&mut e, cookie_in);
+        e.u32(flags);
+        // The daemon replies only when the whole migration ends, which can
+        // outlast any call timeout.
         let r = self
-            .call_with(procs::PERFORM3_PARAMS, |e| {
-                dom.encode(e);
-                e.opt_string(None);
-                encode_params(e, p);
-                cookie(e, cookie_in);
-                e.u32(flags);
-            })
+            .call_unbounded(procs::PERFORM3_PARAMS, e.into_inner())
             .await?;
         Ok(Decoder::new(&r).opaque(COOKIE_MAX)?.to_vec())
     }

@@ -220,6 +220,13 @@ impl Client {
         self.await_reply(serial, rx, timeout).await
     }
 
+    /// Like [`Self::call`], with no timeout. For procedures that block in the
+    /// daemon until a long job ends, such as the transfer of a live migration.
+    pub(crate) async fn call_unbounded(&self, proc: u32, args: Vec<u8>) -> Result<Vec<u8>, Error> {
+        let (_, rx) = self.start_call(proc, &args)?;
+        rx.await.map_err(|_| Error::Closed)?
+    }
+
     /// Waits for the reply to `serial`. On timeout the pending entry is
     /// removed, so a late reply is logged as unknown and dropped.
     async fn await_reply(

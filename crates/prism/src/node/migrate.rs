@@ -382,10 +382,21 @@ impl Node {
         }
         let succeeded = perform.error.is_none() && fin.ok;
         let confirm_cookie = B64.decode(&fin.cookie).unwrap_or_default();
-        if let Err(e) = c
+        let confirmed = c
             .migrate_confirm3(&dom, &params, &confirm_cookie, flags, !succeeded)
-            .await
-        {
+            .await;
+        // Aborting the job already ended the migration, so cancelling it again is not an error.
+        let confirmed = match confirmed {
+            Err(e)
+                if !succeeded
+                    && e.remote_code()
+                        == Some(prism_libvirt::proto::error_codes::OPERATION_INVALID) =>
+            {
+                Ok(())
+            }
+            other => other,
+        };
+        if let Err(e) = confirmed {
             // The destination may already run the guest: never resume the
             // source here; the intent stays until resolved.
             if succeeded {

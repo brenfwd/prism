@@ -27,6 +27,7 @@ export function Insert({ vm, disk, onClose }: { vm: Vm; disk: Disk; onClose: () 
           {isos.map((v) => (
             <li key={v.name}>
               <button
+                type="button"
                 disabled={!!busy}
                 onClick={async () => {
                   setBusy(v.name);

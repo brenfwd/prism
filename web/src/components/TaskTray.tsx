@@ -90,7 +90,7 @@ export function UploadRow({ u }: { u: Upload }) {
         )}
         {u.state === "failed" && (
           <p className="mt-0.5 text-xs text-red-600 dark:text-red-400">
-            {u.error} <button className="ml-1 underline" onClick={() => dismissUpload(u.id)}>Dismiss</button>
+            {u.error} <button type="button" className="ml-1 underline" onClick={() => dismissUpload(u.id)}>Dismiss</button>
           </p>
         )}
       </div>

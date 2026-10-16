@@ -48,7 +48,7 @@ export function Members({ status, peers }: { status: ClusterStatus; peers: MeshP
                 </div>
               </div>
               {consensus && !mine && (
-                <button className="text-xs text-zinc-500 hover:underline" onClick={() => voter.mutate({ id: m.node_id, voter: !m.voter })}>
+                <button type="button" className="text-xs text-zinc-500 hover:underline" onClick={() => voter.mutate({ id: m.node_id, voter: !m.voter })}>
                   {m.voter ? "Demote" : "Make voter"}
                 </button>
               )}

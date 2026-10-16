@@ -253,8 +253,12 @@ async fn stream_to_file(
     let actual = hasher
         .finalize()
         .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+        .fold(String::with_capacity(64), |mut acc, b| {
+            use std::fmt::Write;
+            // Writing to a String cannot fail.
+            write!(acc, "{b:02x}").expect("String write is infallible");
+            acc
+        });
     if let Some(expected) = want
         && expected != actual
     {

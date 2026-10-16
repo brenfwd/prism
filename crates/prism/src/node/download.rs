@@ -63,6 +63,15 @@ impl Node {
         if pool.volume(&name).is_ok() {
             return Err(NodeError::Conflict(format!("{name} already exists")));
         }
+        let policy = crate::fetch::Policy::new(
+            &self.cfg.download,
+            self.state
+                .cluster()
+                .ok()
+                .flatten()
+                .and_then(|c| ipnet::Ipv6Net::new(c.mesh_prefix, 48).ok()),
+            crate::fetch::own_addresses(),
+        );
         let node = Arc::clone(self);
         let resource = format!("/nodes/{}/pools/{}/volumes/{name}", self.id, pool.name);
         Ok(self
@@ -74,6 +83,7 @@ impl Node {
                     &req.url,
                     &path,
                     sha256.as_deref(),
+                    &policy,
                     &ctx.cancel,
                     |done, total| {
                         let frac = total

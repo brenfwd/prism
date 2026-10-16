@@ -183,15 +183,22 @@ impl Node {
                 }
                 // The source domain lost its snapshot metadata for the
                 // migration; a failed attempt gives it back.
+                let dest_may_run = rollback
+                    .dest_may_run
+                    .load(std::sync::atomic::Ordering::SeqCst);
                 let stash = super::lock(&rollback.detached).take();
-                if let (Err(_), Some(xmls)) = (&res, stash) {
+                if let (Err(_), Some(xmls), false) = (&res, stash, dest_may_run) {
                     node.restore_snapshots(&spec, &xmls).await;
                 }
                 // Whatever happened, drop the intent and the socket directory.
                 remove_migration_dir(migration);
                 if let Err(e) = &res {
                     tracing::error!(vm = %spec.name, "migration failed: {e:#}");
-                    if let Ok(mut cur) = node.spec(spec.id)
+                    // While the destination may run the guest the intent
+                    // stays: it exempts the VM from quarantine there until an
+                    // operator resolves it.
+                    if !dest_may_run
+                        && let Ok(mut cur) = node.spec(spec.id)
                         && cur.migrating.is_some()
                         && cur.node == node.id
                     {
@@ -259,8 +266,9 @@ impl Node {
         // libvirt refuses to migrate a domain that has snapshots. Their XML
         // travels in the request and is redefined on the destination.
         if !snapshot_xml.is_empty() {
-            self.detach_snapshots(spec).await?;
+            // Stash first: a failure part-way leaves some snapshots detached.
             *super::lock(&rollback.detached) = Some(snapshot_xml.clone());
+            self.detach_snapshots(spec).await?;
         }
         let (cookie, xml) = match c.migrate_begin3(&dom, &begin_params, flags).await {
             Ok(r) => r,
@@ -406,7 +414,16 @@ impl Node {
         }
 
         // 7. Ownership moves to the destination.
-        self.hand_over(spec, dst, &req.pool, &memory).await?;
+        // The guest already runs there, so a failed hand-over is retried.
+        let mut handed = self.hand_over(spec, dst, &req.pool, &memory).await;
+        for attempt in 0..FINISH_TRIES {
+            if handed.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
+            handed = self.hand_over(spec, dst, &req.pool, &memory).await;
+        }
+        handed?;
         tracing::info!(vm = %spec.name, to = %dst.name, "live migration complete");
         Ok(serde_json::json!({ "node": dst.node_id }))
     }

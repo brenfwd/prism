@@ -143,8 +143,12 @@ pub(super) async fn watch_job<R>(
     }
     // The aborted call returns an error; wait for it so its reply is not left
     // dangling, but do not hang if the daemon never answers.
-    let _ = tokio::time::timeout(ABORT_GRACE, &mut call).await;
-    Watched::Stopped(stopped)
+    // A call that finished anyway (the abort lost the race, or came after the
+    // point of no return) is reported as finished, not as stopped.
+    match tokio::time::timeout(ABORT_GRACE, &mut call).await {
+        Ok(r) => Watched::Done(r),
+        Err(_) => Watched::Stopped(stopped),
+    }
 }
 
 impl super::Node {

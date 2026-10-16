@@ -279,7 +279,12 @@ impl Node {
         {
             Ok(_) => {}
             // Quiescing needs a cooperative agent; fall back to crash-consistent.
-            Err(e) if fl & op::SNAPSHOT_CREATE_QUIESCE != 0 && !ctx.cancel.is_cancelled() => {
+            // A stall or cancel is not an agent problem and does not get a second try.
+            Err(e)
+                if fl & op::SNAPSHOT_CREATE_QUIESCE != 0
+                    && !ctx.cancel.is_cancelled()
+                    && matches!(e, super::NodeError::Libvirt(_)) =>
+            {
                 tracing::warn!(vm = %spec.name, "quiesced snapshot failed ({e}); retrying without");
                 ctx.progress(Some(0.4), "guest agent could not quiesce; retrying");
                 let fl = fl & !op::SNAPSHOT_CREATE_QUIESCE;

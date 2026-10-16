@@ -25,6 +25,25 @@ pub struct VlanSubnet {
     pub gateways: BTreeMap<Uuid, Ipv4Addr>,
 }
 
+/// Reads the `vlan_subnets` map of a [`NetworkDoc`]. JSON object keys are strings, and a command
+/// that is internally tagged (as every replicated one is) hands them over as buffered strings,
+/// which serde cannot turn into `u16` keys by itself.
+pub(super) fn deserialize_by_vlan<'de, D>(
+    de: D,
+) -> Result<BTreeMap<u16, VlanSubnet>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    BTreeMap::<String, VlanSubnet>::deserialize(de)?
+        .into_iter()
+        .map(|(vid, subnet)| {
+            vid.parse::<u16>()
+                .map(|vid| (vid, subnet))
+                .map_err(|_| serde::de::Error::custom(format!("invalid VLAN ID `{vid}`")))
+        })
+        .collect()
+}
+
 /// `POST /api/v1/networks/{id}/vlans` body: give a VLAN its own subnet.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -133,6 +152,17 @@ mod tests {
             )]),
             created: 0,
         }
+    }
+
+    #[test]
+    fn vlan_subnets_survive_an_internally_tagged_command() {
+        let cmd = crate::state::Command::PutNetwork {
+            network: Box::new(net()),
+            now: 0,
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        let back: crate::state::Command = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, cmd);
     }
 
     #[test]

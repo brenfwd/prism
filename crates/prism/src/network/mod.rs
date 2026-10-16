@@ -89,7 +89,11 @@ pub struct NetworkDoc {
     pub nat66: bool,
     /// A subnet for each VLAN that has its own gateway and DHCP scope, by VLAN ID.
     /// A NIC on a VLAN without an entry shares the network's subnet.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "BTreeMap::is_empty",
+        deserialize_with = "vlan::deserialize_by_vlan"
+    )]
     pub vlan_subnets: BTreeMap<u16, VlanSubnet>,
     pub created: i64,
 }

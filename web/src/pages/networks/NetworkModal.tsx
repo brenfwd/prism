@@ -28,7 +28,10 @@ export function NetworkModal({ existing, onClose }: { existing?: NetworkInfo; on
       api
         .checkNetwork({ id: existing?.id, name: name.trim() || undefined, subnet: wantSubnet || undefined })
         .then((c) => !stale && setCheck(c))
-        .catch(() => !stale && setCheck(null));
+        .catch(() => {
+          // A failed check only hides the inline hint; save still validates on the server.
+          if (!stale) setCheck(null);
+        });
     }, 250);
     return () => {
       stale = true;

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, humanError, type Snapshot, type Task, type Vm } from "../../api";
 import { ago, dateTime } from "../../lib/format";
-import { useTasks } from "../../lib/hooks";
+import { useCancelTask, useTasks } from "../../lib/hooks";
 import { applyTask, taskLabel, taskVmId } from "../../lib/tasks";
 import { toast } from "../../lib/toast";
 import { confirm } from "../../components/Confirm";
@@ -45,6 +45,7 @@ export function SnapshotsTab({ vm, openForm }: { vm: Vm; openForm: boolean }) {
   const qc = useQueryClient();
   const snaps = useQuery({ queryKey: ["snapshots", vm.id], queryFn: () => api.snapshots(vm.id) });
   const tasks = useTasks().data ?? [];
+  const cancel = useCancelTask();
   const running = tasks.filter((t) => t.state === "running" && taskVmId(t) === vm.id);
   const [form, setForm] = useState(openForm);
   useEffect(() => setForm((f) => f || openForm), [openForm]);
@@ -107,7 +108,7 @@ export function SnapshotsTab({ vm, openForm }: { vm: Vm; openForm: boolean }) {
               {t.message && <p className="truncate text-xs text-zinc-500 dark:text-zinc-400">{t.message}</p>}
               <Progress value={t.progress} className="mt-2" />
             </div>
-            <Button size="xs" variant="ghost" onClick={() => api.cancelTask(t.id).catch((e) => toast({ tone: "error", title: "Couldn't cancel", body: humanError(e) }))}>
+            <Button size="xs" variant="ghost" onClick={() => cancel(t.id)}>
               Cancel
             </Button>
           </div>

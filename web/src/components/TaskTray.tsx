@@ -1,16 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
-import { api, humanError, type Task, type Vm } from "../api";
-import { useTasks, useVms } from "../lib/hooks";
+import { type Task, type Vm } from "../api";
+import { useCancelTask, useTasks, useVms } from "../lib/hooks";
 import { dismissUpload, taskLabel, taskVmId, uploads, type Upload } from "../lib/tasks";
 import { useStore } from "../lib/store";
-import { toast } from "../lib/toast";
 import { ago, bytes } from "../lib/format";
 import { Icon, Spinner } from "./icons";
 import { IconButton, Progress, cx } from "./ui";
 
 export function TaskRow({ task, vms, compact }: { task: Task; vms?: Vm[]; compact?: boolean }) {
+  const cancel = useCancelTask();
   const vmId = taskVmId(task);
   const vm = vms?.find((v) => v.id === vmId);
   const label = taskLabel(task);
@@ -49,7 +49,7 @@ export function TaskRow({ task, vms, compact }: { task: Task; vms?: Vm[]; compac
               icon="x"
               size="xs"
               label="Cancel task"
-              onClick={() => api.cancelTask(task.id).catch((e) => toast({ tone: "error", title: "Couldn't cancel", body: humanError(e) }))}
+              onClick={() => cancel(task.id)}
             />
           </div>
         )}

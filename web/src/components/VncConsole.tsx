@@ -226,6 +226,8 @@ export function VncConsole({ vmId, render = renderOverride() ?? "auto" }: { vmId
     await box.current?.requestFullscreen();
     box.current?.focus();
     const kb = (navigator as Navigator & { keyboard?: { lock?: () => Promise<void> } }).keyboard;
+    // Keyboard Lock is missing in some browsers and can be denied; the console
+    // still works, but the browser keeps shortcuts such as Escape for itself.
     await kb?.lock?.().catch(() => {});
   };
 

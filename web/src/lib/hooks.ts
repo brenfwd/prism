@@ -4,6 +4,13 @@ import { putVm } from "../events";
 import { createStore, useStore } from "./store";
 import { toast } from "./toast";
 
+/** Returns a function that cancels a task and toasts if the request fails. */
+export function useCancelTask(): (id: string) => void {
+  return (id) => {
+    api.cancelTask(id).catch((e) => toast({ tone: "error", title: "Couldn't cancel", body: humanError(e) }));
+  };
+}
+
 export const useVms = () => useQuery({ queryKey: ["vms"], queryFn: api.vms });
 export const useVm = (id: string) => useQuery({ queryKey: ["vm", id], queryFn: () => api.vm(id) });
 export const useNodes = () => useQuery({ queryKey: ["nodes"], queryFn: api.nodes });

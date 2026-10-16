@@ -5,7 +5,7 @@
 mod fdb;
 mod vlan;
 
-use std::net::Ipv6Addr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use futures::TryStreamExt;
 use ipnet::IpNet;
@@ -347,6 +347,39 @@ impl Netlink {
             if wanted {
                 continue;
             }
+            self.route
+                .address()
+                .del(msg)
+                .execute()
+                .await
+                .map_err(|e| Error::rtnl(format!("delete address {ip} from {name}"), e))?;
+        }
+        Ok(())
+    }
+
+    /// Removes every ULA address (`fc00::/7`) on a link except `keep`, so a bridge whose
+    /// network lost or changed its IPv6 prefix drops the old address.
+    pub async fn prune_ula_addresses(&self, name: &str, keep: Option<Ipv6Addr>) -> Result<()> {
+        use netlink_packet_route::address::AddressAttribute;
+        let index = self.link_index(name).await?;
+        let msgs: Vec<_> = self
+            .route
+            .address()
+            .get()
+            .set_link_index_filter(index)
+            .execute()
+            .try_collect()
+            .await
+            .map_err(|e| Error::rtnl(format!("list addresses of {name}"), e))?;
+        for msg in msgs {
+            let addr = msg.attributes.iter().find_map(|a| match a {
+                AddressAttribute::Address(IpAddr::V6(ip)) => Some(*ip),
+                _ => None,
+            });
+            let Some(ip) = addr.filter(|ip| ip.octets()[0] & 0xfe == 0xfc && Some(*ip) != keep)
+            else {
+                continue;
+            };
             self.route
                 .address()
                 .del(msg)

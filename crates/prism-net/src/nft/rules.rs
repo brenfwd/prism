@@ -9,6 +9,8 @@ use crate::MacAddr;
 use crate::link::VXLAN_PORT;
 
 const ICMPV6_ECHO_REQUEST: u8 = 128;
+const ICMPV6_NEIGHBOR_ADVERT: u8 = 136;
+const ICMPV6_REDIRECT: u8 = 137;
 
 /// Name of the `inet` filter table.
 pub const INET_TABLE: &str = "prism";
@@ -107,6 +109,8 @@ pub struct SwitchServices {
     pub bridge: String,
     /// The node's gateway VIP on this switch, where DNS listens.
     pub vip: Ipv4Addr,
+    /// The node's `IPv6` address on the switch, where DNS also listens.
+    pub vip6: Option<Ipv6Addr>,
 }
 
 /// An `input` chain for guest-facing bridges: from each bridge only DHCP, DNS to the VIP,
@@ -140,6 +144,29 @@ pub fn guest_input_chain(switches: &[SwitchServices]) -> Chain {
                 .accept(),
         )
         .push(Rule::new(f).iifname(br).icmp_type(8).accept());
+        if let Some(vip6) = s.vip6 {
+            let vip6 = Ipv6Net::from(vip6);
+            c.push(
+                Rule::new(f)
+                    .iifname(br)
+                    .ip6_daddr(vip6)
+                    .udp_dport(53)
+                    .accept(),
+            )
+            .push(
+                Rule::new(f)
+                    .iifname(br)
+                    .ip6_daddr(vip6)
+                    .tcp_dport(53)
+                    .accept(),
+            )
+            .push(
+                Rule::new(f)
+                    .iifname(br)
+                    .icmpv6_type(ICMPV6_ECHO_REQUEST)
+                    .accept(),
+            );
+        }
         for nd in 133..=136 {
             c.push(Rule::new(f).iifname(br).icmpv6_type(nd).accept());
         }
@@ -152,6 +179,13 @@ pub fn guest_input_chain(switches: &[SwitchServices]) -> Chain {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NatRule {
     pub source: Ipv4Net,
+    pub egress: String,
+}
+
+/// NAT66: masquerade `IPv6` traffic from `source` leaving through `egress`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Nat6Rule {
+    pub source: Ipv6Net,
     pub egress: String,
 }
 
@@ -232,10 +266,20 @@ pub fn nat_ruleset(rules: &[NatRule], forwards: &[DnatRule]) -> Table {
     t
 }
 
-/// The `ip6 prism-nat` table: the same forwards for IPv6 guests.
-pub fn nat6_ruleset(forwards: &[DnatRule]) -> Table {
+/// The `ip6 prism-nat` table: the same forwards for IPv6 guests, and a masquerade for each
+/// entry in `rules`.
+pub fn nat6_ruleset(rules: &[Nat6Rule], forwards: &[DnatRule]) -> Table {
     let mut t = Table::new(Family::Ip6, NAT_TABLE);
     forward_chains(&mut t, forwards.iter().filter(|f| f.guest.is_ipv6()));
+    let c = t.chain_mut("postrouting").expect("created above");
+    for r in rules {
+        c.push(
+            Rule::new(Family::Ip6)
+                .oifname(&r.egress)
+                .ip6_saddr(r.source.trunc())
+                .masquerade(),
+        );
+    }
     t
 }
 
@@ -293,6 +337,16 @@ fn forward_chains<'a>(t: &mut Table, forwards: impl Iterator<Item = &'a DnatRule
     }
 }
 
+/// The `IPv6` addresses a guest may send from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Ipv6Source {
+    /// No `IPv6` checks: the network does not hand out addresses.
+    #[default]
+    Any,
+    /// Only the NIC's own address in `prefix`, link-local addresses and `::`.
+    Only { addr: Ipv6Addr, prefix: Ipv6Net },
+}
+
 /// A guest's tap on a switch bridge and the addresses it may use.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuestPort {
@@ -301,6 +355,7 @@ pub struct GuestPort {
     pub mac: MacAddr,
     /// The NIC's IPAM lease; `None` allows no IPv4 source other than `0.0.0.0`.
     pub ipv4: Option<Ipv4Addr>,
+    pub ipv6: Ipv6Source,
     /// A trunk NIC may send VLAN-tagged frames; their sources are checked
     /// like untagged ones. Other NICs may not send tagged frames at all.
     pub trunk: bool,
@@ -309,9 +364,40 @@ pub struct GuestPort {
 const ETH_P_8021Q: u16 = 0x8100;
 const ETH_P_8021AD: u16 = 0x88a8;
 
+/// The `IPv6` rules of one guest tap: the source address is the NIC's own, a link-local
+/// address or `::`; neighbour advertisements may not claim another address of the network;
+/// redirects are dropped.
+fn guard_ipv6(c: &mut Chain, tap: &str, addr: Ipv6Addr, prefix: Ipv6Net) {
+    let f = Family::Bridge;
+    let link_local = Ipv6Net::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10)
+        .expect("a valid prefix length");
+    c.push(
+        Rule::new(f)
+            .iifname(tap)
+            .ip6_saddr_ne(addr)
+            .ip6_saddr_ne(Ipv6Addr::UNSPECIFIED)
+            .ip6_saddr_outside(link_local)
+            .drop(),
+    )
+    .push(
+        Rule::new(f)
+            .iifname(tap)
+            .icmpv6_type(ICMPV6_NEIGHBOR_ADVERT)
+            .icmpv6_target_in(prefix)
+            .icmpv6_target_ne(addr)
+            .drop(),
+    )
+    .push(
+        Rule::new(f)
+            .iifname(tap)
+            .icmpv6_type(ICMPV6_REDIRECT)
+            .drop(),
+    );
+}
+
 /// The `bridge prism` table: anti-spoofing per guest tap (ether source, IPv4 and ARP source,
-/// `0.0.0.0` allowed for DHCPDISCOVER), no rogue DHCP servers or router advertisements, no
-/// VLAN-tagged ingress.
+/// `0.0.0.0` allowed for DHCPDISCOVER, `IPv6` source and neighbour advertisements on networks
+/// with `IPv6`), no rogue DHCP servers or router advertisements, no VLAN-tagged ingress.
 pub fn bridge_guard_ruleset(ports: &[GuestPort]) -> Table {
     let f = Family::Bridge;
     let mut t = Table::new(f, BRIDGE_TABLE);
@@ -336,6 +422,9 @@ pub fn bridge_guard_ruleset(ports: &[GuestPort]) -> Table {
             .push(Rule::new(f).iifname(tap).udp_sport(67).drop())
             .push(Rule::new(f).iifname(tap).icmpv6_type(134).drop())
             .push(Rule::new(f).iifname(tap).ether_type(ETH_P_8021AD).drop());
+        if let Ipv6Source::Only { addr, prefix } = p.ipv6 {
+            guard_ipv6(c, tap, addr, prefix);
+        }
         if p.trunk {
             c.push(
                 Rule::new(f)

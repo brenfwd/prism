@@ -189,6 +189,19 @@ impl Rule {
     /// Matches the first `prefix_len` bits of an address field, the way `nft` encodes it:
     /// byte-aligned prefixes load only the covered bytes; others load the whole field and mask.
     fn prefix(self, base: PayloadBase, offset: u32, addr: &[u8], prefix_len: u8) -> Self {
+        self.prefix_cmp(base, offset, addr, prefix_len, CmpOp::Eq)
+    }
+
+    /// [`Rule::prefix`] with a choice between "inside" ([`CmpOp::Eq`]) and "outside"
+    /// ([`CmpOp::Neq`]) the prefix.
+    fn prefix_cmp(
+        self,
+        base: PayloadBase,
+        offset: u32,
+        addr: &[u8],
+        prefix_len: u8,
+        op: CmpOp,
+    ) -> Self {
         let prefix_len = usize::from(prefix_len).min(addr.len() * 8);
         if prefix_len == 0 {
             return self;
@@ -197,7 +210,7 @@ impl Rule {
             let bytes = prefix_len / 8;
             return self
                 .payload(base, offset, bytes as u32)
-                .cmp(CmpOp::Eq, addr[..bytes].to_vec());
+                .cmp(op, addr[..bytes].to_vec());
         }
         let mask: Vec<u8> = (0..addr.len())
             .map(|i| {
@@ -211,7 +224,7 @@ impl Rule {
                 xor: vec![0; addr.len()],
                 mask,
             })
-            .cmp(CmpOp::Eq, want)
+            .cmp(op, want)
     }
 
     /// `ip saddr <prefix>`
@@ -270,6 +283,34 @@ impl Rule {
     pub fn ip6_saddr_ne(self, addr: Ipv6Addr) -> Self {
         self.dep(Dep::Ipv6)
             .payload(PayloadBase::Network, 8, 16)
+            .cmp(CmpOp::Neq, addr.octets().to_vec())
+    }
+
+    /// `ip6 saddr != <prefix>`: the source lies outside `net`.
+    pub fn ip6_saddr_outside(self, net: Ipv6Net) -> Self {
+        self.dep(Dep::Ipv6).prefix_cmp(
+            PayloadBase::Network,
+            8,
+            &net.network().octets(),
+            net.prefix_len(),
+            CmpOp::Neq,
+        )
+    }
+
+    /// `icmpv6` neighbour message whose target address lies inside `net` (the target is the
+    /// 16 bytes after the 4-byte header and 4 reserved bytes).
+    pub fn icmpv6_target_in(self, net: Ipv6Net) -> Self {
+        self.prefix(
+            PayloadBase::Transport,
+            8,
+            &net.network().octets(),
+            net.prefix_len(),
+        )
+    }
+
+    /// `icmpv6` neighbour message whose target address is not `addr`.
+    pub fn icmpv6_target_ne(self, addr: Ipv6Addr) -> Self {
+        self.payload(PayloadBase::Transport, 8, 16)
             .cmp(CmpOp::Neq, addr.octets().to_vec())
     }
 

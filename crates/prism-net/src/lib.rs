@@ -9,6 +9,7 @@
 //! - [`nft`]: a minimal nftables netlink layer that replaces whole tables atomically.
 //! - [`dhcp`]: an embedded static-lease `DHCPv4` server bound to one interface.
 //! - [`dns`]: an authoritative responder for a switch zone that forwards everything else.
+//! - [`ra`]: `IPv6` router advertisements for SLAAC, with the DNS server and search domain.
 
 mod error;
 mod handle;
@@ -17,6 +18,7 @@ pub mod dhcp;
 pub mod dns;
 pub mod link;
 pub mod nft;
+pub mod ra;
 pub mod wireguard;
 
 pub use error::{Error, Result};

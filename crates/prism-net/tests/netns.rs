@@ -536,6 +536,7 @@ async fn nft_tables_match_cli() {
     inet.chains.push(guest_input_chain(&[SwitchServices {
         bridge: "ps1".into(),
         vip: Ipv4Addr::new(10, 20, 0, 1),
+        vip6: None,
     }]));
     assert_same_as_cli(&mine, &Ns::new("pnt-nft-r1"), &inet, BOUNDARY_TEXT);
 
@@ -557,6 +558,7 @@ async fn nft_tables_match_cli() {
         tap: "pn1".into(),
         mac: "52:54:00:00:00:01".parse().unwrap(),
         ipv4: Some(Ipv4Addr::new(10, 20, 0, 5)),
+        ipv6: prism_net::nft::Ipv6Source::default(),
         trunk: false,
     }]);
     assert_same_as_cli(&mine, &Ns::new("pnt-nft-r3"), &bridge, BRIDGE_TEXT);

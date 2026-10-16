@@ -26,8 +26,8 @@ async fn vlan_interface_on_a_bridge() {
     assert_eq!(link.kind.as_deref(), Some("vlan"));
     assert_eq!(link.mtu, Some(1300));
     assert!(link.up);
-    // The kernel put the VLAN in the bridge's own table, so tagged frames reach the interface.
-    assert!(ns.exec("bridge vlan show dev ps1").contains("20"));
+    // The VLAN is in the bridge's own table, so frames sent by the interface are not dropped.
+    assert!(ns.exec("bridge vlan show dev ps1").lines().any(|l| l.trim() == "20"));
     assert!(
         nl.ensure_vlan_interface("ps1.1", "ps1", 4095, 1300)
             .await

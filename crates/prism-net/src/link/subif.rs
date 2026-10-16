@@ -1,15 +1,16 @@
 //! VLAN interfaces on a switch bridge: the layer 3 side of one VLAN.
 
-use rtnetlink::{LinkUnspec, LinkVlan};
+use netlink_packet_route::link::BridgeVlanInfoFlags;
+use rtnetlink::{LinkBridgeVlan, LinkUnspec, LinkVlan};
 
 use super::{LinkKind, check_ifname};
 use crate::{Error, Netlink, Result};
 
 impl Netlink {
     /// Creates `name` as an 802.1Q interface for `vid` on `parent`, or corrects its MTU on an
-    /// existing one, and brings it up. On a bridge with VLAN filtering the kernel adds `vid` to
-    /// the bridge's own VLAN table when the interface appears, so tagged frames reach it.
-    /// Returns the interface index.
+    /// existing one, and brings it up. It also adds `vid` to the bridge's own VLAN table (`bridge
+    /// vlan add dev <parent> vid <vid> self`), without which a filtering bridge drops the frames
+    /// the interface sends. Returns the interface index.
     pub async fn ensure_vlan_interface(
         &self,
         name: &str,
@@ -37,6 +38,18 @@ impl Netlink {
             .execute()
             .await
             .map_err(|e| Error::rtnl(format!("configure vlan interface {name}"), e))?;
+        let base = self.link_index(parent).await?;
+        self.route
+            .link()
+            .set(
+                LinkBridgeVlan::new(base)
+                    .vlan(vid, BridgeVlanInfoFlags::empty())
+                    .bridge_self()
+                    .build(),
+            )
+            .execute()
+            .await
+            .map_err(|e| Error::rtnl(format!("add VLAN {vid} to {parent}"), e))?;
         Ok(index)
     }
 }

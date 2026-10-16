@@ -7,12 +7,19 @@
 //! A full HTTP stack (hyper, reqwest) would be far more than a single
 //! streaming GET needs.
 //!
+//! The client resolves each host once, checks every answer against a
+//! [`Policy`] and connects to the checked address, so a second lookup cannot
+//! swap in another one. Each redirect hop goes through the same check.
+//!
 //! Connecting and each read have their own timeouts. A download has no total
 //! deadline: a server that keeps sending slowly runs until the task's
 //! cancellation token fires.
 
 mod body;
+mod policy;
 mod url;
+
+pub use policy::{Policy, own_addresses};
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -94,16 +101,48 @@ struct Head {
     chunked: bool,
 }
 
+/// Resolves `u.host`, checks every address and connects to the first that
+/// answers. IP literals skip the lookup but not the check.
+async fn connect_checked(u: &Url, policy: &Policy) -> Result<TcpStream, FetchError> {
+    let ips: Vec<std::net::IpAddr> = match u.host.parse::<std::net::IpAddr>() {
+        Ok(ip) => vec![ip],
+        Err(_) => tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            tokio::net::lookup_host((u.host.as_str(), u.port)),
+        )
+        .await
+        .map_err(|_| FetchError::Failed(format!("resolving {}: timed out", u.host)))?
+        .map_err(|e| FetchError::Failed(format!("resolving {}: {e}", u.host)))?
+        .map(|a| a.ip())
+        .collect(),
+    };
+    if ips.is_empty() {
+        return fail(format!("{} has no address", u.host));
+    }
+    policy
+        .check_all(&u.host, &ips)
+        .map_err(FetchError::Failed)?;
+    let mut last = String::from("no address");
+    for ip in ips {
+        match tokio::time::timeout(
+            CONNECT_TIMEOUT,
+            TcpStream::connect(std::net::SocketAddr::new(ip, u.port)),
+        )
+        .await
+        {
+            Ok(Ok(tcp)) => return Ok(tcp),
+            Ok(Err(e)) => last = e.to_string(),
+            Err(_) => last = "timed out".into(),
+        }
+    }
+    fail(format!("connecting to {}: {last}", u.host))
+}
+
 async fn connect(
     u: &Url,
+    policy: &Policy,
 ) -> Result<(Box<dyn AsyncRead + Unpin + Send>, Box<dyn Writer>), FetchError> {
-    let tcp = tokio::time::timeout(
-        CONNECT_TIMEOUT,
-        TcpStream::connect((u.host.as_str(), u.port)),
-    )
-    .await
-    .map_err(|_| FetchError::Failed(format!("connecting to {}: timed out", u.host)))?
-    .map_err(|e| FetchError::Failed(format!("connecting to {}: {e}", u.host)))?;
+    let tcp = connect_checked(u, policy).await?;
     if let Err(e) = tcp.set_nodelay(true) {
         tracing::debug!(host = %u.host, "could not set TCP_NODELAY: {e}");
     }
@@ -167,6 +206,7 @@ pub async fn download(
     url: &str,
     dest: &Path,
     want_sha256: Option<&str>,
+    policy: &Policy,
     cancel: &CancellationToken,
     mut progress: impl FnMut(u64, Option<u64>) + Send,
 ) -> Result<Fetched, FetchError> {
@@ -174,7 +214,7 @@ pub async fn download(
     for _ in 0..=MAX_REDIRECTS {
         let (reader, mut writer) = tokio::select! {
             () = cancel.cancelled() => return Err(FetchError::Cancelled),
-            r = connect(&u) => r?,
+            r = connect(&u, policy) => r?,
         };
         let req = format!(
             "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: prism\r\nAccept: */*\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n",

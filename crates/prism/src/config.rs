@@ -31,6 +31,8 @@ pub struct Config {
     pub pools: BTreeMap<String, PoolConfig>,
     /// `[cluster]`: how other members reach this node.
     pub cluster: ClusterSection,
+    /// `[download]`: which addresses URL downloads may reach.
+    pub download: DownloadConfig,
     /// Directories this node contributes to archive pools.
     pub archive_members: BTreeMap<String, ArchiveMemberConfig>,
 }
@@ -120,6 +122,18 @@ impl Default for ClusterSection {
     }
 }
 
+/// `[download]` settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct DownloadConfig {
+    /// Let URL downloads reach private ranges (RFC 1918, unique local and
+    /// carrier-grade NAT). Loopback, link-local, the mesh and this node's own
+    /// addresses stay blocked.
+    pub allow_private: bool,
+    /// Networks that downloads may always reach, even when blocked above.
+    pub allow: Vec<ipnet::IpNet>,
+}
+
 /// `[node]` settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -168,6 +182,10 @@ pub struct LibvirtConfig {
     /// Explicit UEFI firmware image, used as a read-only ROM loader instead
     /// of libvirt's firmware auto-selection.
     pub uefi_loader: Option<PathBuf>,
+    /// Seconds a snapshot, a revert or a live migration may go without
+    /// progress before Prism aborts it. 0 turns the check off. There is no
+    /// limit on the total time.
+    pub job_stall_timeout_secs: u64,
 }
 
 impl Default for LibvirtConfig {
@@ -179,13 +197,10 @@ impl Default for LibvirtConfig {
             emulator: None,
             qemu_img: "qemu-img".into(),
             uefi_loader: None,
+            job_stall_timeout_secs: 300,
         }
     }
 }
-    /// Seconds a snapshot, a revert or a live migration may go without
-    /// progress before Prism aborts it. 0 turns the check off. There is no
-    /// limit on the total time.
-    pub job_stall_timeout_secs: u64,
 
 /// `[storage]` settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -197,7 +212,6 @@ pub struct StorageConfig {
 
 /// `[pools.<name>]`: a disk pool defined in the config file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-            job_stall_timeout_secs: 300,
 #[serde(deny_unknown_fields)]
 pub struct PoolConfig {
     /// Pool type; only `dir` exists.
@@ -279,6 +293,12 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("/run/libvirt/virtqemud-sock"))
     }
 
+    /// How long a libvirt job may go without progress before it is aborted;
+    /// zero means never.
+    pub fn job_stall_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.libvirt.job_stall_timeout_secs)
+    }
+
     /// The libvirt domain type to use, resolving `auto` to `kvm` when
     /// `/dev/kvm` exists and `qemu` (software emulation) otherwise.
     pub fn domain_type(&self) -> &str {
@@ -293,12 +313,6 @@ impl Config {
 /// The `prism.toml` text written by `prism init`, with the default pool at
 /// `pool_path`.
 pub fn default_toml(pool_path: &Path) -> String {
-    /// How long a libvirt job may go without progress before it is aborted;
-    /// zero means never.
-    pub fn job_stall_timeout(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.libvirt.job_stall_timeout_secs)
-    }
-
     format!(
         r#"[http]
 # Loopback by default. Reach the UI with `tailscale serve`, an SSH tunnel or a
@@ -318,6 +332,10 @@ pool_roots = []          # directories under which the API may create pools
 [cluster]
 advertise = []           # underlay IPs/names other members reach this node at
 wireguard_port = 51820   # the only port members need open between them
+
+[download]
+allow_private = false    # URL downloads refuse private, loopback and mesh addresses
+allow = []               # CIDRs downloads may always reach
 
 [pools.default]
 type = "dir"

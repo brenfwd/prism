@@ -22,19 +22,22 @@ First release.
 - `prism init`, `serve`, `doctor`, `cluster`, `join` and `leave` subcommands.
 - An OpenAPI document served by the API, with `docs/API.md`.
 - A user guide in `docs/guide`, the design document in `docs/DESIGN.md`, a systemd unit and a commented `prism.toml` example in `contrib/`.
+- A `[download]` section in `prism.toml`. URL downloads refuse loopback, link-local, multicast, reserved and private addresses, the mesh and the node's own addresses, including names that resolve to them and redirects to them. `allow_private` and an `allow` list of CIDRs open specific ranges.
 - Guests on IPv6 networks may use stable-privacy, temporary or static addresses. The node learns them from the bridge's neighbour table and the guest agent, uses them for AAAA records and IPv6 port forwards, and falls back to the EUI-64 address.
 - `allow_prefixes` takes IPv6 prefixes next to IPv4 ones.
 - Trunk NICs get IPv6 source, neighbour advertisement and redirect checks on VLAN-tagged frames, and the bridge drops DHCPv6 server replies and, on trunks, tagged router advertisements.
+- The bridge drops neighbour messages whose first option is not the link-layer address option, and messages sent from or claiming a node's address. Port forwards without a host address match only destinations that are addresses of the node. The guest agent's addresses and a cap on seen addresses keep a guest from taking over another NIC's learned address.
 - `prism --version` prints the short git hash and build date.
 - `cargo xtask` runs a testbed of nested VMs for integration testing.
 
 ### Changed
 
 - Crate metadata is filled in. `prism-libvirt`, `prism-iso` and `prism-net` can be published; the other crates have `publish = false`. The minimum Rust version is 1.89.
-
 - Port forwards on Prism networks match the incoming interface. External connections are forwarded only when they arrive on the node's uplink for the guest's address family, host-originated ones go through the output chain, and hairpin connections are accepted only from the guest's own bridge. Traffic from `wg-prism` and from other networks' bridges is not forwarded.
+
 ### Behaviour notes
 
+- A VM document written before clustering has `owner_epoch` 0 or none. It now loads as epoch 1, so the memory-snapshot revert guard applies to its first move.
 - Calls to libvirt time out after 600 seconds, except snapshot create, snapshot revert and the transfer step of a live migration. Those have no time limit. Cancelling the task aborts the libvirt job, and so does a job that shows no progress for `libvirt.job_stall_timeout_secs` (300 by default, 0 turns it off).
 - A live migration that fails, stalls or is cancelled aborts the job on the source, cleans up the destination and resumes the source domain if it was running before. When the transfer finished but the destination cannot be reached, the source stays untouched and the migration intent stays until it is resolved.
 - A port forward on a host port that Prism listens on (the `http.listen` ports, the WireGuard port, and cluster ports 7443 and 7444) is refused. URL downloads are capped at 256 GiB and refuse redirects from https to http.

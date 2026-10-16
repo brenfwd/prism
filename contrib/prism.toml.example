@@ -41,6 +41,18 @@
 # Directories under which the API may create pools.
 # pool_roots = []
 
+[download]
+# URL downloads refuse loopback, link-local, multicast and reserved
+# addresses, private ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+# 100.64.0.0/10 and fc00::/7), the cluster mesh and this node's own
+# addresses. This applies to every address a name resolves to and to each
+# redirect.
+# Set true to allow the private ranges. Loopback, link-local, the mesh and
+# this node stay blocked.
+# allow_private = false
+# Networks downloads may always reach, even when the rules above block them.
+# allow = ["10.20.0.0/16"]
+
 # Disk pools fixed by this file. Remove them by editing the file.
 # [pools.default]
 # type = "dir"                              # only "dir" exists

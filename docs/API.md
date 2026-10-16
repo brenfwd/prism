@@ -107,7 +107,7 @@ Long operations (snapshots, clone, move, migrate, backups, restores, downloads, 
 | `GET` and `POST /nodes/{node}/pools/{pool}/volumes` | List, create an empty volume |
 | `GET`, `PUT` and `DELETE /nodes/{node}/pools/{pool}/volumes/{volume}` | Show, upload (raw body, `application/octet-stream`), delete |
 | `GET /nodes/{node}/pools/{pool}/volumes/{volume}/users` | VMs that use the volume |
-| `POST /nodes/{node}/pools/{pool}/downloads` | Download a URL into the pool |
+| `POST /nodes/{node}/pools/{pool}/downloads` | Download a URL into the pool; the task fails for loopback, link-local, private, mesh and own addresses unless `[download]` allows them |
 
 ### Archive
 

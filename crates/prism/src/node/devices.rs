@@ -84,17 +84,16 @@ fn valid_mac(mac: &str) -> bool {
 
 impl Node {
     fn nic_xml(&self, nic: &crate::spec::NicSpec) -> Result<String> {
-        render::nic_xml(nic, &self.network_bridges(), "").map_err(NodeError::Invalid)
+        Ok(render::nic_xml(nic, &self.network_bridges(), "")?)
     }
 
     fn device_xml(&self, disk: &DiskSpec) -> Result<String> {
         let pool = |p: &str| self.pool_loc(p);
-        render::disk_xml(
+        Ok(render::disk_xml(
             disk,
             &self.render_ctx(&pool, None, &self.network_bridges()),
             "",
-        )
-        .map_err(NodeError::Invalid)
+        )?)
     }
 
     /// Persists `spec` and, when the VM runs, applies `live` to it.

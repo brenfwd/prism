@@ -1,17 +1,48 @@
-//! `VmSpec` → libvirt domain XML. Pure functions, tested against golden output.
+//! `VmSpec` to libvirt domain XML. Rendering is pure: the same spec and
+//! context always give the same text, which the golden test in this module
+//! compares byte for byte against `tests/golden/basic.xml`.
+//!
+//! [`render`] builds the persistent domain definition. [`disk_xml`],
+//! [`nic_xml`] and [`seed_xml`] produce single device elements for hot-plug.
+//! The `parse` submodule reads values back out of libvirt's live XML.
 
-use std::fmt::Write;
+mod devices;
+mod parse;
+
 use std::path::{Path, PathBuf};
 
 use quick_xml::escape::escape;
 
-use crate::spec::{
-    BalloonMode, CpuModel, DiskDevice, DiskSpec, Firmware, NicNetwork, NicSpec, VmSpec,
-};
+use crate::spec::{BalloonMode, CpuModel, Firmware, VmSpec};
+
+use devices::root_ports;
+pub use devices::{disk_xml, nic_xml, seed_target, seed_xml};
+pub use parse::{disk_sources, machine_type, vnc_socket};
+
+/// Appends one line of XML to a `String`. Writing to a `String` cannot fail.
+macro_rules! line {
+    ($w:expr, $($arg:tt)*) => {{
+        use std::fmt::Write as _;
+        writeln!($w, $($arg)*).expect("writing to a String cannot fail");
+    }};
+}
+use line;
+
+/// Why a spec could not be rendered.
+#[derive(Debug, thiserror::Error)]
+pub enum RenderError {
+    /// A disk names a storage pool this node does not have.
+    #[error("unknown pool {0}")]
+    UnknownPool(String),
+    /// A NIC is attached to a Prism network with no bridge on this node.
+    #[error("unknown network {0}")]
+    UnknownNetwork(uuid::Uuid),
+}
 
 /// Where a pool keeps its files.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolLoc {
+    /// Absolute directory of the pool.
     pub path: PathBuf,
     /// The filesystem supports `O_DIRECT`, so disks use `cache='none'`.
     pub direct_io: bool,
@@ -20,9 +51,14 @@ pub struct PoolLoc {
 /// Host-specific inputs to rendering.
 #[derive(Clone)]
 pub struct RenderCtx<'a> {
+    /// libvirt domain type: `kvm`, or `qemu` for software emulation.
     pub domain_type: &'a str,
+    /// Path of the QEMU binary; libvirt picks one when `None`.
     pub emulator: Option<&'a Path>,
+    /// UEFI firmware image; with `None`, UEFI VMs use libvirt's firmware
+    /// autoselection.
     pub uefi_loader: Option<&'a Path>,
+    /// Resolves a pool name to its location.
     pub pool: &'a dyn Fn(&str) -> Option<PoolLoc>,
     /// A cloud-init seed ISO to attach as an extra read-only CD-ROM.
     pub seed_iso: Option<&'a Path>,
@@ -30,171 +66,41 @@ pub struct RenderCtx<'a> {
     pub bridges: &'a std::collections::HashMap<uuid::Uuid, String>,
 }
 
+/// XML namespace of the `<prism:vm>` metadata element.
 pub const METADATA_NS: &str = "urn:prism:1";
-/// Empty PCI Express root ports so disks and NICs can be hot-plugged on `q35`.
-/// libvirt puts the VM's own devices on the declared ports first, so these
-/// come on top of the ports those devices take (see `root_ports`).
-const SPARE_ROOT_PORTS: usize = 6;
-/// Devices libvirt adds on its own that sit behind a root port: balloon,
-/// RNG, the guest-agent serial controller and the USB controller.
-const BUILTIN_PORT_DEVICES: usize = 5;
-
-/// Root ports to declare: one per disk and NIC, the built-in devices and the
-/// hot-plug spares.
-fn root_ports(spec: &VmSpec) -> usize {
-    let disks = spec
-        .disks
-        .iter()
-        .filter(|d| d.device == DiskDevice::Disk)
-        .count();
-    disks + spec.nics.len() + BUILTIN_PORT_DEVICES + SPARE_ROOT_PORTS
-}
 
 fn esc(s: &str) -> std::borrow::Cow<'_, str> {
     escape(s)
 }
 
-/// The `<disk>` element for one disk, as used both in the domain and for hotplug.
-pub fn disk_xml(disk: &DiskSpec, ctx: &RenderCtx<'_>, indent: &str) -> Result<String, String> {
-    let pool = (ctx.pool)(&disk.pool).ok_or_else(|| format!("unknown pool {}", disk.pool))?;
-    let mut x = String::new();
-    let w = &mut x;
-    let (device, bus) = match disk.device {
-        DiskDevice::Disk => ("disk", "virtio"),
-        DiskDevice::Cdrom => ("cdrom", "sata"),
-    };
-    let _ = writeln!(w, "{indent}<disk type='file' device='{device}'>");
-    match disk.device {
-        DiskDevice::Disk if pool.direct_io => {
-            let _ = writeln!(
-                w,
-                "{indent}  <driver name='qemu' type='{}' cache='none' io='native' discard='unmap'/>",
-                esc(&disk.format)
-            );
-        }
-        DiskDevice::Disk => {
-            let _ = writeln!(
-                w,
-                "{indent}  <driver name='qemu' type='{}' cache='writeback' discard='unmap'/>",
-                esc(&disk.format)
-            );
-        }
-        DiskDevice::Cdrom => {
-            let _ = writeln!(w, "{indent}  <driver name='qemu' type='raw'/>");
-        }
-    }
-    if let Some(volume) = &disk.volume {
-        let path = pool.path.join(volume);
-        let _ = writeln!(
-            w,
-            "{indent}  <source file='{}'/>",
-            esc(&path.to_string_lossy())
-        );
-    }
-    let _ = writeln!(
-        w,
-        "{indent}  <target dev='{}' bus='{bus}'/>",
-        esc(&disk.target)
-    );
-    if disk.device == DiskDevice::Cdrom {
-        let _ = writeln!(w, "{indent}  <readonly/>");
-    }
-    if let Some(order) = disk.boot_order {
-        let _ = writeln!(w, "{indent}  <boot order='{order}'/>");
-    }
-    let _ = writeln!(
-        w,
-        "{indent}  <serial>{}</serial>",
-        &disk.id.simple().to_string()[..20]
-    );
-    let _ = writeln!(w, "{indent}  <alias name='ua-{}'/>", disk.id);
-    let _ = writeln!(w, "{indent}</disk>");
-    Ok(x)
-}
-
-/// The `<interface>` element for one NIC.
-pub fn nic_xml(
-    nic: &NicSpec,
-    bridges: &std::collections::HashMap<uuid::Uuid, String>,
-    indent: &str,
-) -> Result<String, String> {
-    let mut x = String::new();
-    let w = &mut x;
-    let tap = |w: &mut String, bridge: &str| {
-        let _ = writeln!(w, "{indent}<interface type='bridge'>");
-        let _ = writeln!(w, "{indent}  <source bridge='{}'/>", esc(bridge));
-        let _ = writeln!(
-            w,
-            "{indent}  <target dev='pn{}'/>",
-            &nic.id.simple().to_string()[..8]
-        );
-    };
-    match &nic.network {
-        NicNetwork::Bridge { bridge } => tap(w, bridge),
-        NicNetwork::Network { network, .. } => {
-            let bridge = bridges
-                .get(network)
-                .ok_or_else(|| format!("unknown network {network}"))?;
-            tap(w, bridge);
-        }
-        NicNetwork::User { forwards } => {
-            let _ = writeln!(w, "{indent}<interface type='user'>");
-            if !forwards.is_empty() {
-                // Only the passt backend can forward ports.
-                let _ = writeln!(w, "{indent}  <backend type='passt'/>");
-                for f in forwards {
-                    let _ = writeln!(
-                        w,
-                        "{indent}  <portForward proto='{}' address='{}'><range start='{}' to='{}'/></portForward>",
-                        f.proto.as_str(),
-                        f.listen_addr(),
-                        f.host_port,
-                        f.guest_port
-                    );
-                }
-            }
-        }
-    }
-    let _ = writeln!(w, "{indent}  <mac address='{}'/>", esc(&nic.mac));
-    let _ = writeln!(w, "{indent}  <model type='virtio'/>");
-    if let Some(order) = nic.boot_order {
-        let _ = writeln!(w, "{indent}  <boot order='{order}'/>");
-    }
-    let _ = writeln!(w, "{indent}  <alias name='ua-{}'/>", nic.id);
-    let _ = writeln!(w, "{indent}</interface>");
-    Ok(x)
-}
-
-/// The seed CD-ROM, as a `<disk>` element.
-///
-/// It takes the lowest SATA name not used by the VM's CD-ROMs: libvirt
-/// derives the controller index from the name, so a high name like `sdzz`
-/// would make it create a controller for every slot below it.
-pub fn seed_xml(path: &Path, target: &str, indent: &str) -> String {
-    format!(
-        "{indent}<disk type='file' device='cdrom'>\n{indent}  <driver name='qemu' type='raw'/>\n\
-         {indent}  <source file='{}'/>\n{indent}  <target dev='{target}' bus='sata'/>\n\
-         {indent}  <readonly/>\n{indent}  <alias name='ua-cloud-init'/>\n{indent}</disk>\n",
-        esc(&path.to_string_lossy())
-    )
-}
-
 /// Renders the persistent domain definition for `spec`.
-pub fn render(spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<String, String> {
+pub fn render(spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<String, RenderError> {
     let mut x = String::with_capacity(4096);
     let w = &mut x;
-    let _ = writeln!(w, "<domain type='{}'>", esc(ctx.domain_type));
-    let _ = writeln!(w, "  <name>{}</name>", esc(&spec.name));
-    let _ = writeln!(w, "  <uuid>{}</uuid>", spec.id);
+    write_identity(w, spec, ctx);
+    write_boot_and_cpu(w, spec, ctx);
+    line!(w, "  <devices>");
+    write_devices(w, spec, ctx)?;
+    line!(w, "  </devices>");
+    line!(w, "</domain>");
+    Ok(x)
+}
+
+/// Name, UUID, Prism metadata, memory and vCPU count.
+fn write_identity(w: &mut String, spec: &VmSpec, ctx: &RenderCtx<'_>) {
+    line!(w, "<domain type='{}'>", esc(ctx.domain_type));
+    line!(w, "  <name>{}</name>", esc(&spec.name));
+    line!(w, "  <uuid>{}</uuid>", spec.id);
     if !spec.description.is_empty() {
-        let _ = writeln!(w, "  <description>{}</description>", esc(&spec.description));
+        line!(w, "  <description>{}</description>", esc(&spec.description));
     }
-    let _ = writeln!(
+    line!(
         w,
         "  <metadata>\n    <prism:vm xmlns:prism='{METADATA_NS}' generation='{}' epoch='{}'/>\n  </metadata>",
-        spec.generation, spec.owner_epoch
+        spec.generation,
+        spec.owner_epoch
     );
-    let _ = writeln!(
+    line!(
         w,
         "  <memory unit='KiB'>{}</memory>",
         spec.memory.max_mib * 1024
@@ -203,58 +109,64 @@ pub fn render(spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<String, String> {
         BalloonMode::Off => spec.memory.max_mib,
         BalloonMode::Manual | BalloonMode::Auto => spec.memory.target_mib,
     };
-    let _ = writeln!(
+    line!(
         w,
         "  <currentMemory unit='KiB'>{}</currentMemory>",
         current * 1024
     );
-    let _ = writeln!(w, "  <vcpu placement='static'>{}</vcpu>", spec.cpu.vcpus);
+    line!(w, "  <vcpu placement='static'>{}</vcpu>", spec.cpu.vcpus);
+}
 
+/// Firmware, machine type, features, CPU model, clock and power events.
+fn write_boot_and_cpu(w: &mut String, spec: &VmSpec, ctx: &RenderCtx<'_>) {
     match (spec.firmware, ctx.uefi_loader) {
         (Firmware::Uefi, None) => {
-            let _ = writeln!(w, "  <os firmware='efi'>");
+            line!(w, "  <os firmware='efi'>");
         }
         _ => {
-            let _ = writeln!(w, "  <os>");
+            line!(w, "  <os>");
         }
     }
-    let _ = writeln!(
+    line!(
         w,
         "    <type arch='x86_64' machine='{}'>hvm</type>",
         esc(&spec.machine)
     );
     if let (Firmware::Uefi, Some(loader)) = (spec.firmware, ctx.uefi_loader) {
-        let _ = writeln!(
+        line!(
             w,
             "    <loader readonly='yes' type='rom'>{}</loader>",
             esc(&loader.to_string_lossy())
         );
     }
-    let _ = writeln!(w, "  </os>");
-    let _ = writeln!(w, "  <features>\n    <acpi/>\n    <apic/>\n  </features>");
+    line!(w, "  </os>");
+    line!(w, "  <features>\n    <acpi/>\n    <apic/>\n  </features>");
     match (ctx.domain_type, spec.cpu.model) {
         ("kvm", CpuModel::HostModel) => {
-            let _ = writeln!(w, "  <cpu mode='host-model'/>");
+            line!(w, "  <cpu mode='host-model'/>");
         }
         ("kvm", CpuModel::HostPassthrough) => {
-            let _ = writeln!(w, "  <cpu mode='host-passthrough' migratable='on'/>");
+            line!(w, "  <cpu mode='host-passthrough' migratable='on'/>");
         }
         _ => {
-            let _ = writeln!(
+            line!(
                 w,
                 "  <cpu mode='custom' match='exact'>\n    <model fallback='allow'>qemu64</model>\n  </cpu>"
             );
         }
     }
-    let _ = writeln!(w, "  <clock offset='utc'/>");
-    let _ = writeln!(
+    line!(w, "  <clock offset='utc'/>");
+    line!(
         w,
         "  <on_poweroff>destroy</on_poweroff>\n  <on_reboot>restart</on_reboot>\n  <on_crash>destroy</on_crash>"
     );
+}
 
-    let _ = writeln!(w, "  <devices>");
+/// Everything inside `<devices>`: disks, NICs, PCI root ports, console,
+/// display, balloon and RNG.
+fn write_devices(w: &mut String, spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<(), RenderError> {
     if let Some(emu) = ctx.emulator {
-        let _ = writeln!(
+        line!(
             w,
             "    <emulator>{}</emulator>",
             esc(&emu.to_string_lossy())
@@ -270,195 +182,47 @@ pub fn render(spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<String, String> {
         w.push_str(&nic_xml(nic, ctx.bridges, "    ")?);
     }
     // Declared first so libvirt numbers the spare ports from 1.
-    let _ = writeln!(
+    line!(
         w,
         "    <controller type='pci' index='0' model='pcie-root'/>"
     );
     for _ in 0..root_ports(spec) {
-        let _ = writeln!(w, "    <controller type='pci' model='pcie-root-port'/>");
+        line!(w, "    <controller type='pci' model='pcie-root-port'/>");
     }
-    let _ = writeln!(
+    line!(
         w,
         "    <serial type='pty'>\n      <target port='0'/>\n    </serial>\n    <console type='pty'>\n      <target type='serial' port='0'/>\n    </console>"
     );
-    let _ = writeln!(
+    line!(
         w,
         "    <channel type='unix'>\n      <target type='virtio' name='org.qemu.guest_agent.0'/>\n    </channel>"
     );
-    let _ = writeln!(w, "    <input type='tablet' bus='usb'/>");
-    let _ = writeln!(
+    line!(w, "    <input type='tablet' bus='usb'/>");
+    line!(
         w,
         "    <graphics type='vnc'>\n      <listen type='socket'/>\n    </graphics>"
     );
-    let _ = writeln!(
+    line!(
         w,
         "    <video>\n      <model type='virtio' heads='1'/>\n    </video>"
     );
     match spec.memory.balloon {
         BalloonMode::Off => {
-            let _ = writeln!(w, "    <memballoon model='none'/>");
+            line!(w, "    <memballoon model='none'/>");
         }
         BalloonMode::Manual | BalloonMode::Auto => {
-            let _ = writeln!(
+            line!(
                 w,
                 "    <memballoon model='virtio' autodeflate='on' freePageReporting='on'>\n      <stats period='5'/>\n    </memballoon>"
             );
         }
     }
-    let _ = writeln!(
+    line!(
         w,
         "    <rng model='virtio'>\n      <backend model='random'>/dev/urandom</backend>\n    </rng>"
     );
-    let _ = writeln!(w, "  </devices>");
-    let _ = writeln!(w, "</domain>");
-    Ok(x)
-}
-
-/// The SATA name for the cloud-init seed CD-ROM.
-pub fn seed_target(spec: &VmSpec) -> String {
-    (0..26 * 27)
-        .map(|i| crate::spec::disk_target("sd", i))
-        .find(|t| !spec.disks.iter().any(|d| d.target == *t))
-        .unwrap_or_default()
-}
-
-/// `(target, source file)` for each `<disk>` in domain XML, in document order.
-pub fn disk_sources(xml: &str) -> Vec<(String, Option<PathBuf>)> {
-    use quick_xml::Reader;
-    use quick_xml::events::Event;
-
-    let mut reader = Reader::from_str(xml);
-    let mut out = Vec::new();
-    let mut depth = 0usize;
-    let mut disk_depth = None;
-    let (mut target, mut source) = (None, None);
-    loop {
-        let Ok(ev) = reader.read_event() else {
-            return out;
-        };
-        match ev {
-            Event::Start(e) => {
-                depth += 1;
-                if e.name().as_ref() == "disk" && disk_depth.is_none() {
-                    disk_depth = Some(depth);
-                    (target, source) = (None, None);
-                } else if disk_depth.is_some() && depth == disk_depth.unwrap_or(0) + 1 {
-                    take_disk_child(&e, &mut target, &mut source);
-                }
-            }
-            Event::Empty(e) => {
-                if disk_depth.is_some_and(|d| depth == d) {
-                    take_disk_child(&e, &mut target, &mut source);
-                }
-            }
-            Event::End(e) => {
-                if e.name().as_ref() == "disk" && disk_depth == Some(depth) {
-                    disk_depth = None;
-                    if let Some(t) = target.take() {
-                        out.push((t, source.take().map(PathBuf::from)));
-                    }
-                }
-                depth = depth.saturating_sub(1);
-            }
-            Event::Eof => return out,
-            _ => {}
-        }
-    }
-}
-
-fn take_disk_child(
-    e: &quick_xml::events::BytesStart<'_>,
-    target: &mut Option<String>,
-    source: &mut Option<String>,
-) {
-    match e.name().as_ref() {
-        "target" => *target = get_attr(e, "dev"),
-        "source" => *source = get_attr(e, "file"),
-        _ => {}
-    }
-}
-
-/// Extracts the VNC UNIX socket path from live domain XML.
-pub fn vnc_socket(live_xml: &str) -> Option<PathBuf> {
-    attr_in_element(live_xml, "graphics", "type='vnc'", "socket")
-        .or_else(|| attr_in_element(live_xml, "graphics", "type=\"vnc\"", "socket"))
-        .map(PathBuf::from)
-}
-
-/// Finds the first `<tag …>` containing `marker` and returns attribute `attr`
-/// from it or from its first child element that has it.
-fn attr_in_element(xml: &str, tag: &str, marker: &str, attr: &str) -> Option<String> {
-    use quick_xml::Reader;
-    use quick_xml::events::Event;
-
-    let mut reader = Reader::from_str(xml);
-    let mut depth_in = 0usize;
-    let marker_key = marker.split('=').next()?;
-    let marker_val = marker.split('=').nth(1)?.trim_matches(['\'', '"']);
-    loop {
-        match reader.read_event().ok()? {
-            Event::Start(e) | Event::Empty(e) if depth_in == 0 => {
-                if e.name().as_ref() == tag
-                    && e.attributes()
-                        .flatten()
-                        .any(|a| a.key.as_ref() == marker_key && a.value.as_ref() == marker_val)
-                {
-                    if let Some(v) = get_attr(&e, attr) {
-                        return Some(v);
-                    }
-                    depth_in = 1;
-                }
-            }
-            Event::Start(e) if depth_in > 0 => {
-                if let Some(v) = get_attr(&e, attr) {
-                    return Some(v);
-                }
-                depth_in += 1;
-            }
-            Event::Empty(e) if depth_in > 0 => {
-                if let Some(v) = get_attr(&e, attr) {
-                    return Some(v);
-                }
-            }
-            Event::End(_) if depth_in > 0 => {
-                depth_in -= 1;
-                if depth_in == 0 {
-                    return None;
-                }
-            }
-            Event::Eof => return None,
-            _ => {}
-        }
-    }
-}
-
-fn get_attr(e: &quick_xml::events::BytesStart<'_>, attr: &str) -> Option<String> {
-    e.attributes()
-        .flatten()
-        .find(|a| a.key.as_ref() == attr)
-        .and_then(|a| {
-            a.normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                .ok()
-                .map(std::borrow::Cow::into_owned)
-        })
-}
-
-/// Extracts the expanded machine type (for example `pc-q35-10.2`) from
-/// domain XML.
-pub fn machine_type(xml: &str) -> Option<String> {
-    use quick_xml::Reader;
-    use quick_xml::events::Event;
-
-    let mut reader = Reader::from_str(xml);
-    loop {
-        match reader.read_event().ok()? {
-            Event::Start(e) | Event::Empty(e) if e.name().as_ref() == "type" => {
-                return get_attr(&e, "machine");
-            }
-            Event::Eof => return None,
-            _ => {}
-        }
-    }
+    line!(w, "  </devices>");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -589,7 +353,10 @@ mod tests {
     #[test]
     fn unknown_pool() {
         let none = |_: &str| None;
-        assert!(render(&spec(), &ctx(&none, None)).is_err());
+        assert!(matches!(
+            render(&spec(), &ctx(&none, None)),
+            Err(RenderError::UnknownPool(_))
+        ));
     }
 
     #[test]

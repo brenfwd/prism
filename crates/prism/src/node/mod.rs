@@ -99,6 +99,12 @@ impl From<StateError> for NodeError {
     }
 }
 
+impl From<render::RenderError> for NodeError {
+    fn from(e: render::RenderError) -> Self {
+        Self::Invalid(e.to_string())
+    }
+}
+
 pub type Result<T, E = NodeError> = std::result::Result<T, E>;
 
 #[derive(Debug)]
@@ -369,8 +375,7 @@ impl Node {
         let seed = self.seed_iso(spec)?;
         let pool = |p: &str| self.pool_loc(p);
         let bridges = self.network_bridges();
-        let xml = render::render(spec, &self.render_ctx(&pool, seed.as_deref(), &bridges))
-            .map_err(NodeError::Invalid)?;
+        let xml = render::render(spec, &self.render_ctx(&pool, seed.as_deref(), &bridges))?;
         Ok(c.define_xml(&xml, flags::DOMAIN_DEFINE_VALIDATE).await?)
     }
 

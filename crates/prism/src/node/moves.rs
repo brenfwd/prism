@@ -126,7 +126,9 @@ impl Node {
                 {
                     tracing::warn!(vm = %spec.name, "stopping moved VM: {e}");
                 }
-                let _ = c.undefine(&dom, undefine_flags()).await;
+                if let Err(e) = c.undefine(&dom, undefine_flags()).await {
+                    tracing::warn!(vm = %spec.name, "undefining moved VM: {e}");
+                }
                 node.remove_seed_iso(&spec);
                 for (pool, volume) in &files {
                     if let Err(e) = node.storage.get(pool).and_then(|p| p.delete_volume(volume)) {

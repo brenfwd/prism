@@ -98,10 +98,9 @@ impl Node {
                 .await;
                 if let Err(e) = res {
                     for (pool, volume) in made {
-                        let _ = node
-                            .storage
-                            .get(&pool)
-                            .and_then(|p| p.delete_volume(&volume));
+                        if let Ok(p) = node.storage.get(&pool) {
+                            p.delete_volume_best_effort(&volume);
+                        }
                     }
                     return Err(e);
                 }

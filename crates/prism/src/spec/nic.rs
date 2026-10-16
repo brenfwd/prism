@@ -33,8 +33,9 @@ pub enum NicNetwork {
         /// The IPAM lease; assigned when the VM is stored if absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ipv4: Option<Ipv4Addr>,
-        /// The guest's global IPv6 address, which IPv6 port forwards target.
-        /// Set by hand: the network itself is IPv4 only.
+        /// A fixed global IPv6 address for the guest, which IPv6 port forwards
+        /// target. When absent, the NIC's SLAAC address on the network's IPv6
+        /// prefix is used.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ipv6: Option<Ipv6Addr>,
         /// Egress node override; `None` uses the network's egress.

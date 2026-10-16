@@ -1,6 +1,6 @@
 //! A minimal nftables layer over `NETLINK_NETFILTER`.
 //!
-//! Prism owns only its own tables (`inet prism`, `ip prism-nat`, `bridge prism`) and always
+//! Prism owns only its own tables (`inet prism`, `ip prism-nat`, `ip6 prism-nat`, `bridge prism`) and always
 //! replaces a whole table in one transaction ([`Nft::replace_table`]): the kernel either
 //! commits the complete new table or keeps the old one.
 //!

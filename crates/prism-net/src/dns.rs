@@ -26,8 +26,9 @@ const MAX_TCP_CONNS: usize = 128;
 const MAX_TCP_QUERIES: usize = 64;
 /// How long a TCP client may take to send the length prefix or the body of a query.
 const TCP_READ_TIMEOUT: Duration = Duration::from_secs(10);
-/// Receive buffer for upstream UDP answers; matches the largest EDNS payload we advertise.
-const UPSTREAM_BUF: usize = 4096;
+/// Receive buffer for upstream UDP answers. Queries are forwarded unchanged, so the upstream
+/// may answer up to the client's own EDNS size; 65535 holds any UDP datagram.
+const UPSTREAM_BUF: usize = 65_535;
 
 /// Transport a query arrived on. It decides how large a response may be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

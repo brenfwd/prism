@@ -46,8 +46,8 @@ Errors are RFC 9457 problem details with the content type `application/problem+j
 | 409 | `conflict`, `exists`, `in_use`, `libvirt_error` | The request clashes with current state, or libvirt refused it |
 | 421 | `host_not_allowed` | The Host check failed |
 | 500 | `internal`, `storage_error` | A server fault |
-| 502 | `owner_unreachable`, `replica_unavailable` | The node that owns the resource did not answer |
-| 503 | `libvirt_unavailable`, `cluster_degraded`, `cluster_unavailable` | libvirt is not connected, or the cluster cannot commit changes |
+| 502 | `owner_unreachable`, `replica_unavailable`, `owner_unknown`, `not_clustered` | The node that owns the resource did not answer |
+| 503 | `libvirt_unavailable`, `cluster_degraded`, `cluster_unavailable`, `replica_unavailable` | libvirt is not connected, or the cluster cannot commit changes |
 
 Other codes appear on single routes, for example the join errors listed in the [clustering guide](guide/clustering.md). Unknown JSON fields are refused with `invalid_body`.
 
@@ -57,7 +57,7 @@ Any node answers any request. A request for a VM, a node's pools or a task that 
 
 While a node cannot reach the hub or a quorum, every response carries `X-Prism-Degraded: true`, reads work, and any change that must commit answers 503 `cluster_degraded`.
 
-Long operations (snapshots, clone, move, migrate, backups, restores, downloads, archive repair, scrub, rebalance and drain) answer `202 Accepted` with the task as the body and `Location: /api/v1/tasks/{id}`. Creating a VM, network or pool answers `201 Created`, and deletes answer `204 No Content`. VM writes are not versioned: there are no `ETag` or `If-Match` headers on JSON resources. Lists are not paginated.
+Long operations (snapshots, clone, move, migrate, backups, restores, downloads, archive repair, scrub, rebalance and drain) answer `202 Accepted` with the task as the body and `Location: /api/v1/tasks/{id}`. Creating a VM, network or pool answers `201 Created`, and deletes answer `204 No Content`. There are no `ETag` or `If-Match` headers. `PATCH /vms/{id}` takes an optional `generation` field in the body for optimistic concurrency. Lists are not paginated.
 
 ## Routes
 

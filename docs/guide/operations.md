@@ -4,24 +4,9 @@ This page covers running Prism as a service, checking a host, the changes Prism 
 
 ## Run Prism under systemd
 
-Prism runs in the foreground and logs to standard error, so a unit file is enough. Save this as `/etc/systemd/system/prism.service`:
+Prism runs in the foreground and logs to standard error, so a unit file is enough. The repository ships one as `contrib/prism.service`. Copy it to `/etc/systemd/system/prism.service`, then run `systemctl daemon-reload` and `systemctl enable --now prism`.
 
-```ini
-[Unit]
-Description=Prism libvirt/KVM manager
-Wants=network-online.target
-After=network-online.target libvirtd.service
-
-[Service]
-ExecStart=/usr/local/bin/prism serve --config /etc/prism
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-```
-
-On a host that uses the modular libvirt daemons, add `virtqemud.service` to `After=`. Then run `systemctl daemon-reload` and `systemctl enable --now prism`.
+The unit sets `ProtectSystem=strict` and `ProtectHome=yes`, so Prism can write only to the paths in `ReadWritePaths`. Add every pool and archive directory outside `/var/lib/prism` to that list, and remove `ProtectHome` if one of them is under `/home`.
 
 `prism serve` stops cleanly on SIGTERM and SIGINT. A lock file, `run/prism.lock` in the config directory, keeps a second instance from starting on the same directory (`another prism is already serving <dir>`). Prism starts VMs that have autostart set when the host boots, once libvirt is connected. It does not use libvirt autostart.
 
@@ -50,7 +35,7 @@ Prism reads `prism.toml` once at start. Unknown keys are an error, so a typo sto
 ```
 
 - libvirt connects to the daemon socket and reads its version.
-- kvm passes when `/dev/kvm` exists. Without it, the check passes with `using TCG emulation as configured` when `domain_type` is `qemu`, and fails with `/dev/kvm missing; set libvirt.domain_type = "qemu" for TCG` when it is `kvm`. The default `auto` picks `kvm` when `/dev/kvm` exists and `qemu` when it does not, so it never fails.
+- kvm passes when `/dev/kvm` exists. Without it, the check passes with `/dev/kvm missing; using TCG emulation as configured` when `domain_type` is `qemu`, and fails with `/dev/kvm missing; set libvirt.domain_type = "qemu" for TCG` when it is `kvm`. The default `auto` picks `kvm` when `/dev/kvm` exists and `qemu` when it does not, so it never fails.
 - qemu-img runs `qemu-img --version`.
 - passt and ip are optional. A missing one shows `warn` with a hint and does not fail the run.
 - Each pool in `prism.toml` is opened, which also creates its directory.
@@ -125,7 +110,7 @@ An API error is a JSON problem document with `status`, `code` and `detail`. The 
 ### Networks
 
 - `no free subnet left` and `no free IPv6 prefix left`.
-- `<subnet> overlaps <other>, used by another Prism network` and `<subnet> overlaps <other>, used by a network this host already routes to`.
+- `<subnet> overlaps <other>, used by another Prism network.` and `<subnet> overlaps <other>, used by a network this host already routes to.`, `<s> overlaps <o>, which this network also uses` and `VLAN <n> already uses <subnet>; remove it before choosing another subnet`.
 - `subnet prefix must be /16 to /29`, `<subnet> has host bits set; use <subnet>` and the `100.64.0.0/10` overlap message.
 - `<subnet> is too small for a gateway on every node` and `<subnet> is too small for the addresses in use`.
 - `network <name> is used by <vms>; remove their NICs first`.

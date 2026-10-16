@@ -81,7 +81,12 @@ fn remove_network_leftovers() {
             eprintln!("warning: could not list interfaces, so Prism bridges may remain ({e})");
         }
     }
-    for [family, table] in [["inet", "prism"], ["ip", "prism-nat"], ["bridge", "prism"]] {
+    for [family, table] in [
+        ["inet", "prism"],
+        ["ip", "prism-nat"],
+        ["ip6", "prism-nat"],
+        ["bridge", "prism"],
+    ] {
         // A table that does not exist makes nft fail; that is the normal case
         // for tables of features the node never used.
         let exists = Command::new("nft")

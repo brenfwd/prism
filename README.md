@@ -9,7 +9,7 @@ Prism has no authentication. It listens on loopback by default.
 ## Requirements
 
 - A Linux host with KVM (`/dev/kvm`), run as root.
-- libvirt 8.0 or later, with `virtqemud` or `libvirtd` running, and QEMU.
+- libvirt 8.0 or later (9.9 or later for reverting and deleting snapshots), with `virtqemud` or `libvirtd` running, and QEMU.
 - `qemu-img`.
 - `ip` from iproute2, which networks and cluster leave use.
 - `passt` for user-mode guest networking (optional; `prism doctor` reports it).
@@ -22,7 +22,7 @@ From a release binary, copy it into place:
 install -m 0755 prism /usr/local/bin/prism
 ```
 
-To build from source you need Rust 1.88 or later with the `wasm32-unknown-unknown` target, and [Bun](https://bun.sh) for the UI:
+To build from source you need Rust 1.89 or later with the `wasm32-unknown-unknown` target, and [Bun](https://bun.sh) for the UI:
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -96,7 +96,7 @@ Every subcommand takes `--config <dir>`, the config directory. `--help` works on
 | `prism cluster remove <node>` | Removes a member. Its VMs must be moved first. |
 | `prism cluster promote <node>` | Hands the hub role to another member. Run it on the current hub. |
 | `prism cluster removed` | Lists removed members, whose keys, IDs and addresses stay blocked. |
-| `prism leave [--force]` | Leaves the cluster and wipes this node's state. `--force` wipes without telling the cluster. Stop `prism serve` first. |
+| `prism leave [--force]` | Leaves the cluster through the running daemon and wipes this node's state. `--force` wipes offline without telling the cluster; stop `prism serve` first and run `prism cluster remove` for the node on another member afterwards. |
 
 To form a cluster, run `prism cluster init` on the first node, then `prism cluster invite` on it. Paste the invite into `prism join` on the new node, and paste the reply it prints into `prism cluster accept` on the node that created the invite. Members need UDP port 51820 (`cluster.wireguard_port`) open between them.
 

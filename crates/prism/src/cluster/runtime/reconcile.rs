@@ -31,6 +31,20 @@ impl Cluster {
         }
     }
 
+    /// Re-creates `wg-prism` with its address if something removed them,
+    /// then the peers.
+    async fn repair_mesh(&self) {
+        if let Some(local) = self.local()
+            && let Err(e) = self
+                .mesh
+                .ensure(local.mesh_addr, local.wg_mtu, self.cfg.wireguard_port)
+                .await
+        {
+            tracing::warn!("repairing the mesh interface: {e:#}");
+        }
+        self.reconcile_mesh().await;
+    }
+
     /// The leader drives raft membership from committed member documents.
     async fn reconcile_membership(&self) -> anyhow::Result<()> {
         let Some(raft) = self.raft() else {
@@ -145,7 +159,11 @@ impl Cluster {
                         self.reconcile_mesh().await;
                     }
                 }
-                () = tokio::time::sleep(RECONCILE_EVERY) => {}
+                () = tokio::time::sleep(RECONCILE_EVERY) => {
+                    // The interface can be flapped or its address lost behind
+                    // our back; put it and the peers back.
+                    self.repair_mesh().await;
+                }
             }
             self.report_feature_level().await;
             if let Err(e) = self.reconcile_membership().await {

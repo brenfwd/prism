@@ -145,6 +145,13 @@ async fn apply_switch(nl: &Netlink, sw: &SwitchPlan) -> anyhow::Result<()> {
     }
     nl.prune_v4_addresses(&sw.bridge, sw.address.map(IpNet::V4))
         .await?;
+    if let Some(g) = sw.gateway6 {
+        nl.ensure_address(&sw.bridge, IpNet::V6(Ipv6Net::new(g, 64)?))
+            .await?;
+    }
+    for g in &sw.routes6 {
+        nl.ensure_host_route6(&sw.bridge, *g).await?;
+    }
     if let Some(v) = &sw.vxlan {
         nl.ensure_vxlan(
             &v.name,

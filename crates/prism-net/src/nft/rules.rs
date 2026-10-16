@@ -172,6 +172,9 @@ pub struct DnatRule {
     pub local: bool,
     /// Also forward connections from guests on the same bridge.
     pub hairpin: bool,
+    /// Source address for forwarded IPv6 connections; the IPv6 guest cannot
+    /// be reached from the global source `masquerade` would pick.
+    pub snat6: Option<Ipv6Addr>,
 }
 
 impl DnatRule {
@@ -260,7 +263,9 @@ fn forward_chains<'a>(t: &mut Table, forwards: impl Iterator<Item = &'a DnatRule
             let rule = Rule::new(family);
             let rule = match (f.host_addr, f.guest) {
                 (None, IpAddr::V4(_)) => rule.ip_daddr("127.0.0.0/8".parse().expect("literal")),
-                (None, IpAddr::V6(_)) => rule.ip6_daddr(Ipv6Net::from(Ipv6Addr::LOCALHOST)),
+                // The kernel drops replies to `::1` that arrive on another
+                // interface, so IPv6 has no loopback forward.
+                (None, IpAddr::V6(_)) => continue,
                 _ => rule,
             };
             out.push(f.matches(rule).dnat(f.guest, f.guest_port));
@@ -279,7 +284,11 @@ fn forward_chains<'a>(t: &mut Table, forwards: impl Iterator<Item = &'a DnatRule
     let mut seen = std::collections::HashSet::new();
     for f in forwards {
         if seen.insert((f.udp, f.guest, f.guest_port)) {
-            c.push(f.to_guest(Rule::new(family)).masquerade());
+            let rule = f.to_guest(Rule::new(family));
+            c.push(match f.snat6 {
+                Some(a) if f.guest.is_ipv6() => rule.snat(IpAddr::V6(a)),
+                _ => rule.masquerade(),
+            });
         }
     }
 }
@@ -292,6 +301,9 @@ pub struct GuestPort {
     pub mac: MacAddr,
     /// The NIC's IPAM lease; `None` allows no IPv4 source other than `0.0.0.0`.
     pub ipv4: Option<Ipv4Addr>,
+    /// A trunk NIC may send VLAN-tagged frames; their sources are checked
+    /// like untagged ones. Other NICs may not send tagged frames at all.
+    pub trunk: bool,
 }
 
 const ETH_P_8021Q: u16 = 0x8100;
@@ -323,8 +335,20 @@ pub fn bridge_guard_ruleset(ports: &[GuestPort]) -> Table {
             .push(Rule::new(f).iifname(tap).arp_saddr_ip_ne(ip).drop())
             .push(Rule::new(f).iifname(tap).udp_sport(67).drop())
             .push(Rule::new(f).iifname(tap).icmpv6_type(134).drop())
-            .push(Rule::new(f).iifname(tap).ether_type(ETH_P_8021Q).drop())
             .push(Rule::new(f).iifname(tap).ether_type(ETH_P_8021AD).drop());
+        if p.trunk {
+            c.push(
+                Rule::new(f)
+                    .iifname(tap)
+                    .tagged_ip_saddr_ne(ip)
+                    .tagged_ip_saddr_ne(Ipv4Addr::UNSPECIFIED)
+                    .drop(),
+            )
+            .push(Rule::new(f).iifname(tap).tagged_arp_saddr_ip_ne(ip).drop())
+            .push(Rule::new(f).iifname(tap).tagged_udp_sport_eq(67).drop());
+        } else {
+            c.push(Rule::new(f).iifname(tap).ether_type(ETH_P_8021Q).drop());
+        }
     }
     t
 }

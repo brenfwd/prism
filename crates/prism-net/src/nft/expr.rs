@@ -107,5 +107,9 @@ pub enum Expr {
         addr: std::net::IpAddr,
         port: u16,
     },
+    /// `snat to <addr>` (nat postrouting chains), keeping the port.
+    Snat {
+        addr: std::net::IpAddr,
+    },
     Verdict(Verdict),
 }

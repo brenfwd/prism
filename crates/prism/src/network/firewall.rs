@@ -3,9 +3,9 @@
 
 use ipnet::{Ipv4Net, Ipv6Net};
 use prism_net::nft::{
-    BoundaryConfig, Chain, ChainType, DnatRule, Family, GuestPort, Hook, NatRule, Nft, Rule,
-    SwitchServices, Table, boundary_ruleset, bridge_guard_ruleset, guest_input_chain, nat_ruleset,
-    nat6_ruleset, priority,
+    BoundaryConfig, Chain, ChainType, CtState, DnatRule, Family, GuestPort, Hook, NatRule, Nft,
+    Rule, SwitchServices, Table, boundary_ruleset, bridge_guard_ruleset, guest_input_chain,
+    nat_ruleset, nat6_ruleset, priority,
 };
 
 /// What the firewall should enforce for guests on this node.
@@ -77,6 +77,21 @@ impl Firewall {
                     fwd.push(rule);
                 }
             }
+            // Replies to forwarded connections (hairpinned, or to clients
+            // off the uplink) must pass the per-bridge drop below. New
+            // connections from guests are still filtered by it.
+            let mut forward_bridges: Vec<&str> =
+                rules.dnat.iter().map(|f| f.bridge.as_str()).collect();
+            forward_bridges.sort_unstable();
+            forward_bridges.dedup();
+            for bridge in forward_bridges {
+                fwd.push(
+                    Rule::new(Family::Inet)
+                        .iifname(bridge)
+                        .ct_state(CtState::ESTABLISHED | CtState::RELATED)
+                        .accept(),
+                );
+            }
             for Routed { bridge, out, allow } in &rules.routed {
                 for net in allow {
                     fwd.push(
@@ -138,6 +153,7 @@ mod tests {
                 bridge: "ps100000".into(),
                 local: true,
                 hairpin: true,
+                snat6: None,
             }],
             ..GuestRules::default()
         }

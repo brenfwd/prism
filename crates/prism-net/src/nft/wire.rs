@@ -132,33 +132,45 @@ fn data_value(m: &mut Msg, kind: u16, value: &[u8]) {
 /// A DNAT is three expressions: the address and port go into registers, then
 /// the `nat` expression reads them.
 fn dnat(m: &mut Msg, addr: std::net::IpAddr, port: u16) {
+    nat(m, 1, addr, Some(port));
+}
+
+/// `nat` of kind `NFT_NAT_DNAT` (1) or `NFT_NAT_SNAT` (0); SNAT has no port.
+fn nat(m: &mut Msg, kind: u32, addr: std::net::IpAddr, port: Option<u16>) {
     let (proto, octets) = match addr {
         std::net::IpAddr::V4(a) => (2, a.octets().to_vec()), // NFPROTO_IPV4
         std::net::IpAddr::V6(a) => (10, a.octets().to_vec()), // NFPROTO_IPV6
     };
-    for (reg, value) in [(NFT_REG_1, &octets[..]), (2, &port.to_be_bytes()[..])] {
+    let mut regs = vec![(NFT_REG_1, octets)];
+    if let Some(p) = port {
+        regs.push((2, p.to_be_bytes().to_vec()));
+    }
+    for (reg, value) in regs {
         m.begin(NFTA_LIST_ELEM)
             .str(NFTA_EXPR_NAME, "immediate")
             .begin(NFTA_EXPR_DATA);
         m.be32(1, reg);
-        data_value(m, 2, value);
+        data_value(m, 2, &value);
         m.end().end();
     }
     m.begin(NFTA_LIST_ELEM)
         .str(NFTA_EXPR_NAME, "nat")
         .begin(NFTA_EXPR_DATA);
-    m.be32(1, 1) // NFT_NAT_DNAT
-        .be32(2, proto)
-        .be32(3, NFT_REG_1) // address min
-        .be32(5, 2) // proto min
-        .be32(7, 3) // MAP_IPS | PROTO_SPECIFIED
-        .end()
-        .end();
+    m.be32(1, kind).be32(2, proto).be32(3, NFT_REG_1); // address min
+    if port.is_some() {
+        m.be32(5, 2); // proto min
+    }
+    // MAP_IPS, plus PROTO_SPECIFIED with a port.
+    m.be32(7, if port.is_some() { 3 } else { 1 }).end().end();
 }
 
 fn expr(m: &mut Msg, e: &Expr) {
     if let Expr::Dnat { addr, port } = e {
         dnat(m, *addr, *port);
+        return;
+    }
+    if let Expr::Snat { addr } = e {
+        nat(m, 0, *addr, None);
         return;
     }
     m.begin(NFTA_LIST_ELEM);
@@ -216,7 +228,7 @@ fn expr(m: &mut Msg, e: &Expr) {
         Expr::Masquerade => {
             m.str(NFTA_EXPR_NAME, "masq");
         }
-        Expr::Dnat { .. } => unreachable!("handled above"),
+        Expr::Dnat { .. } | Expr::Snat { .. } => unreachable!("handled above"),
         Expr::Verdict(v) => {
             let (code, chain) = match v {
                 Verdict::Accept => (NF_ACCEPT, None),

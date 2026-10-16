@@ -51,6 +51,11 @@ pub struct SwitchPlan {
     /// Local taps on a VLAN-aware network and the VLAN membership of each
     /// (access on VLAN 1 when the NIC has none).
     pub ports: Vec<(String, PortVlans)>,
+    /// IPv6 guests here that forwards target: the host needs a route to each.
+    pub routes6: Vec<Ipv6Addr>,
+    /// This node's link-local address on the bridge, the source of forwarded
+    /// connections to those guests; set when `routes6` is not empty.
+    pub gateway6: Option<Ipv6Addr>,
     /// The zone origin, `<network>.prism`.
     pub domain: String,
     /// Every VM on the network, by name.
@@ -75,6 +80,16 @@ pub struct NodePlan {
     pub forwarding6: bool,
     /// Bridges that need `route_localnet`, for forwards from loopback.
     pub local_bridges: Vec<String>,
+}
+
+/// A link-local address unique to `node`, for its bridges.
+fn link_local_of(node: Uuid) -> Ipv6Addr {
+    let b = node.as_bytes();
+    let mut o = [0u8; 16];
+    o[0] = 0xfe;
+    o[1] = 0x80;
+    o[8..].copy_from_slice(&b[8..]);
+    Ipv6Addr::from(o)
 }
 
 /// Whether `vm` is (or is about to be) running on `node`.
@@ -128,9 +143,12 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
             dhcp: net.dhcp,
             vlans,
             ports: Vec::new(),
+            routes6: Vec::new(),
+            gateway6: None,
             domain: net.domain(),
             hosts: HashMap::new(),
         };
+        let gateway6 = link_local_of(input.node);
         for vm in input.vms {
             for nic in &vm.nics {
                 let NicNetwork::Network {
@@ -166,6 +184,7 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                         tap: tap_name(nic.id),
                         mac,
                         ipv4: *ipv4,
+                        trunk: matches!(nic.network.port_vlans(), Some(PortVlans::Trunk { .. })),
                     });
                     // Forwards need this node to route into the network.
                     if gateway.is_some() {
@@ -179,6 +198,11 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                             for guest in guests.into_iter().flatten() {
                                 out.forwarding |= guest.is_ipv4();
                                 out.forwarding6 |= guest.is_ipv6();
+                                if let IpAddr::V6(g) = guest
+                                    && !sw.routes6.contains(&g)
+                                {
+                                    sw.routes6.push(g);
+                                }
                                 // Loopback destinations are only routable to the
                                 // bridge with route_localnet.
                                 if f.local && f.host_addr.is_none() && guest.is_ipv4() {
@@ -193,6 +217,7 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                                     bridge: sw.bridge.clone(),
                                     local: f.local,
                                     hairpin: f.hairpin,
+                                    snat6: Some(gateway6),
                                 });
                             }
                         }
@@ -205,6 +230,9 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                     v.fdb.macs.insert(mac, IpAddr::V6(*addr));
                 }
             }
+        }
+        if !sw.routes6.is_empty() {
+            sw.gateway6 = Some(gateway6);
         }
         if let Some(g) = gateway {
             out.firewall.switches.push(prism_net::nft::SwitchServices {

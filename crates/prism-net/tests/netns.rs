@@ -548,6 +548,7 @@ async fn nft_tables_match_cli() {
         bridge: "ps1".into(),
         local: false,
         hairpin: false,
+        snat6: None,
     }];
     let nat = nat_ruleset(&nat_rules(), &forwards);
     assert_same_as_cli(&mine, &Ns::new("pnt-nft-r2"), &nat, NAT_TEXT);
@@ -556,6 +557,7 @@ async fn nft_tables_match_cli() {
         tap: "pn1".into(),
         mac: "52:54:00:00:00:01".parse().unwrap(),
         ipv4: Some(Ipv4Addr::new(10, 20, 0, 5)),
+        trunk: false,
     }]);
     assert_same_as_cli(&mine, &Ns::new("pnt-nft-r3"), &bridge, BRIDGE_TEXT);
 

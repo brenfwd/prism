@@ -21,6 +21,7 @@ const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const IPPROTO_ICMPV6: u8 = 58;
+const ETH_P_8021Q: u16 = 0x8100;
 const ETH_P_IP: u16 = 0x0800;
 const ETH_P_ARP: u16 = 0x0806;
 const ETH_P_IPV6: u16 = 0x86dd;
@@ -145,6 +146,38 @@ impl Rule {
     pub fn ether_type(self, ethertype: u16) -> Self {
         self.payload(PayloadBase::Link, 12, 2)
             .cmp(CmpOp::Eq, ethertype.to_be_bytes().to_vec())
+    }
+
+    /// Inside an 802.1Q frame: carries `ethertype` and has the byte run
+    /// `[offset, offset + len)` of its payload (counted from the 802.1Q
+    /// header's end) differ from `data`.
+    fn tagged_payload_ne(self, ethertype: u16, offset: u32, data: Vec<u8>) -> Self {
+        self.ether_type(ETH_P_8021Q)
+            .payload(PayloadBase::Link, 16, 2)
+            .cmp(CmpOp::Eq, ethertype.to_be_bytes().to_vec())
+            .payload(PayloadBase::Link, 18 + offset, data.len() as u32)
+            .cmp(CmpOp::Neq, data)
+    }
+
+    /// `ip saddr != <addr>` for a VLAN-tagged frame.
+    pub fn tagged_ip_saddr_ne(self, addr: Ipv4Addr) -> Self {
+        self.tagged_payload_ne(ETH_P_IP, 12, addr.octets().to_vec())
+    }
+
+    /// `arp saddr ip != <addr>` for a VLAN-tagged frame.
+    pub fn tagged_arp_saddr_ip_ne(self, addr: Ipv4Addr) -> Self {
+        self.tagged_payload_ne(ETH_P_ARP, 14, addr.octets().to_vec())
+    }
+
+    /// `udp sport != <port>` for a VLAN-tagged IPv4 frame without options.
+    pub fn tagged_udp_sport_eq(self, port: u16) -> Self {
+        self.ether_type(ETH_P_8021Q)
+            .payload(PayloadBase::Link, 16, 2)
+            .cmp(CmpOp::Eq, ETH_P_IP.to_be_bytes().to_vec())
+            .payload(PayloadBase::Link, 18 + 9, 1)
+            .cmp(CmpOp::Eq, vec![IPPROTO_UDP])
+            .payload(PayloadBase::Link, 18 + 20, 2)
+            .cmp(CmpOp::Eq, port.to_be_bytes().to_vec())
     }
 
     /// `ether saddr != <mac>`
@@ -316,6 +349,11 @@ impl Rule {
     /// Ends the rule with `dnat to <addr>:<port>`.
     pub fn dnat(self, addr: std::net::IpAddr, port: u16) -> Self {
         self.expr(Expr::Dnat { addr, port })
+    }
+
+    /// Ends the rule with `snat to <addr>` (nat chains only).
+    pub fn snat(self, addr: std::net::IpAddr) -> Self {
+        self.expr(Expr::Snat { addr })
     }
 
     /// Ends the rule with `masquerade` (nat chains only).

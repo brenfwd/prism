@@ -305,6 +305,24 @@ impl Netlink {
             .map_err(|e| Error::rtnl(format!("add address {addr} to {name}"), e))
     }
 
+    /// Routes the host address `addr` (a /128) directly out of `name`, which
+    /// lets the host forward to a guest whose network has no IPv6 prefix.
+    pub async fn ensure_host_route6(&self, name: &str, addr: Ipv6Addr) -> Result<()> {
+        use rtnetlink::RouteMessageBuilder;
+        let index = self.link_index(name).await?;
+        let msg = RouteMessageBuilder::<Ipv6Addr>::new()
+            .destination_prefix(addr, 128)
+            .output_interface(index)
+            .build();
+        self.route
+            .route()
+            .add(msg)
+            .replace()
+            .execute()
+            .await
+            .map_err(|e| Error::rtnl(format!("route {addr} via {name}"), e))
+    }
+
     /// Removes every IPv4 address on a link except `keep`, so a re-addressed bridge drops its old gateway.
     pub async fn prune_v4_addresses(&self, name: &str, keep: Option<IpNet>) -> Result<()> {
         use netlink_packet_route::address::AddressAttribute;

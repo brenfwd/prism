@@ -46,7 +46,7 @@ use clap::{Parser, Subcommand};
 
 /// Command line of the `prism` binary.
 #[derive(Debug, Parser)]
-#[command(name = "prism", version, about = "libvirt/KVM manager")]
+#[command(name = "prism", version = env!("PRISM_VERSION"), about = "KVM virtual machine manager")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

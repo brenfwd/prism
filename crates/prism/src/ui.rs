@@ -7,6 +7,9 @@ const CSP: &str = "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; \
     style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; \
     worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'";
 
+/// Serves the embedded file for `uri`, or `index.html` for unknown paths so
+/// client-side routes load. Paths under `api/` or `assets/` that match no
+/// file are 404. Responses carry a restrictive Content-Security-Policy.
 pub async fn serve(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let (file, name) = match prism_web::get(path) {

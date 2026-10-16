@@ -1,4 +1,9 @@
-//! `prism.toml`: node-local bootstrap settings.
+//! `prism.toml`: the settings a node reads at startup.
+//!
+//! The file lives in the config directory given with `--config`. Unknown keys
+//! are rejected so a typo fails at startup instead of being ignored. Every
+//! section is optional and falls back to the defaults below. Settings that
+//! must be the same across a cluster live in the replicated state, not here.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -7,26 +12,37 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 
+/// File name of the config inside the config directory.
 pub const CONFIG_FILE: &str = "prism.toml";
 
+/// The parsed `prism.toml`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    /// `[node]`: how this node presents itself.
     pub node: NodeConfig,
+    /// `[http]`: listen addresses and request filtering.
     pub http: HttpConfig,
+    /// `[libvirt]`: how to reach libvirt and which emulator to use.
     pub libvirt: LibvirtConfig,
+    /// `[storage]`: where pools may be created.
     pub storage: StorageConfig,
+    /// `[pools.<name>]`: disk pools fixed by the config file.
     pub pools: BTreeMap<String, PoolConfig>,
+    /// `[cluster]`: how other members reach this node.
     pub cluster: ClusterSection,
     /// Directories this node contributes to archive pools.
     pub archive_members: BTreeMap<String, ArchiveMemberConfig>,
 }
 
+/// `[archive_members.<name>]`: one directory on this node that holds archive
+/// files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArchiveMemberConfig {
     /// The archive pool this directory belongs to (created on first use).
     pub pool: String,
+    /// Absolute path of the directory.
     pub path: PathBuf,
     /// Relative share of new files.
     #[serde(default = "one")]
@@ -63,7 +79,9 @@ mod size_str {
     }
 }
 
-/// Parses `123`, `10k`, `50GiB`, `1.5T` (binary units).
+/// Parses a size such as `123`, `10k`, `50GiB` or `1.5T` into bytes. Units
+/// are binary (1 k is 1024 bytes) and case-insensitive; fractions round down.
+/// Fails on a missing number or an unknown unit.
 pub fn parse_size(s: &str) -> Result<u64, String> {
     let s = s.trim();
     let split = s
@@ -82,6 +100,7 @@ pub fn parse_size(s: &str) -> Result<u64, String> {
     Ok((n * mult as f64) as u64)
 }
 
+/// `[cluster]` settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClusterSection {
@@ -101,6 +120,7 @@ impl Default for ClusterSection {
     }
 }
 
+/// `[node]` settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NodeConfig {
@@ -108,9 +128,11 @@ pub struct NodeConfig {
     pub name: Option<String>,
 }
 
+/// `[http]` settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HttpConfig {
+    /// Addresses to serve on; default `127.0.0.1:8080`. Must not be empty.
     pub listen: Vec<SocketAddr>,
     /// Extra `Host` values accepted besides IP literals, `localhost` and
     /// the host name. `"*"` disables the check.
@@ -129,11 +151,13 @@ impl Default for HttpConfig {
     }
 }
 
+/// `[libvirt]` settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LibvirtConfig {
     /// Daemon socket path, or `"auto"`.
     pub socket: String,
+    /// Libvirt connection URI, default `qemu:///system`.
     pub uri: String,
     /// `"auto"` (kvm when `/dev/kvm` exists), `"kvm"` or `"qemu"`.
     pub domain_type: String,
@@ -159,6 +183,7 @@ impl Default for LibvirtConfig {
     }
 }
 
+/// `[storage]` settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StorageConfig {
@@ -166,12 +191,16 @@ pub struct StorageConfig {
     pub pool_roots: Vec<PathBuf>,
 }
 
+/// `[pools.<name>]`: a disk pool defined in the config file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PoolConfig {
+    /// Pool type; only `dir` exists.
     #[serde(rename = "type", default = "default_pool_type")]
     pub kind: String,
+    /// Absolute path of the pool directory.
     pub path: PathBuf,
+    /// Disk image format for new volumes: `qcow2` (default) or `raw`.
     #[serde(default = "default_format")]
     pub format: String,
 }
@@ -185,6 +214,12 @@ fn default_format() -> String {
 }
 
 impl Config {
+    /// Reads and validates `prism.toml` in `dir`.
+    ///
+    /// Fails if the file is unreadable, is not valid TOML for this schema, or
+    /// breaks a rule: pool and member names must be valid, paths absolute,
+    /// pool type `dir`, pool format `qcow2` or `raw`, member weight positive
+    /// and `http.listen` non-empty.
     pub fn load(dir: &Path) -> anyhow::Result<Self> {
         let path = dir.join(CONFIG_FILE);
         let text = std::fs::read_to_string(&path)
@@ -239,6 +274,8 @@ impl Config {
             .unwrap_or_else(|| PathBuf::from("/run/libvirt/virtqemud-sock"))
     }
 
+    /// The libvirt domain type to use, resolving `auto` to `kvm` when
+    /// `/dev/kvm` exists and `qemu` (software emulation) otherwise.
     pub fn domain_type(&self) -> &str {
         match self.libvirt.domain_type.as_str() {
             "auto" if Path::new("/dev/kvm").exists() => "kvm",
@@ -248,7 +285,8 @@ impl Config {
     }
 }
 
-/// The default `prism.toml` written by `prism init`.
+/// The `prism.toml` text written by `prism init`, with the default pool at
+/// `pool_path`.
 pub fn default_toml(pool_path: &Path) -> String {
     format!(
         r#"[http]
@@ -304,6 +342,20 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.archive_members["a"].reserve, 10 << 30);
         assert!((cfg.archive_members["a"].weight - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn rejects_bad_settings() {
+        for toml in [
+            "[http]\nlisten = []\n",
+            "[pools.a]\npath = \"/x\"\nformat = \"vmdk\"\n",
+            "[pools.a]\npath = \"/x\"\ntype = \"lvm\"\n",
+            "[archive_members.a]\npool = \"p\"\npath = \"/x\"\nweight = 0\n",
+            "[nope]\n",
+        ] {
+            let cfg: Result<Config, _> = toml::from_str(toml);
+            assert!(cfg.is_err() || cfg.unwrap().validate().is_err(), "{toml}");
+        }
     }
 
     #[test]

@@ -8,6 +8,17 @@ use super::{Chain, ChainType, CtState, Family, Hook, Rule, Table, priority};
 use crate::MacAddr;
 use crate::link::VXLAN_PORT;
 
+const CHAIN_PREROUTING: &str = "prerouting";
+const CHAIN_FORWARD: &str = "forward";
+const CHAIN_INPUT: &str = "input";
+const CHAIN_OUTPUT: &str = "output";
+const CHAIN_POSTROUTING: &str = "postrouting";
+
+/// `127.0.0.0/8`, the destinations a host-local forward matches when no host address is set.
+const LOOPBACK_V4: Ipv4Net = Ipv4Net::new_assert(Ipv4Addr::new(127, 0, 0, 0), 8);
+/// `fe80::/10`, the `IPv6` link-local range.
+const LINK_LOCAL_V6: Ipv6Net = Ipv6Net::new_assert(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10);
+
 const ICMPV6_ECHO_REQUEST: u8 = 128;
 const ICMPV6_NEIGHBOR_ADVERT: u8 = 136;
 const ICMPV6_REDIRECT: u8 = 137;
@@ -39,7 +50,7 @@ pub fn boundary_ruleset(cfg: &BoundaryConfig) -> Table {
     let mesh = cfg.mesh_prefix.trunc();
 
     let pre = t.chain(Chain::base(
-        "prerouting",
+        CHAIN_PREROUTING,
         ChainType::Filter,
         Hook::Prerouting,
         priority::RAW,
@@ -66,7 +77,7 @@ pub fn boundary_ruleset(cfg: &BoundaryConfig) -> Table {
     );
 
     t.chain(Chain::base(
-        "forward",
+        CHAIN_FORWARD,
         ChainType::Filter,
         Hook::Forward,
         priority::FILTER,
@@ -75,7 +86,7 @@ pub fn boundary_ruleset(cfg: &BoundaryConfig) -> Table {
     .push(Rule::new(Family::Inet).oifname(wg).drop());
 
     let out = t.chain(Chain::base(
-        "output",
+        CHAIN_OUTPUT,
         ChainType::Filter,
         Hook::Output,
         priority::FILTER,
@@ -117,7 +128,12 @@ pub struct SwitchServices {
 /// ICMP echo, IPv6 neighbour discovery and established traffic are accepted; the rest drops.
 /// Add it to the table from [`boundary_ruleset`].
 pub fn guest_input_chain(switches: &[SwitchServices]) -> Chain {
-    let mut c = Chain::base("input", ChainType::Filter, Hook::Input, priority::FILTER);
+    let mut c = Chain::base(
+        CHAIN_INPUT,
+        ChainType::Filter,
+        Hook::Input,
+        priority::FILTER,
+    );
     let f = Family::Inet;
     for s in switches {
         let br = s.bridge.as_str();
@@ -253,8 +269,7 @@ impl DnatRule {
 /// each forward and one per entry in `rules`.
 pub fn nat_ruleset(rules: &[NatRule], forwards: &[DnatRule]) -> Table {
     let mut t = Table::new(Family::Ip, NAT_TABLE);
-    forward_chains(&mut t, forwards.iter().filter(|f| f.guest.is_ipv4()));
-    let c = t.chain_mut("postrouting").expect("created above");
+    let c = forward_chains(&mut t, forwards.iter().filter(|f| f.guest.is_ipv4()));
     for r in rules {
         c.push(
             Rule::new(Family::Ip)
@@ -270,8 +285,7 @@ pub fn nat_ruleset(rules: &[NatRule], forwards: &[DnatRule]) -> Table {
 /// entry in `rules`.
 pub fn nat6_ruleset(rules: &[Nat6Rule], forwards: &[DnatRule]) -> Table {
     let mut t = Table::new(Family::Ip6, NAT_TABLE);
-    forward_chains(&mut t, forwards.iter().filter(|f| f.guest.is_ipv6()));
-    let c = t.chain_mut("postrouting").expect("created above");
+    let c = forward_chains(&mut t, forwards.iter().filter(|f| f.guest.is_ipv6()));
     for r in rules {
         c.push(
             Rule::new(Family::Ip6)
@@ -283,10 +297,15 @@ pub fn nat6_ruleset(rules: &[Nat6Rule], forwards: &[DnatRule]) -> Table {
     t
 }
 
-fn forward_chains<'a>(t: &mut Table, forwards: impl Iterator<Item = &'a DnatRule> + Clone) {
+/// Adds the DNAT chains for `forwards` to `t` and returns the `postrouting` chain, which
+/// already holds the per-forward masquerades.
+fn forward_chains<'t, 'a>(
+    t: &'t mut Table,
+    forwards: impl Iterator<Item = &'a DnatRule> + Clone,
+) -> &'t mut Chain {
     let family = t.family;
     let pre = t.chain(Chain::base(
-        "prerouting",
+        CHAIN_PREROUTING,
         ChainType::Nat,
         Hook::Prerouting,
         priority::DSTNAT,
@@ -296,7 +315,7 @@ fn forward_chains<'a>(t: &mut Table, forwards: impl Iterator<Item = &'a DnatRule
     }
     if forwards.clone().any(|f| f.local) {
         let out = t.chain(Chain::base(
-            "output",
+            CHAIN_OUTPUT,
             ChainType::Nat,
             Hook::Output,
             priority::DSTNAT,
@@ -306,7 +325,7 @@ fn forward_chains<'a>(t: &mut Table, forwards: impl Iterator<Item = &'a DnatRule
             // other addresses are reachable without a forward.
             let rule = Rule::new(family);
             let rule = match (f.host_addr, f.guest) {
-                (None, IpAddr::V4(_)) => rule.ip_daddr("127.0.0.0/8".parse().expect("literal")),
+                (None, IpAddr::V4(_)) => rule.ip_daddr(LOOPBACK_V4),
                 // The kernel drops replies to `::1` that arrive on another
                 // interface, so IPv6 has no loopback forward.
                 (None, IpAddr::V6(_)) => continue,
@@ -316,7 +335,7 @@ fn forward_chains<'a>(t: &mut Table, forwards: impl Iterator<Item = &'a DnatRule
         }
     }
     let c = t.chain(Chain::base(
-        "postrouting",
+        CHAIN_POSTROUTING,
         ChainType::Nat,
         Hook::Postrouting,
         priority::SRCNAT,
@@ -335,6 +354,7 @@ fn forward_chains<'a>(t: &mut Table, forwards: impl Iterator<Item = &'a DnatRule
             });
         }
     }
+    c
 }
 
 /// The `IPv6` addresses a guest may send from.
@@ -369,14 +389,12 @@ const ETH_P_8021AD: u16 = 0x88a8;
 /// redirects are dropped.
 fn guard_ipv6(c: &mut Chain, tap: &str, addr: Ipv6Addr, prefix: Ipv6Net) {
     let f = Family::Bridge;
-    let link_local = Ipv6Net::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10)
-        .expect("a valid prefix length");
     c.push(
         Rule::new(f)
             .iifname(tap)
             .ip6_saddr_ne(addr)
             .ip6_saddr_ne(Ipv6Addr::UNSPECIFIED)
-            .ip6_saddr_outside(link_local)
+            .ip6_saddr_outside(LINK_LOCAL_V6)
             .drop(),
     )
     .push(
@@ -402,7 +420,7 @@ pub fn bridge_guard_ruleset(ports: &[GuestPort]) -> Table {
     let f = Family::Bridge;
     let mut t = Table::new(f, BRIDGE_TABLE);
     let c = t.chain(Chain::base(
-        "prerouting",
+        CHAIN_PREROUTING,
         ChainType::Filter,
         Hook::Prerouting,
         priority::BRIDGE_FILTER,

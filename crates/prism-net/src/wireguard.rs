@@ -300,9 +300,7 @@ impl Netlink {
         }
         for (key, p) in &desired {
             let existing = current.peers.iter().find(|c| c.public_key == *key);
-            let want_allowed = vec![IpNet::V6(
-                Ipv6Net::new(p.mesh_address, 128).expect("/128 is valid"),
-            )];
+            let want_allowed = vec![IpNet::V6(Ipv6Net::from(p.mesh_address))];
             let keepalive = p.keepalive.unwrap_or(0);
             match existing {
                 Some(c)

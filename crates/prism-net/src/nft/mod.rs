@@ -72,8 +72,9 @@ impl Table {
 
     /// Adds a chain and returns it for appending rules.
     pub fn chain(&mut self, chain: Chain) -> &mut Chain {
+        let index = self.chains.len();
         self.chains.push(chain);
-        self.chains.last_mut().expect("just pushed")
+        &mut self.chains[index]
     }
 
     /// The chain with this name, if any.

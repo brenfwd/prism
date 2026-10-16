@@ -59,7 +59,7 @@ export function SnapshotsTab({ vm, openForm }: { vm: Vm; openForm: boolean }) {
   const revert = async (s: Snapshot) => {
     const on = isOn(vm);
     const ok = await confirm({
-      title: `Revert ${vm.name} to “${s.name}”?`,
+      title: `Revert ${vm.name} to "${s.name}"?`,
       body: (
         <div className="space-y-2">
           <p>Disks go back to how they were {s.created ? ago(s.created * 1000) : "when it was taken"}. Anything written since is lost, unless you take a snapshot first.</p>
@@ -84,7 +84,7 @@ export function SnapshotsTab({ vm, openForm }: { vm: Vm; openForm: boolean }) {
   };
   const remove = async (s: Snapshot) => {
     const ok = await confirm({
-      title: `Delete snapshot “${s.name}”?`,
+      title: `Delete snapshot "${s.name}"?`,
       body: "The machine keeps its current state; only this restore point goes away. Its data is merged into the neighbouring layer, which can take a moment for large disks.",
       confirmLabel: "Delete snapshot",
       danger: true,
@@ -219,7 +219,7 @@ function TakeForm({ vm, busy, onDone, onCancel }: { vm: Vm; busy: boolean; onDon
           if (nameOk) void submit();
         }}
       >
-        <Field label="Name" htmlFor="snap-name" hint="Optional. Leave empty for a timestamp." error={nameOk ? undefined : "Letters, digits, “.”, “_” or “-”."}>
+        <Field label="Name" htmlFor="snap-name" hint="Optional. Leave empty for a timestamp." error={nameOk ? undefined : "Letters, digits, '.', '_' or '-'."}>
           <Input id="snap-name" value={name} onChange={(e) => setName(e.target.value.replace(/\s/g, "-"))} placeholder="before-upgrade" autoFocus aria-invalid={!nameOk} />
         </Field>
         <Field label="Note" htmlFor="snap-desc">

@@ -158,7 +158,7 @@ export function CommandPalette() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onKey}
-            placeholder="Search machines, or type a command like “start web”…"
+            placeholder="Search machines, or type a command like 'start web'…"
             className="h-14 flex-1 bg-transparent text-[15px] outline-none placeholder:text-zinc-400"
             role="combobox"
             aria-expanded="true"
@@ -172,7 +172,7 @@ export function CommandPalette() {
         <div ref={list} id="palette-list" role="listbox" className="scrollbar-thin overflow-y-auto p-2">
           {results.length === 0 && (
             <div className="px-3 py-10 text-center text-sm text-zinc-500">
-              No matches for “{query}”.
+              No matches for "{query}".
             </div>
           )}
           {results.map((c, i) => {
@@ -213,7 +213,7 @@ export function CommandPalette() {
         <div className="flex items-center gap-4 border-t border-zinc-100 px-4 py-2 text-[11px] text-zinc-500 dark:border-zinc-800">
           <span className="flex items-center gap-1"><Kbd>↑</Kbd><Kbd>↓</Kbd> move</span>
           <span className="flex items-center gap-1"><Kbd>↵</Kbd> run</span>
-          <span className="ml-auto">Tip: try “snapshot”, “console” or a machine name</span>
+          <span className="ml-auto">Tip: try 'snapshot', 'console' or a machine name</span>
         </div>
       </div>
     </div>,

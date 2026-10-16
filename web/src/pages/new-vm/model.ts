@@ -53,7 +53,7 @@ export const hostnameOf = (name: string) =>
 /** The reason `name` cannot be used, or `null` when it can. */
 export function nameError(name: string, taken: Set<string>): string | null {
   if (!name) return "Give it a name.";
-  if (!NAME_RE.test(name)) return "Use letters, digits, “.”, “_” or “-” (no spaces), up to 64.";
+  if (!NAME_RE.test(name)) return "Use letters, digits, '.', '_' or '-' (no spaces), up to 64.";
   if (taken.has(name)) return `There's already a machine called ${name}.`;
   return null;
 }

@@ -5,9 +5,9 @@
 //! connects and sends the ID first.
 //!
 //! Volume transfer frames (all integers big-endian):
-//! - `0 | size u64` — header: the file's logical size
-//! - `1 | offset u64 | len u32 | data` — a data extent (holes are skipped)
-//! - `2 | blake3 [32]` — end, with BLAKE3 over every data frame's
+//! - `0 | size u64`: header with the file's logical size
+//! - `1 | offset u64 | len u32 | data`: a data extent (holes are skipped)
+//! - `2 | blake3 [32]`: end marker with BLAKE3 over every data frame's
 //!   `offset | len | data` in order
 
 use std::collections::HashMap;

@@ -70,7 +70,7 @@ export function MachinesPage() {
       {list.length === 0 ? (
         <Card>
           <EmptyState icon="search" title="Nothing matches" actions={<Button size="sm" onClick={() => (setQuery(""), setFilter("all"))}>Clear filters</Button>}>
-            No machine matches “{query}”{filter !== "all" ? ` among ${filter === "running" ? "running" : "stopped"} machines` : ""}.
+            No machine matches "{query}"{filter !== "all" ? ` among ${filter === "running" ? "running" : "stopped"} machines` : ""}.
           </EmptyState>
         </Card>
       ) : (

@@ -26,7 +26,7 @@ export function AccessStep({ form }: { form: NewVmForm }) {
         label={<span className="inline-flex items-center gap-1.5"><Icon name="key" className="size-3.5" />SSH public key</span>}
         htmlFor="ci-key"
         aside={form.rememberedKey && f.sshKeys === form.rememberedKey ? "Remembered from last time" : undefined}
-        error={badKey ? `This doesn't look like a public key: “${badKey.slice(0, 32)}…”` : undefined}
+        error={badKey ? `This doesn't look like a public key: "${badKey.slice(0, 32)}…"` : undefined}
         hint={<>Paste the contents of <span className="font-mono">~/.ssh/id_ed25519.pub</span>. One key per line.</>}
       >
         <Textarea

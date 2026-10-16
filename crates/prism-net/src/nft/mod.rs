@@ -24,10 +24,15 @@ pub use wire::Nft;
 /// An nftables address family.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Family {
+    /// `IPv4` and `IPv6` together.
     Inet,
+    /// `IPv4` only.
     Ip,
+    /// `IPv6` only.
     Ip6,
+    /// Frames crossing a Linux bridge.
     Bridge,
+    /// Ingress on one device.
     Netdev,
 }
 
@@ -42,6 +47,7 @@ impl Family {
         }
     }
 
+    /// The family keyword the `nft` CLI uses.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Inet => "inet",
@@ -56,12 +62,16 @@ impl Family {
 /// A table and everything in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Table {
+    /// Family the table belongs to.
     pub family: Family,
+    /// Table name, unique within the family.
     pub name: String,
+    /// Chains in creation order.
     pub chains: Vec<Chain>,
 }
 
 impl Table {
+    /// An empty table.
     pub fn new(family: Family, name: impl Into<String>) -> Self {
         Self {
             family,
@@ -92,8 +102,11 @@ impl Table {
 #[must_use]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Chain {
+    /// Chain name, unique within the table.
     pub name: String,
+    /// Hook attachment; `None` for a regular chain that rules jump to.
     pub base: Option<BaseChain>,
+    /// Rules in evaluation order.
     pub rules: Vec<Rule>,
 }
 
@@ -121,6 +134,7 @@ impl Chain {
         }
     }
 
+    /// Sets the policy of a base chain; has no effect on a regular chain.
     pub fn policy(mut self, policy: Policy) -> Self {
         if let Some(b) = &mut self.base {
             b.policy = policy;
@@ -128,24 +142,34 @@ impl Chain {
         self
     }
 
+    /// Appends a rule.
     pub fn push(&mut self, rule: Rule) -> &mut Self {
         self.rules.push(rule);
         self
     }
 }
 
+/// How a base chain attaches to the packet path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BaseChain {
+    /// What the chain may do.
     pub kind: ChainType,
+    /// Where in the packet path it runs.
     pub hook: Hook,
+    /// Order among chains on the same hook; lower runs first. See [`priority`].
     pub priority: i32,
+    /// Verdict for packets no rule decides.
     pub policy: Policy,
 }
 
+/// The kind of a base chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChainType {
+    /// Accept or drop packets.
     Filter,
+    /// Rewrite addresses; only the first packet of a connection is seen.
     Nat,
+    /// Re-route a packet after changing its mark.
     Route,
 }
 
@@ -159,12 +183,18 @@ impl ChainType {
     }
 }
 
+/// A netfilter hook point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hook {
+    /// Packets just received, before the routing decision.
     Prerouting,
+    /// Packets addressed to this host.
     Input,
+    /// Packets routed through this host.
     Forward,
+    /// Packets this host sends.
     Output,
+    /// Packets about to leave, after routing.
     Postrouting,
 }
 
@@ -182,18 +212,27 @@ impl Hook {
 
 /// Standard priorities (`nft` keywords) for the ip/ip6/inet families.
 pub mod priority {
+    /// `raw`: before connection tracking.
     pub const RAW: i32 = -300;
+    /// `mangle`.
     pub const MANGLE: i32 = -150;
+    /// `dstnat`: destination NAT.
     pub const DSTNAT: i32 = -100;
+    /// `filter`.
     pub const FILTER: i32 = 0;
+    /// `security`.
     pub const SECURITY: i32 = 50;
+    /// `srcnat`: source NAT.
     pub const SRCNAT: i32 = 100;
     /// `filter` in the bridge family.
     pub const BRIDGE_FILTER: i32 = -200;
 }
 
+/// The default verdict of a base chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Policy {
+    /// Let the packet through.
     Accept,
+    /// Discard the packet.
     Drop,
 }

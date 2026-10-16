@@ -16,27 +16,33 @@ use tokio::net::UdpSocket;
 
 use crate::{Error, MacAddr, Result};
 
+/// UDP port DHCP servers listen on (RFC 2131).
 pub const SERVER_PORT: u16 = 67;
+/// UDP port DHCP clients listen on; broadcast replies go here.
 pub const CLIENT_PORT: u16 = 68;
 
 /// A static lease and the options sent with it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Lease {
+    /// The address handed to the client.
     pub ip: Ipv4Addr,
+    /// Length of the subnet mask sent as option 1; values above 32 are treated as 32.
     pub prefix_len: u8,
     /// Default gateway (option 3), normally the egress node's VIP.
     pub router: Option<Ipv4Addr>,
-    /// Option 6.
+    /// DNS servers (option 6).
     pub dns: Vec<Ipv4Addr>,
-    /// Option 15.
+    /// Search domain suffix (option 15).
     pub domain: Option<String>,
-    /// Option 12.
+    /// Host name for the client to adopt (option 12).
     pub hostname: Option<String>,
-    /// Option 26.
+    /// Interface MTU in bytes (option 26).
     pub mtu: Option<u16>,
-    /// Option 121 (when non-empty, a default route via `router` is added to it, because
-    /// clients ignore option 3 when option 121 is present).
+    /// Classless static routes (option 121). When non-empty, a default route via `router` is
+    /// added to it, because clients ignore option 3 when option 121 is present.
     pub routes: Vec<(Ipv4Net, Ipv4Addr)>,
+    /// How long the client may keep the address. Sent in seconds, capped at `u32::MAX`; renewal
+    /// is offered at half and rebinding at seven eighths of it.
     pub lease_time: Duration,
 }
 
@@ -52,10 +58,12 @@ pub struct DhcpConfig {
     pub server_ip: Ipv4Addr,
     /// Listen port, normally [`SERVER_PORT`]; replies go to `client_port`.
     pub port: u16,
+    /// UDP port replies to unconfigured clients are sent to, normally [`CLIENT_PORT`].
     pub client_port: u16,
 }
 
 impl DhcpConfig {
+    /// A configuration listening on [`SERVER_PORT`] and replying to [`CLIENT_PORT`].
     pub fn new(interface: impl Into<String>, server_ip: Ipv4Addr) -> Self {
         Self {
             interface: interface.into(),
@@ -76,8 +84,11 @@ pub struct DhcpServer {
 
 /// What the server decided for one request.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Reply {
+pub(crate) struct Reply {
+    /// The DHCP message to send.
     pub message: Message,
+    /// Where to send it: the relay for relayed requests, the client for renewals, otherwise
+    /// the limited broadcast address.
     pub to: SocketAddrV4,
 }
 
@@ -151,8 +162,9 @@ fn mac_of(req: &Message) -> Option<MacAddr> {
     <[u8; 6]>::try_from(&req.chaddr()[..6]).ok().map(MacAddr)
 }
 
-/// Decides the reply to `req`. `None` means stay silent.
-pub fn respond<S: std::hash::BuildHasher>(
+/// Decides the reply to `req`. `None` means stay silent: the MAC has no lease, the request
+/// names another server, or the message type needs no answer (RELEASE, DECLINE).
+pub(crate) fn respond<S: std::hash::BuildHasher>(
     cfg: &DhcpConfig,
     leases: &HashMap<MacAddr, Lease, S>,
     req: &Message,

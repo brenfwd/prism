@@ -59,6 +59,7 @@ pub struct RaConfig {
     pub prefix: Ipv6Net,
     /// How long guests keep this node as a default router; zero for none.
     pub router_lifetime: Duration,
+    /// MTU in bytes to announce; omitted from the advertisement when `None`.
     pub mtu: Option<u32>,
     /// Recursive DNS servers (RDNSS).
     pub dns: Vec<Ipv6Addr>,
@@ -71,7 +72,7 @@ pub type SharedRa = Arc<RwLock<RaConfig>>;
 
 /// The advertisement for `cfg`: an `ICMPv6` message without its checksum, which the kernel
 /// fills in on a raw `ICMPv6` socket. `lladdr` is the bridge's MAC address, if known.
-pub fn build_advert(cfg: &RaConfig, lladdr: Option<MacAddr>) -> Vec<u8> {
+pub(crate) fn build_advert(cfg: &RaConfig, lladdr: Option<MacAddr>) -> Vec<u8> {
     let lifetime = u16::try_from(cfg.router_lifetime.as_secs()).unwrap_or(u16::MAX);
     let mut p = vec![ICMPV6_ROUTER_ADVERT, 0, 0, 0, CUR_HOP_LIMIT, 0];
     p.extend_from_slice(&lifetime.to_be_bytes());
@@ -124,7 +125,7 @@ fn domain_wire(domain: &str) -> Option<Vec<u8>> {
 }
 
 /// Whether `packet` is a router solicitation.
-pub fn is_router_solicitation(packet: &[u8]) -> bool {
+pub(crate) fn is_router_solicitation(packet: &[u8]) -> bool {
     packet.first() == Some(&ICMPV6_ROUTER_SOLICITATION) && packet.len() >= 8
 }
 

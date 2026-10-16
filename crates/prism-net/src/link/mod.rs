@@ -31,15 +31,19 @@ pub const VXLAN_PORT: u16 = 4789;
 /// A snapshot of one interface.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkInfo {
+    /// Kernel interface index.
     pub index: u32,
+    /// Interface name, at most 15 bytes.
     pub name: String,
     /// `IFLA_INFO_KIND` (`bridge`, `vxlan`, `wireguard`, `veth`, ...); `None` for physical NICs.
     pub kind: Option<String>,
+    /// MTU in bytes.
     pub mtu: Option<u32>,
     /// Administratively up (`IFF_UP`).
     pub up: bool,
     /// Index of the bridge (or other controller) this link is enslaved to.
     pub controller: Option<u32>,
+    /// Hardware address, when the link has a 6-byte one.
     pub mac: Option<MacAddr>,
 }
 
@@ -79,17 +83,20 @@ impl LinkInfo {
 /// multicast snooping are always off.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BridgeConfig {
+    /// MTU in bytes for the bridge.
     pub mtu: u32,
 }
 
 /// A VXLAN device (`vx<id>`) with unicast-only forwarding (`nolearning`, no group).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VxlanConfig {
+    /// VXLAN network identifier, 24 bits.
     pub vni: u32,
     /// Local VTEP address: the node's mesh address.
     pub local: Ipv6Addr,
     /// UDP destination port, normally [`VXLAN_PORT`].
     pub port: u16,
+    /// MTU in bytes for the device; the underlay MTU minus 70 bytes of VXLAN over `IPv6`.
     pub mtu: u32,
     /// Bridge to enslave the device to.
     pub bridge: Option<String>,

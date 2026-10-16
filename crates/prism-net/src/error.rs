@@ -1,3 +1,5 @@
+//! The error type shared by every module in the crate.
+
 use std::io;
 
 /// Errors returned by every module of this crate.
@@ -6,15 +8,19 @@ pub enum Error {
     /// A kernel request (rtnetlink, generic netlink or nfnetlink) failed.
     #[error("{op}: {source}")]
     Kernel {
+        /// The request that failed, such as `add table inet prism`.
         op: String,
         #[source]
+        /// The error the kernel returned; its errno is in [`Error::errno`].
         source: io::Error,
     },
     /// A socket or other I/O operation failed.
     #[error("{op}: {source}")]
     Io {
+        /// The operation that failed.
         op: String,
         #[source]
+        /// The underlying I/O error.
         source: io::Error,
     },
     /// The named interface does not exist.
@@ -23,8 +29,11 @@ pub enum Error {
     /// An interface exists under the name but is of another kind.
     #[error("interface {name:?} has kind {found:?}, expected {expected:?}")]
     WrongKind {
+        /// The interface name that was asked for.
         name: String,
+        /// The kind the caller needed.
         expected: &'static str,
+        /// The kind the interface has, or `none` when it has no kind.
         found: String,
     },
     /// A key could not be decoded.
@@ -38,6 +47,7 @@ pub enum Error {
     Protocol(String),
 }
 
+/// A `Result` that defaults to this crate's [`Error`].
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Error {

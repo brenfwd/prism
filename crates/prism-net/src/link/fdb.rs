@@ -30,8 +30,11 @@ pub struct VxlanFdb {
 /// What [`Netlink::sync_vxlan_fdb`] changed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct FdbChanges {
+    /// Entries added.
     pub added: usize,
+    /// Entries whose remote VTEP was rewritten.
     pub replaced: usize,
+    /// Entries deleted.
     pub removed: usize,
 }
 

@@ -1,7 +1,7 @@
 //! Networking primitives for Prism nodes.
 //!
-//! Everything here is a correct, idempotent building block with typed errors; policy
-//! (which switches exist, which peers belong to the mesh, ...) lives in the node.
+//! The building blocks are idempotent and return typed errors. Policy, such as which
+//! switches exist and which peers belong to the mesh, lives in the node.
 //!
 //! - [`Netlink`]: rtnetlink + generic netlink handles bound to the current network namespace.
 //! - [`link`]: bridges, VXLAN devices, bridge port VLANs, VLAN interfaces, addresses and VXLAN
@@ -11,6 +11,8 @@
 //! - [`dhcp`]: an embedded static-lease `DHCPv4` server bound to one interface.
 //! - [`dns`]: an authoritative responder for a switch zone that forwards everything else.
 //! - [`ra`]: `IPv6` router advertisements for SLAAC, with the DNS server and search domain.
+
+#![warn(missing_docs)]
 
 mod error;
 mod handle;
@@ -27,16 +29,18 @@ pub use handle::Netlink;
 
 /// A 48-bit Ethernet MAC address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct MacAddr(pub [u8; 6]);
+pub struct MacAddr([u8; 6]);
 
 impl MacAddr {
     /// The all-zero address, used for VXLAN head-end replication FDB entries.
     pub const ZERO: Self = Self([0; 6]);
 
+    /// The six address bytes, most significant first.
     pub fn octets(self) -> [u8; 6] {
         self.0
     }
 
+    /// Whether this is [`MacAddr::ZERO`].
     pub fn is_zero(self) -> bool {
         self == Self::ZERO
     }

@@ -1,3 +1,5 @@
+//! The shared netlink connection handle.
+
 use crate::{Error, Result};
 
 /// Netlink connections (rtnetlink and generic netlink) for one network namespace.

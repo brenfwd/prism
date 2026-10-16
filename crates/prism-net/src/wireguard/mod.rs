@@ -32,11 +32,15 @@ pub const KEEPALIVE_SECS: u16 = 25;
 /// Configuration of the mesh interface.
 #[derive(Clone, Debug)]
 pub struct InterfaceConfig {
+    /// Interface name, at most 15 bytes.
     pub name: String,
+    /// The node's private key.
     pub private_key: PrivateKey,
+    /// UDP port to listen on, normally [`DEFAULT_PORT`].
     pub listen_port: u16,
     /// Firewall mark for outer packets; `None` clears it.
     pub fwmark: Option<u32>,
+    /// MTU in bytes, normally [`DEFAULT_MTU`].
     pub mtu: u32,
     /// The node's mesh address with the mesh subnet's prefix, e.g. `fd12:3456:789a:1::3/64`.
     pub address: Ipv6Net,
@@ -45,6 +49,7 @@ pub struct InterfaceConfig {
 /// A desired peer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerConfig {
+    /// The peer's public key.
     pub public_key: PublicKey,
     /// Underlay endpoint. `None` keeps whatever the kernel has (possibly a roamed address).
     pub endpoint: Option<SocketAddr>,
@@ -57,31 +62,45 @@ pub struct PeerConfig {
 /// A peer as reported by the kernel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PeerStatus {
+    /// The peer's public key.
     pub public_key: PublicKey,
+    /// Current endpoint, when known.
     pub endpoint: Option<SocketAddr>,
+    /// Addresses the kernel routes to this peer.
     pub allowed_ips: Vec<IpNet>,
     /// `None` when no handshake has completed yet.
     pub last_handshake: Option<SystemTime>,
+    /// Bytes received from the peer.
     pub rx_bytes: u64,
+    /// Bytes sent to the peer.
     pub tx_bytes: u64,
+    /// Persistent keepalive interval in seconds; 0 when disabled.
     pub keepalive: u16,
 }
 
 /// Interface state as reported by the kernel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceStatus {
+    /// Kernel interface index.
     pub ifindex: u32,
+    /// The interface's public key, when a private key is set.
     pub public_key: Option<PublicKey>,
+    /// UDP listen port.
     pub listen_port: u16,
+    /// Firewall mark of outer packets; 0 when unset.
     pub fwmark: u32,
+    /// Peers known to the kernel.
     pub peers: Vec<PeerStatus>,
 }
 
 /// What [`Netlink::set_wireguard_peers`] changed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PeerChanges {
+    /// Peers created.
     pub added: usize,
+    /// Peers whose endpoint, keepalive or allowed IPs were rewritten.
     pub updated: usize,
+    /// Peers removed.
     pub removed: usize,
 }
 

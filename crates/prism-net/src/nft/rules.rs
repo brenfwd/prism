@@ -194,14 +194,18 @@ pub fn guest_input_chain(switches: &[SwitchServices]) -> Chain {
 /// Masquerade traffic from `source` leaving through `egress`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NatRule {
+    /// Guest source network to masquerade.
     pub source: Ipv4Net,
+    /// Outgoing interface.
     pub egress: String,
 }
 
 /// NAT66: masquerade `IPv6` traffic from `source` leaving through `egress`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Nat6Rule {
+    /// Guest source network to masquerade.
     pub source: Ipv6Net,
+    /// Outgoing interface.
     pub egress: String,
 }
 
@@ -212,8 +216,11 @@ pub struct DnatRule {
     pub udp: bool,
     /// Host address to match; any local address when absent.
     pub host_addr: Option<IpAddr>,
+    /// Port on the host.
     pub host_port: u16,
+    /// The guest's address.
     pub guest: IpAddr,
+    /// Port on the guest.
     pub guest_port: u16,
     /// The guest's bridge, for hairpin forwarding.
     pub bridge: String,
@@ -364,7 +371,12 @@ pub enum Ipv6Source {
     #[default]
     Any,
     /// Only the NIC's own address in `prefix`, link-local addresses and `::`.
-    Only { addr: Ipv6Addr, prefix: Ipv6Net },
+    Only {
+        /// The NIC's own address.
+        addr: Ipv6Addr,
+        /// The network the address belongs to; other addresses in it may not be claimed.
+        prefix: Ipv6Net,
+    },
 }
 
 /// A guest's tap on a switch bridge and the addresses it may use.
@@ -372,9 +384,11 @@ pub enum Ipv6Source {
 pub struct GuestPort {
     /// The tap, `pn<nicid>`.
     pub tap: String,
+    /// The NIC's MAC address; frames from any other source MAC are dropped.
     pub mac: MacAddr,
     /// The NIC's IPAM lease; `None` allows no IPv4 source other than `0.0.0.0`.
     pub ipv4: Option<Ipv4Addr>,
+    /// Which `IPv6` sources the guest may use.
     pub ipv6: Ipv6Source,
     /// A trunk NIC may send VLAN-tagged frames; their sources are checked
     /// like untagged ones. Other NICs may not send tagged frames at all.

@@ -18,7 +18,9 @@ pub enum PortVlans {
     Access(u16),
     /// Trunk port: an optional untagged native VID plus tagged VIDs.
     Trunk {
+        /// The VLAN carried untagged, used as PVID. `None` for a trunk with no native VLAN.
         native: Option<u16>,
+        /// VIDs carried tagged.
         tagged: BTreeSet<u16>,
     },
 }
@@ -55,8 +57,11 @@ impl PortVlans {
 /// One VLAN on a bridge port, as read back from the kernel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PortVlan {
+    /// VLAN id, 1 to 4094.
     pub vid: u16,
+    /// Whether untagged ingress frames on the port are assigned to this VLAN.
     pub pvid: bool,
+    /// Whether frames of this VLAN leave the port without a tag.
     pub untagged: bool,
 }
 

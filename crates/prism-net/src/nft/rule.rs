@@ -36,6 +36,8 @@ pub struct Rule {
 }
 
 impl Rule {
+    /// An empty rule for `family`. Matches added with the builder methods also insert the
+    /// protocol checks the `nft` CLI would.
     pub fn new(family: Family) -> Self {
         Self {
             family,
@@ -44,6 +46,7 @@ impl Rule {
         }
     }
 
+    /// The expressions in evaluation order, including inserted protocol checks.
     pub fn exprs(&self) -> &[Expr] {
         &self.exprs
     }

@@ -15,7 +15,7 @@ use crate::node::{DownloadReq, Node};
 use crate::state::{Command, PoolDoc};
 use crate::storage::{Pool, PoolInfo, Volume};
 
-pub fn routes() -> Router<AppState> {
+pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/nodes/{node}/pools", get(list).post(create))
         .route("/nodes/{node}/pools/{pool}", get(show).delete(remove))

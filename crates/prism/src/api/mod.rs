@@ -1,4 +1,12 @@
-//! HTTP API under `/api/v1`, plus the embedded UI.
+//! HTTP API under `/api/v1`, plus the embedded web UI at every other path.
+//!
+//! Each submodule owns the routes of one resource (VMs, pools, networks,
+//! the archive, the cluster and so on). Errors leave as RFC 9457
+//! `application/problem+json` bodies built from [`ApiError`]. Request
+//! middleware, outermost first: host and origin checks ([`hygiene`]), then
+//! for `/api/v1` the degraded-cluster header and forwarding of requests to the
+//! node that owns the resource ([`forward`]). Request bodies over 1 MiB are
+//! rejected, except where a route raises the limit (uploads).
 
 mod archive;
 mod archive_ops;
@@ -28,9 +36,12 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use crate::node::{Node, NodeError, NodeView};
 use crate::storage::StorageError;
 
+/// The shared node handle every handler receives.
 pub type AppState = Arc<Node>;
 
-pub fn router(node: AppState) -> Router {
+/// Builds the full application: the API under `/api/v1`, the UI fallback and
+/// the security headers and request checks.
+pub(crate) fn router(node: AppState) -> Router {
     let api = Router::new()
         .route("/nodes", get(list_nodes))
         .route("/nodes/{node}", get(get_node))
@@ -93,8 +104,8 @@ async fn get_node(
         .ok_or_else(|| ApiError::not_found(format!("node {id}")))
 }
 
-/// Accepts this node's ID or the alias `local`.
-pub fn check_node(node: &Node, id: &str) -> Result<(), ApiError> {
+/// Accepts this node's ID or the alias `local`; any other ID is a 404.
+pub(crate) fn check_node(node: &Node, id: &str) -> Result<(), ApiError> {
     if id == "local" || id == node.id.to_string() {
         Ok(())
     } else {
@@ -102,7 +113,8 @@ pub fn check_node(node: &Node, id: &str) -> Result<(), ApiError> {
     }
 }
 
-/// RFC 9457 problem details.
+/// Wire format of every error body (RFC 9457 problem details, plus `code`,
+/// `retryable` and `degraded`).
 #[derive(Debug, Serialize)]
 pub struct Problem {
     #[serde(rename = "type")]
@@ -115,6 +127,12 @@ pub struct Problem {
     degraded: bool,
 }
 
+/// An error response: an HTTP status, a stable machine-readable `code` and
+/// a human-readable `detail`.
+///
+/// Statuses 503 and 502 are marked `retryable` in the body, and the code
+/// `cluster_degraded` sets `degraded`. Server errors are logged when the
+/// response is built.
 #[derive(Debug)]
 pub struct ApiError {
     status: StatusCode,
@@ -123,6 +141,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
+    /// An error with an explicit status and code.
     pub fn new(status: StatusCode, code: &'static str, detail: impl Into<String>) -> Self {
         Self {
             status,
@@ -131,14 +150,17 @@ impl ApiError {
         }
     }
 
+    /// A 404 with code `not_found`.
     pub fn not_found(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, "not_found", detail)
     }
 
+    /// The human-readable message.
     pub fn detail(&self) -> &str {
         &self.detail
     }
 
+    /// A 400 with code `invalid`.
     pub fn bad_request(detail: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "invalid", detail)
     }
@@ -231,7 +253,9 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
-/// JSON body extractor that reports errors as problem+json.
+/// JSON request-body extractor. It replaces `axum::Json` so that a missing
+/// content type or a malformed body is answered as problem+json with code
+/// `invalid_body`, not as axum's plain-text rejection.
 pub struct Json<T>(pub T);
 
 impl<T, S> axum::extract::FromRequest<S> for Json<T>
@@ -247,5 +271,88 @@ where
             .await
             .map(|axum::Json(v)| Self(v))
             .map_err(|e| ApiError::new(e.status(), "invalid_body", e.body_text()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parts(e: impl Into<ApiError>) -> (StatusCode, &'static str, String) {
+        let e = e.into();
+        (e.status, e.code, e.detail)
+    }
+
+    #[test]
+    fn node_errors_map_to_status_and_code() {
+        let cases: Vec<(NodeError, StatusCode, &str)> = vec![
+            (
+                NodeError::NotFound("vm".into()),
+                StatusCode::NOT_FOUND,
+                "not_found",
+            ),
+            (
+                NodeError::Conflict("busy".into()),
+                StatusCode::CONFLICT,
+                "conflict",
+            ),
+            (
+                NodeError::Invalid("bad".into()),
+                StatusCode::BAD_REQUEST,
+                "invalid",
+            ),
+            (
+                NodeError::Unavailable,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "libvirt_unavailable",
+            ),
+            (
+                NodeError::Degraded("read-only".into()),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "cluster_degraded",
+            ),
+            (
+                NodeError::Internal(anyhow::anyhow!("boom")),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal",
+            ),
+        ];
+        for (err, status, code) in cases {
+            let (s, c, _) = parts(err);
+            assert_eq!((s, c), (status, code));
+        }
+    }
+
+    #[test]
+    fn storage_errors_map_to_status_and_code() {
+        let (s, c, _) = parts(StorageError::NoPool("p".into()));
+        assert_eq!((s, c), (StatusCode::NOT_FOUND, "not_found"));
+        let (s, c, _) = parts(StorageError::Exists("v".into()));
+        assert_eq!((s, c), (StatusCode::CONFLICT, "exists"));
+        let (s, c, _) = parts(StorageError::InvalidName("..".into()));
+        assert_eq!((s, c), (StatusCode::BAD_REQUEST, "invalid"));
+    }
+
+    #[tokio::test]
+    async fn problem_body_flags_retryable_and_degraded() {
+        let res =
+            ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "cluster_degraded", "x").into_response();
+        assert_eq!(
+            res.headers()[header::CONTENT_TYPE],
+            "application/problem+json"
+        );
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["retryable"], true);
+        assert_eq!(v["degraded"], true);
+        assert_eq!(v["status"], 503);
+
+        let res = ApiError::bad_request("no").into_response();
+        let body = axum::body::to_bytes(res.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            (v["retryable"].clone(), v["degraded"].clone()),
+            (false.into(), false.into())
+        );
     }
 }

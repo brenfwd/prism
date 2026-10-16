@@ -15,8 +15,12 @@ use crate::events::{Resume, Sequenced};
 use crate::node::{Node, NodeView, VmView};
 use crate::storage::PoolInfo;
 
+/// Query string of the events endpoint.
 #[derive(Debug, Deserialize)]
-pub struct EventsQuery {
+pub(crate) struct EventsQuery {
+    /// `1` sends a snapshot event first on a fresh connection. A client
+    /// that resumes with `Last-Event-ID` gets missed events instead, or a
+    /// reset plus snapshot if the gap is too old.
     #[serde(default)]
     snapshot: Option<u8>,
 }
@@ -52,7 +56,7 @@ fn to_sse(e: &Sequenced) -> SseEvent {
         .unwrap_or_default()
 }
 
-pub async fn events(
+pub(crate) async fn events(
     State(node): State<AppState>,
     Query(q): Query<EventsQuery>,
     headers: HeaderMap,

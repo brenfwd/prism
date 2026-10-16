@@ -12,8 +12,13 @@ use axum::response::{IntoResponse, Response};
 use super::ApiError;
 use crate::config::HttpConfig;
 
+/// Request filter state: the host names and origins this node answers to.
+///
+/// A request passes when its `Host` is allowed (or `*` is configured) and,
+/// for requests that change state, its `Origin` matches. Built once from
+/// `http.allowed_hosts` and the node's names.
 #[derive(Debug, Clone)]
-pub struct Hygiene(Arc<Inner>);
+pub(crate) struct Hygiene(Arc<Inner>);
 
 #[derive(Debug)]
 struct Inner {
@@ -23,7 +28,9 @@ struct Inner {
 }
 
 impl Hygiene {
-    pub fn new(cfg: &HttpConfig, node_name: &str) -> Self {
+    /// Collects the allowed hosts: the configured ones, `localhost`, the node
+    /// name and the system host name (all lower-cased).
+    pub(crate) fn new(cfg: &HttpConfig, node_name: &str) -> Self {
         let mut hosts: Vec<String> = cfg
             .allowed_hosts
             .iter()
@@ -79,7 +86,9 @@ fn header_str<'a>(h: &'a HeaderMap, name: &str) -> Option<&'a str> {
     h.get(name).and_then(|v| v.to_str().ok())
 }
 
-pub async fn check(State(h): State<Hygiene>, req: Request, next: Next) -> Response {
+/// Middleware that answers disallowed requests with a problem response and
+/// lets requests tunnelled from a peer through unchecked.
+pub(crate) async fn check(State(h): State<Hygiene>, req: Request, next: Next) -> Response {
     // Requests tunnelled from a peer were checked by the node that took them.
     if req
         .extensions()

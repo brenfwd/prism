@@ -16,7 +16,7 @@ use super::{ApiError, AppState};
 use crate::cluster::peers::open_remote_console;
 use crate::node::Node;
 
-pub fn routes() -> Router<AppState> {
+pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/vms/{id}/console", get(vnc))
         .route("/vms/{id}/serial", get(serial))

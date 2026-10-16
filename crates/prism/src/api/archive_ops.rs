@@ -13,7 +13,7 @@ use crate::archive::{ArchivePoolDoc, MemberState};
 use crate::node::NodeError;
 use crate::state::Command;
 
-pub fn routes() -> Router<AppState> {
+pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/archive/pools/{pool}", put(set_replicas))
         .route("/archive/pools/{pool}/repair", post(repair))

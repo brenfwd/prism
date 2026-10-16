@@ -12,7 +12,7 @@ use super::{ApiError, AppState, Json};
 use crate::cluster::peers::Tunnelled;
 use crate::node::{FinishReq, PrepareReq};
 
-pub fn routes() -> Router<AppState> {
+pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/internal/migrations/{id}/prepare", post(prepare))
         .route("/internal/migrations/{id}/finish", post(finish))

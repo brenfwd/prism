@@ -36,7 +36,7 @@ fn owner(node: &Node, path: &str, query: Option<&str>) -> Option<Uuid> {
 }
 
 /// Marks every response while the cluster is degraded (config read-only).
-pub async fn degraded(State(node): State<AppState>, req: Request, next: Next) -> Response {
+pub(crate) async fn degraded(State(node): State<AppState>, req: Request, next: Next) -> Response {
     let mut res = next.run(req).await;
     if node.cluster.get().is_some_and(|c| c.is_degraded()) {
         res.headers_mut().insert(
@@ -47,7 +47,11 @@ pub async fn degraded(State(node): State<AppState>, req: Request, next: Next) ->
     res
 }
 
-pub async fn route(State(node): State<AppState>, req: Request, next: Next) -> Response {
+/// Middleware that proxies a request to the node that owns the VM, pool or
+/// node it addresses, when that is not this node. Local, already-forwarded,
+/// standalone and WebSocket requests pass through. Answers 404 for an owner
+/// that is no longer a member and 502 when the owner is unreachable.
+pub(crate) async fn route(State(node): State<AppState>, req: Request, next: Next) -> Response {
     // Already forwarded once, standalone, or a WebSocket (consoles tunnel
     // themselves): handle here.
     let is_ws = req.headers().contains_key(axum::http::header::UPGRADE);

@@ -16,7 +16,7 @@ use crate::cluster::runtime::{ClusterOpError, DEFAULT_INVITE_TTL};
 use crate::node::NodeError;
 use crate::state::Command;
 
-pub fn routes() -> Router<AppState> {
+pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/cluster", get(status).post(create))
         .route("/cluster/invites", get(invites).post(invite))

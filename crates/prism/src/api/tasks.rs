@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::{ApiError, AppState};
 use crate::tasks::Task;
 
-pub fn routes() -> Router<AppState> {
+pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/tasks", get(list))
         .route("/tasks/{id}", get(show))

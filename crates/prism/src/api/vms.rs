@@ -14,7 +14,7 @@ use crate::node::{
 use crate::spec::{CreateVm, PortForward, UpdateVm};
 use crate::tasks::Task;
 
-pub fn routes() -> Router<AppState> {
+pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/vms", get(list).post(create))
         .route("/vms/{id}", get(show).patch(update).delete(remove))
@@ -270,7 +270,7 @@ async fn action(
     Ok(axum::Json(node.action(parse_id(&id)?, action).await?))
 }
 
-pub fn backup_routes() -> Router<AppState> {
+pub(crate) fn backup_routes() -> Router<AppState> {
     Router::new()
         .route("/vms/{id}/backups", get(list_backups).post(create_backup))
         .route("/backups", get(all_backups))

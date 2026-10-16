@@ -10,7 +10,7 @@ use super::{ApiError, AppState, Json};
 use crate::network::{AddVlanSubnet, CheckNetwork, CreateNetwork, UpdateNetwork};
 use crate::node::{NetworkCheck, NetworkView};
 
-pub fn routes() -> Router<AppState> {
+pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/networks", get(list).post(create))
         .route("/networks/check", post(check))

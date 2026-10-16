@@ -18,7 +18,7 @@ use crate::archive::{
 use crate::node::{Node, NodeError};
 use crate::state::Command;
 
-pub fn routes() -> Router<AppState> {
+pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/archive/pools", get(list_pools).post(create_pool))
         .route("/archive/pools/{pool}/files", get(list_files))

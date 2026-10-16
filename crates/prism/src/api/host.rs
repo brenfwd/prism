@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use super::{ApiError, AppState, check_node};
 
-pub fn routes() -> Router<AppState> {
+pub(crate) fn routes() -> Router<AppState> {
     Router::new()
         .route("/nodes/{node}/bridges", get(bridges))
         .route("/nodes/{node}/prereqs", get(prereqs))

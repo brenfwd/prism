@@ -5,6 +5,7 @@ mod apparmor;
 mod archive_health;
 mod archive_io;
 mod archive_repair;
+mod backup_xml;
 mod backups;
 mod balloon;
 mod clone;

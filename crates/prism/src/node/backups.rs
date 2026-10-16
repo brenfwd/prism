@@ -6,15 +6,14 @@
 //! disk image is staged in the VM's pool, streamed into an archive pool on
 //! any node, and recorded with the VM's spec for restore.
 
-use std::fmt::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
 use prism_libvirt::DomainEvent;
-use quick_xml::escape::escape;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::backup_xml::{BackupDisk as XmlDisk, backup_xml, checkpoint_xml};
 use super::{Node, NodeError, Result, domain_ref};
 use crate::spec::{DiskDevice, VmSpec, random_mac};
 use crate::state::Command;
@@ -120,7 +119,6 @@ impl Node {
             }))
     }
 
-    #[allow(clippy::too_many_lines)]
     async fn run_backup(
         &self,
         spec: &VmSpec,
@@ -157,98 +155,18 @@ impl Node {
         };
         let checkpoint = running.then(|| format!("prism-{}", backup_id.simple()));
 
-        if running {
-            ctx.progress(
-                None,
-                if parent.is_some() {
-                    "incremental backup"
-                } else {
-                    "full backup"
-                },
-            );
-            let mut bxml = String::from("<domainbackup mode='push'>\n");
-            if let Some(p) = &parent {
-                let _ = writeln!(
-                    bxml,
-                    "  <incremental>{}</incremental>",
-                    escape(p.checkpoint.as_deref().unwrap_or_default())
-                );
-            }
-            bxml.push_str("  <disks>\n");
-            let mut cxml = format!(
-                "<domaincheckpoint>\n  <name>{}</name>\n  <disks>\n",
-                escape(checkpoint.as_deref().unwrap_or_default())
-            );
-            for d in &spec.disks {
-                if disks.iter().any(|x| x.id == d.id) {
-                    let file = staging_pool.path.join(staged(&d.target));
-                    let _ = write!(
-                        bxml,
-                        "    <disk name='{}' backup='yes' type='file'>\n      <driver type='qcow2'/>\n      <target file='{}'/>\n    </disk>\n",
-                        escape(&d.target),
-                        escape(file.to_string_lossy().as_ref())
-                    );
-                    let _ = writeln!(
-                        cxml,
-                        "    <disk name='{}' checkpoint='bitmap'/>",
-                        escape(&d.target)
-                    );
-                } else {
-                    let _ = writeln!(bxml, "    <disk name='{}' backup='no'/>", escape(&d.target));
-                    let _ = writeln!(
-                        cxml,
-                        "    <disk name='{}' checkpoint='no'/>",
-                        escape(&d.target)
-                    );
-                }
-            }
-            bxml.push_str("  </disks>\n</domainbackup>\n");
-            cxml.push_str("  </disks>\n</domaincheckpoint>\n");
-
-            let mut events = self.subscribe_domain_events();
-            c.backup_begin(&dom, &bxml, Some(&cxml), 0).await?;
-            let uuid = dom.uuid;
-            let poll = {
-                let (c, dom, ctx) = (c.clone(), dom.clone(), ctx.clone());
-                tokio::spawn(async move {
-                    loop {
-                        tokio::time::sleep(Duration::from_secs(2)).await;
-                        if let Ok((_, stats)) = c.job_stats(&dom, 0).await {
-                            use prism_libvirt::Params;
-                            let total = stats.u64("data_total").unwrap_or(0);
-                            let done = stats.u64("data_processed").unwrap_or(0);
-                            if total > 0 {
-                                ctx.progress(
-                                    Some(0.8 * done as f64 / total as f64),
-                                    "copying changed blocks",
-                                );
-                            }
-                        }
-                    }
-                })
-            };
-            let done = tokio::select! {
-                r = self.wait_event(&mut events, JOB_TIMEOUT, |ev| match ev {
-                    DomainEvent::JobCompleted { domain, .. } if domain.uuid == uuid => Some(()),
-                    _ => None,
-                }) => r,
-                () = ctx.cancel.cancelled() => {
-                    let _ = c.abort_job(&dom).await;
-                    Err(NodeError::Invalid("cancelled".into()))
-                }
-            };
-            poll.abort();
-            if let Err(e) = done {
-                for d in &disks {
-                    staging_pool.delete_volume_best_effort(&staged(&d.target));
-                }
-                if let Some(cp) = &checkpoint
-                    && let Ok(cp) = c.checkpoint_lookup(&dom, cp).await
-                {
-                    let _ = c.checkpoint_delete(&cp, 0).await;
-                }
-                return Err(e.into());
-            }
+        if let Some(cp) = &checkpoint {
+            self.push_backup(
+                &c,
+                spec,
+                &disks,
+                &staging_pool,
+                &staged,
+                parent.as_ref(),
+                cp,
+                ctx,
+            )
+            .await?;
         } else {
             // Stopped: flatten each disk chain into the staging file.
             for d in &disks {
@@ -260,39 +178,24 @@ impl Node {
             }
         }
 
-        // Stream the staged images into the archive pool.
-        let mut out = Vec::new();
-        for (i, d) in disks.iter().enumerate() {
-            ctx.progress(
-                Some(0.8 + 0.2 * i as f64 / disks.len() as f64),
-                format!("storing {} in {}", d.target, req.pool),
-            );
-            let name = staged(&d.target);
-            let path = format!(
-                "backups/{}/{}/{}.qcow2",
-                spec.name,
-                backup_id.simple(),
-                d.target
-            );
-            let file = staging_pool.open_read(&name)?;
-            let stored = self.archive_store_file(&req.pool, &path, file).await;
-            staging_pool.delete_volume_best_effort(&name);
-            let stored = stored?;
-            out.push(BackupDisk {
-                target: d.target.clone(),
-                path,
-                size: stored.size,
-                blake3: stored.blake3,
-            });
-        }
+        let out = self
+            .store_staged_disks(
+                spec,
+                &disks,
+                &staging_pool,
+                &staged,
+                backup_id,
+                &req.pool,
+                ctx,
+            )
+            .await?;
 
         // The parent's checkpoint is no longer needed: libvirt merges its
         // bitmap into the new one.
         if let Some(p) = &parent
             && let Some(cp) = &p.checkpoint
-            && let Ok(cp) = c.checkpoint_lookup(&dom, cp).await
         {
-            let _ = c.checkpoint_delete(&cp, 0).await;
+            delete_checkpoint(&c, &dom, cp).await;
         }
         // The spec (including cloud-init user-data) is kept for restores.
         let saved = spec.clone();
@@ -319,6 +222,137 @@ impl Node {
             .await?;
         tracing::info!(vm = %spec.name, backup = %doc.id, kind = ?doc.kind, "backup complete");
         Ok(doc)
+    }
+
+    /// Runs a libvirt push-mode backup of a running VM into staging files,
+    /// waiting for the job to finish. On failure or cancellation the staged
+    /// files and the new checkpoint are removed.
+    #[allow(clippy::too_many_arguments)]
+    async fn push_backup(
+        &self,
+        c: &prism_libvirt::Client,
+        spec: &VmSpec,
+        disks: &[&crate::spec::DiskSpec],
+        staging_pool: &crate::storage::Pool,
+        staged: &impl Fn(&str) -> String,
+        parent: Option<&BackupDoc>,
+        checkpoint: &str,
+        ctx: &crate::tasks::TaskCtx,
+    ) -> anyhow::Result<()> {
+        let dom = domain_ref(spec);
+        ctx.progress(
+            None,
+            if parent.is_some() {
+                "incremental backup"
+            } else {
+                "full backup"
+            },
+        );
+        let files: Vec<_> = spec
+            .disks
+            .iter()
+            .map(|d| {
+                disks
+                    .iter()
+                    .any(|x| x.id == d.id)
+                    .then(|| staging_pool.path.join(staged(&d.target)))
+            })
+            .collect();
+        let xml_disks: Vec<_> = spec
+            .disks
+            .iter()
+            .zip(&files)
+            .map(|(d, f)| XmlDisk {
+                target: &d.target,
+                staging: f.as_deref(),
+            })
+            .collect();
+        let bxml = backup_xml(parent.and_then(|p| p.checkpoint.as_deref()), &xml_disks);
+        let cxml = checkpoint_xml(checkpoint, &xml_disks);
+
+        let mut events = self.subscribe_domain_events();
+        c.backup_begin(&dom, &bxml, Some(&cxml), 0).await?;
+        let uuid = dom.uuid;
+        let poll = {
+            let (c, dom, ctx) = (c.clone(), dom.clone(), ctx.clone());
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    if let Ok((_, stats)) = c.job_stats(&dom, 0).await {
+                        use prism_libvirt::Params;
+                        let total = stats.u64("data_total").unwrap_or(0);
+                        let done = stats.u64("data_processed").unwrap_or(0);
+                        if total > 0 {
+                            ctx.progress(
+                                Some(0.8 * done as f64 / total as f64),
+                                "copying changed blocks",
+                            );
+                        }
+                    }
+                }
+            })
+        };
+        let done = tokio::select! {
+            r = self.wait_event(&mut events, JOB_TIMEOUT, |ev| match ev {
+                DomainEvent::JobCompleted { domain, .. } if domain.uuid == uuid => Some(()),
+                _ => None,
+            }) => r,
+            () = ctx.cancel.cancelled() => {
+                if let Err(e) = c.abort_job(&dom).await {
+                    tracing::warn!(vm = %spec.name, "could not abort backup job: {e}");
+                }
+                Err(NodeError::Invalid("cancelled".into()))
+            }
+        };
+        poll.abort();
+        if let Err(e) = done {
+            for d in disks {
+                staging_pool.delete_volume_best_effort(&staged(&d.target));
+            }
+            delete_checkpoint(c, &dom, checkpoint).await;
+            return Err(e.into());
+        }
+        Ok(())
+    }
+
+    /// Streams each staged image into the archive pool `pool` and deletes
+    /// the staging file, whether or not the store succeeded.
+    #[allow(clippy::too_many_arguments)]
+    async fn store_staged_disks(
+        &self,
+        spec: &VmSpec,
+        disks: &[&crate::spec::DiskSpec],
+        staging_pool: &crate::storage::Pool,
+        staged: &impl Fn(&str) -> String,
+        backup_id: Uuid,
+        pool: &str,
+        ctx: &crate::tasks::TaskCtx,
+    ) -> anyhow::Result<Vec<BackupDisk>> {
+        let mut out = Vec::new();
+        for (i, d) in disks.iter().enumerate() {
+            ctx.progress(
+                Some(0.8 + 0.2 * i as f64 / disks.len() as f64),
+                format!("storing {} in {pool}", d.target),
+            );
+            let name = staged(&d.target);
+            let path = format!(
+                "backups/{}/{}/{}.qcow2",
+                spec.name,
+                backup_id.simple(),
+                d.target
+            );
+            let file = staging_pool.open_read(&name)?;
+            let stored = self.archive_store_file(pool, &path, file).await;
+            staging_pool.delete_volume_best_effort(&name);
+            let stored = stored?;
+            out.push(BackupDisk {
+                target: d.target.clone(),
+                path,
+                size: stored.size,
+                blake3: stored.blake3,
+            });
+        }
+        Ok(out)
     }
 
     /// Restores a backup (and the chain it depends on) as a new VM.
@@ -417,15 +451,28 @@ impl Node {
             ));
         }
         for d in &backup.disks {
-            let _ = self
+            if let Err(e) = self
                 .state
                 .apply(Command::DeleteArchiveFile {
                     pool: backup.pool.clone(),
                     path: d.path.clone(),
                 })
-                .await;
+                .await
+            {
+                tracing::warn!(backup = %id, path = %d.path, "could not delete backup file: {e:#}");
+            }
         }
         self.state.apply(Command::DeleteBackup { id }).await?;
         Ok(())
+    }
+}
+
+/// Deletes a libvirt checkpoint, logging a warning if libvirt refuses.
+async fn delete_checkpoint(c: &prism_libvirt::Client, dom: &prism_libvirt::Domain, name: &str) {
+    let Ok(cp) = c.checkpoint_lookup(dom, name).await else {
+        return;
+    };
+    if let Err(e) = c.checkpoint_delete(&cp, 0).await {
+        tracing::warn!(checkpoint = name, "could not delete checkpoint: {e}");
     }
 }

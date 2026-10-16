@@ -1,113 +1,135 @@
 # Prism
 
-A libvirt/KVM manager for Linux hosts, shipped as one binary with an embedded web UI.
-See [docs/DESIGN.md](docs/DESIGN.md) for the full design.
+Prism manages KVM virtual machines through libvirt. It is one static binary with an embedded web UI, and it runs on each host. It talks to the local libvirt daemon with its own Rust implementation of libvirt's RPC protocol, so the libvirt C library is never linked.
 
-**Status:** single-node MVP (part of milestones M0–M2). Clustering, networking switches, snapshots,
-backups, migration and auto-ballooning are not implemented yet.
+Hosts can be joined into a cluster. Cluster traffic runs over a WireGuard mesh that Prism sets up between the members. A cluster supports live migration of VMs between nodes, archive pools that span several nodes, backups and virtual networks. The UI covers VM creation, consoles (VNC and serial), memory ballooning, storage, networks and a task history.
 
-## What works
+Prism has no authentication. It listens on loopback by default.
 
-- Native libvirt RPC client in Rust (`crates/prism-libvirt`): XDR over the daemon's UNIX
-  socket, call multiplexing, lifecycle events, keepalive and data streams. libvirt's C
-  library is never linked.
-- VMs: create, edit, delete, and start / shut down / power off / reboot / reset / pause / resume.
-  The machine type is pinned at creation (for example `pc-q35-10.2`). Each VM gets a virtio disk,
-  an optional install ISO, and user-mode or host-bridge networking. Firmware is BIOS or UEFI.
-- Memory ballooning (manual): set a live balloon target between a floor and the maximum.
-  Guest memory stats come from the virtio balloon driver.
-- Storage: directory pools from `prism.toml` or created through the API under allowlisted
-  roots. You can create qcow2/raw volumes, upload ISOs (streamed and renamed atomically) and
-  delete volumes. Every file operation is confined with `openat2(RESOLVE_BENEATH | NO_SYMLINKS …)`.
-- REST API under `/api/v1`, with RFC 9457 problem+json errors.
-- SSE (`/api/v1/events?snapshot=1`): a snapshot followed by live `vm.state`, `vm.stats`,
-  `vm.config`, `node.status` and `pool` events, with replay via `Last-Event-ID`.
-- Consoles over WebSocket: VNC (`/vms/{id}/console`, raw RFB to QEMU's UNIX socket) and
-  serial (`/vms/{id}/serial`, a libvirt console stream).
-- Request hygiene: the `Host` allowlist (421) and Origin / `Sec-Fetch-Site` checks on writes and
-  WebSockets. The server listens on loopback by default.
-- Web UI (React, Tailwind, TanStack): overview, VM list, a create dialog, VM detail with a
-  balloon slider, VNC console, serial console, settings, and storage with upload.
-  The VNC console decodes RFB in a Web Worker with `prism-rfb-wasm` (Rust → WebAssembly)
-  and draws with WebGL2 on an OffscreenCanvas, falling back to main-thread WebGL2, then Canvas2D.
+## Requirements
 
-## Build
+- A Linux host with KVM (`/dev/kvm`), run as root.
+- libvirt 8.0 or later, with `virtqemud` or `libvirtd` running, and QEMU.
+- `qemu-img`.
+- `ip` from iproute2, which networks and cluster leave use.
+- `passt` for user-mode guest networking (optional; `prism doctor` reports it).
 
-Requires Rust (stable or nightly) with the `wasm32-unknown-unknown` target, and
-[Bun](https://bun.sh).
+## Install
+
+From a release binary, copy it into place:
+
+```sh
+install -m 0755 prism /usr/local/bin/prism
+```
+
+To build from source you need Rust 1.88 or later with the `wasm32-unknown-unknown` target, and [Bun](https://bun.sh) for the UI:
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo build --release
+cargo build --release          # target/release/prism
 ```
 
-The UI is the `prism-web` crate (`web/`). Its `build.rs` first builds the console decoder
-(`crates/prism-rfb-wasm`) for `wasm32-unknown-unknown` with a nested cargo using its own target
-directory under `OUT_DIR`, then runs `bun install --frozen-lockfile` and `bun run build` into
-`OUT_DIR`; the output is embedded into the binary. Cargo reruns it only when files in `web/` or
-the decoder change.
+The `prism-web` crate (`web/`) has a `build.rs` that builds the console decoder (`crates/prism-rfb-wasm`), runs `bun install --frozen-lockfile` and `bun run build`, and embeds the result in the binary. Set `BUN=/path/to/bun` to choose a Bun binary. Set `PRISM_SKIP_WEB=1` to embed a placeholder page, for Rust-only checks on a machine without Bun.
 
-- `BUN=/path/to/bun` picks a specific Bun. Otherwise `bun` on `PATH`, then `~/.bun/bin/bun`.
-- `PRISM_SKIP_WEB=1` skips the UI and embeds a placeholder page. Useful for Rust-only checks
-  on machines without Bun.
+### Static build
 
-### Static binary
-
-A plain `cargo build` links glibc dynamically. For a fully static binary, build for a musl
-target. The bundled SQLite is C code and needs a musl C compiler; `cargo-zigbuild` uses Zig
-to provide one. musl targets link `crt-static` by default, so no `RUSTFLAGS` are needed.
-
-One-time setup:
+A plain `cargo build` links glibc dynamically. For a static binary, build for musl. The bundled SQLite is C code and needs a musl C compiler, which `cargo-zigbuild` gets from Zig. musl targets link statically by default, so no `RUSTFLAGS` are needed.
 
 ```sh
 rustup target add x86_64-unknown-linux-musl     # aarch64-unknown-linux-musl for ARM
-cargo install cargo-zigbuild
-# plus Zig on PATH: https://ziglang.org/download/ (or your package manager)
-```
-
-Build:
-
-```sh
+cargo install cargo-zigbuild                    # and put Zig on PATH
 cargo zigbuild --release --target x86_64-unknown-linux-musl -p prism
-# → target/x86_64-unknown-linux-musl/release/prism
 ```
 
-Verify that it is static:
+The binary is `target/x86_64-unknown-linux-musl/release/prism`. To check that it is static:
 
 ```sh
 B=target/x86_64-unknown-linux-musl/release/prism
 file "$B"                       # "statically linked"
-readelf -d "$B" | grep NEEDED   # must print nothing
+readelf -d "$B" | grep NEEDED   # prints nothing
 ldd "$B"                        # "not a dynamic executable"
 ```
 
-Notes:
+The build machine still needs Bun, because the UI is embedded. Plain `cargo build --target x86_64-unknown-linux-musl` usually fails in SQLite unless `musl-gcc` is installed. Zig may print `ignoring deprecated linker optimization setting "1"`, which is harmless. A dependency that links a system library (OpenSSL, libz) breaks the static build, and the `readelf` check catches it.
 
-- The UI is embedded as usual, so the build machine still needs Bun.
-- Plain `cargo build --target x86_64-unknown-linux-musl` (without zigbuild) usually fails while
-  compiling SQLite unless a musl C toolchain such as `musl-gcc` is installed.
-- Zig may print `linker stderr: ignoring deprecated linker optimization setting "1"`. It is harmless.
-- Any new dependency that links a system library (OpenSSL, libz, …) breaks the static
-  build. The `readelf` check above catches it. See the dependency rules in
-  [docs/DESIGN.md](docs/DESIGN.md).
+## First run
 
-## Run
+1. Create the config directory:
 
-Prism runs as root on a KVM host with libvirt ≥ 8.0 (`virtqemud` or `libvirtd`) and `qemu-img`.
+   ```sh
+   prism init --config /etc/prism
+   ```
 
-```sh
-prism init --config /etc/prism          # writes prism.toml; review it
-prism doctor --config /etc/prism        # checks libvirt, /dev/kvm, qemu-img, pools
-prism serve --config /etc/prism
+   This writes `/etc/prism/prism.toml` with one directory pool at `/var/lib/prism/pools/default`. Use `--pool-path` to put that pool elsewhere.
+
+2. Check the host:
+
+   ```sh
+   prism doctor --config /etc/prism
+   ```
+
+   It checks libvirt, `/dev/kvm`, `qemu-img`, the optional programs and the configured pools.
+
+3. Start the node:
+
+   ```sh
+   prism serve --config /etc/prism
+   ```
+
+4. Open <http://127.0.0.1:8080>. To reach the UI from another machine, use an SSH tunnel, `tailscale serve`, or a management address in `http.listen` together with `http.allowed_hosts`. Do not listen on 0.0.0.0.
+5. Upload an installer ISO on the storage page, then create a VM from the VM list. Pick the ISO as the install media, start the VM and open its console.
+
+## Command line
+
+Every subcommand takes `--config <dir>`, the config directory. `--help` works on each one.
+
+| Command | What it does |
+| --- | --- |
+| `prism init [--pool-path <dir>]` | Creates the config directory and a default `prism.toml`. |
+| `prism serve [--adopt]` | Runs the node. `--adopt` accepts a config directory copied from another machine. |
+| `prism doctor` | Checks host prerequisites. |
+| `prism cluster init --name <name> [--consensus]` | Makes this node the hub of a new cluster. `--consensus` uses 3 or 5 voting members instead of a single hub. |
+| `prism cluster status` | Shows cluster status and members. |
+| `prism cluster invite [--name <name>] [--ttl <seconds>] [--revoke <id>]` | Creates an invite for a new node. The default lifetime is one hour. `--revoke` cancels an open invite. |
+| `prism join <invite>` | Run on the new node. Prints a reply to give to the hub. |
+| `prism cluster accept <reply> [-y]` | Run on the hub. Admits the node that printed the reply. |
+| `prism cluster remove <node>` | Removes a member. Its VMs must be moved first. |
+| `prism cluster promote <node>` | Hands the hub role to another member. Run it on the current hub. |
+| `prism cluster removed` | Lists removed members, whose keys, IDs and addresses stay blocked. |
+| `prism leave [--force]` | Leaves the cluster and wipes this node's state. `--force` wipes without telling the cluster. Stop `prism serve` first. |
+
+To form a cluster, run `prism cluster init` on the first node, then `prism cluster invite` on it. Paste the invite into `prism join` on the new node, and paste the reply it prints into `prism cluster accept` on the hub. Members need UDP port 51820 (`cluster.wireguard_port`) open between them.
+
+## Configuration
+
+The config directory holds `prism.toml`, `data/` (the node's databases and identity), `wg/` (WireGuard keys) and `run/prism.lock`. Directories are created with mode 0700 and files with 0600. Unknown keys in `prism.toml` are an error. Every section is optional. Settings shared by a cluster live in the replicated state, not in this file.
+
+A minimal file:
+
+```toml
+[http]
+listen = ["127.0.0.1:8080"]
+
+[libvirt]
+uri = "qemu:///system"
+domain_type = "auto"     # kvm when /dev/kvm exists, else qemu
+
+[storage]
+pool_roots = ["/var/lib/prism/pools"]   # where the API may create pools
+
+[pools.default]
+type = "dir"
+path = "/var/lib/prism/pools/default"
+format = "qcow2"         # or raw
+
+[cluster]
+advertise = ["192.0.2.10"]   # addresses other members reach this node at
+wireguard_port = 51820
 ```
 
-Open <http://127.0.0.1:8080>. To reach it from elsewhere, use `tailscale serve`, an SSH
-tunnel, or a management address in `[http] listen` (plus `allowed_hosts`). Never use 0.0.0.0.
-Prism has no authentication of its own.
+Other keys are `node.name`, `http.allowed_hosts`, `http.allowed_origins`, `libvirt.socket`, `libvirt.emulator`, `libvirt.qemu_img`, `libvirt.uefi_loader`, and `[archive_members.<name>]` tables (`pool`, `path`, `weight`, `reserve`) that add a directory on this node to an archive pool.
 
-### Unprivileged development
-
-`prism.toml` can point at a session-mode daemon and TCG:
+For development without root, point Prism at a session daemon and TCG:
 
 ```toml
 [libvirt]
@@ -116,54 +138,23 @@ uri = "qemu:///session"
 domain_type = "qemu"
 ```
 
-Pool directories must support `O_DIRECT` (disks use `cache=none,io=native`), so tmpfs won't work.
+Pool directories must support `O_DIRECT`, so tmpfs does not work.
 
-For UI work, run `bun run dev` in `web/` for hot reload. It proxies `/api` to `127.0.0.1:8080`.
-Run `bun run wasm` once first (and after decoder changes) to build the console decoder.
+## Development
 
-## Testbed
-
-`cargo xtask testbed` runs Prism as root inside Ubuntu 26.04 VMs, for testing clustering,
-WireGuard, bridges, VXLAN and nftables. You need membership in the `libvirt` group (it uses
-`qemu:///system`), nested KVM, `ssh`, `ssh-keygen`, `curl` and `sha256sum`. You don't need sudo.
+Run `bun run wasm` once in `web/`, then `bun run dev` for hot reload. It proxies `/api` to `127.0.0.1:8080`. Checks:
 
 ```sh
-cargo xtask testbed up --nodes 3     # pool, networks, image, VMs; waits for cloud-init
-cargo xtask testbed status           # state, IPs, cloud-init and prism.service per node
-cargo xtask testbed ssh 1 -- sudo virsh list
-cargo zigbuild --release --target x86_64-unknown-linux-musl -p prism
-cargo xtask testbed deploy           # install the binary + prism.service on every node
-curl http://<mgmt-ip>:8080/api/v1/nodes
-cargo xtask testbed down             # remove the nodes (--all also removes image, pool and network)
-```
-
-- Each node `prism-tb-N` (hostname `tb-N`) has 4 GiB of RAM, 4 vCPUs with host-passthrough
-  (nested KVM), and a 20 GiB qcow2 overlay on the cloud image. Disks live in the libvirt pool
-  `prism-testbed` (`/var/lib/libvirt/images/prism-testbed`).
-- NIC 1 is on libvirt's `default` NAT network and gets its address from DHCP.
-  NIC 2 is on the isolated network `prism-tb` (no forwarding, no DHCP) with a static
-  address `10.77.0.N/24`, to act as an extra L2 segment.
-- cloud-init comes from a NoCloud seed ISO built by `crates/prism-iso`. It installs
-  QEMU, libvirt, OVMF, wireguard-tools, nftables, iproute2 and bridge-utils, and gives user
-  `ubuntu` passwordless sudo. The password `ubuntu` works for `virsh console` only.
-- The SSH key, the cached image (checked against `SHA256SUMS`) and the generated XML and
-  seeds are kept in `target/testbed/`.
-- `deploy` adds the node's NAT address to `http.listen` and `allowed_hosts` in
-  `/etc/prism/prism.toml`, so the host can reach each node's API on port 8080.
-
-Every subcommand is idempotent. Running `up` again starts stopped nodes and adds missing ones.
-
-## Checks
-
-```sh
-cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test
 (cd web && bun run typecheck)
 ```
 
-The console decoder has an end-to-end test against a live QEMU VNC server, skipped unless
-`PRISM_RFB_TEST_SOCKET` is set:
+`cargo xtask testbed` runs Prism inside Ubuntu VMs for testing clusters, WireGuard, bridges and VXLAN. It needs the `libvirt` group, nested KVM, `ssh`, `ssh-keygen`, `curl` and `sha256sum`. See `cargo xtask testbed --help`.
 
-```sh
-qemu-system-x86_64 -display none -vnc unix:/tmp/vnc.sock -m 256 -cdrom some.iso &
-PRISM_RFB_TEST_SOCKET=/tmp/vnc.sock cargo test --release -p prism-rfb-wasm --test qemu -- --nocapture
-```
+## Documentation
+
+- [docs/guide](docs/guide) is the user guide.
+- [docs/DESIGN.md](docs/DESIGN.md) is the design, including the dependency rules.
+- [docs/API.md](docs/API.md) describes the HTTP API.
+
+Prism is licensed under Apache-2.0.

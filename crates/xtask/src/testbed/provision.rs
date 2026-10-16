@@ -176,15 +176,19 @@ impl Testbed {
     /// Waits for a DHCP lease, SSH, and cloud-init completion.
     pub(super) fn wait_ready(&self, spec: &NodeSpec) -> anyhow::Result<String> {
         let name = spec.domain();
-        let ip = wait_for(IP_TIMEOUT, || node_ip(spec))
-            .with_context(|| format!("{name}: no DHCP lease"))?;
-        info(&format!("{name}: lease {ip}, waiting for SSH"));
-        wait_for(SSH_TIMEOUT, || {
+        wait_for(IP_TIMEOUT, || node_ip(spec)).with_context(|| format!("{name}: no DHCP lease"))?;
+        info(&format!("{name}: has a lease, waiting for SSH"));
+        // A recreated node can show the lease of its earlier incarnation first, so the address
+        // is read again on every attempt.
+        let ip = wait_for(SSH_TIMEOUT, || {
+            let ip = node_ip(spec)?;
             self.ssh_output(&ip, "true", None, Duration::from_secs(5))
                 .ok()
                 .filter(|o| o.status.success())
+                .map(|_| ip)
         })
-        .with_context(|| format!("{name}: SSH at {ip} did not come up"))?;
+        .with_context(|| format!("{name}: SSH did not come up"))?;
+        info(&format!("{name}: SSH at {ip}"));
         info(&format!(
             "{name}: waiting for cloud-init (package installs take a few minutes)"
         ));

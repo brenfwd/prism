@@ -154,7 +154,7 @@ cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && ca
 ## Documentation
 
 - [docs/guide](docs/guide) is the user guide.
-- [docs/DESIGN.md](docs/DESIGN.md) is the design, including the dependency rules.
+- [docs/DESIGN.md](docs/DESIGN.md) is the design as built, with the threat model and the known limitations.
 - [docs/API.md](docs/API.md) describes the HTTP API.
 
 Prism is licensed under Apache-2.0.

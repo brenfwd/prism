@@ -1,6 +1,6 @@
-# Prism — libvirt/KVM Cluster Manager: Design
+# Prism: design
 
-**Status:** Draft for approval · **Updated:** 2026-10-15 · **Owner:** Brenden Forward
+Version 0.1.0, updated 2026-10-16. This document describes the code as built. The HTTP routes are listed in [API.md](API.md), and the task-oriented user guide is in [guide/](guide/README.md).
 
 ## Contents
 
@@ -17,79 +17,86 @@
 11. [Networking](#networking)
 12. [HTTP API and SSE event stream](#http-api-and-sse-event-stream)
 13. [Web UI](#web-ui)
-14. [Build, packaging, testing and quality](#build-packaging-testing-and-quality)
+14. [Build, testing and quality](#build-testing-and-quality)
 15. [Implementation milestones](#implementation-milestones)
-16. [Risks and open questions](#risks-and-open-questions)
+16. [Known limitations](#known-limitations)
 
 ## Summary, goals and non-goals
 
-Prism is one static Rust binary, `prism`, that runs on every KVM host. It talks to the local libvirt daemon over libvirt's own RPC protocol, implemented natively in Rust, so the libvirt C library is never linked. Each node serves a REST + SSE API and an embedded React/Tailwind PWA. Clustered nodes talk plaintext gRPC inside an IPv6 WireGuard mesh, which is the only trust boundary between nodes.
+Prism is one Rust binary, `prism`, that runs on every KVM host. It talks to the local libvirt daemon over libvirt's own RPC protocol, implemented natively in Rust, so the libvirt C library is never linked. Each node serves a REST and SSE API and an embedded React and Tailwind web UI. Clustered nodes talk plaintext gRPC inside an IPv6 WireGuard mesh, which is the only trust boundary between nodes.
 
-**Non-goals** (as specified): auth, users, HTTP TLS termination, HTTP load balancing. Every HTTP request is trusted, including `X-Forwarded-*` headers. Guests and websites are not trusted clients; see [Threat model](#threat-model-and-security).
+The non-goals are authentication, users, HTTP TLS termination and HTTP load balancing. Every HTTP request is trusted. Guests and websites are not trusted clients; see [Threat model](#threat-model-and-security).
 
-**Feasibility corrections the research surfaced:**
+Decisions that shaped the build:
 
-- The `virt` crate links C libvirt (plus glib, gnutls, libxml2), so it is rejected in favour of a native RPC client.
-- H.264/WebCodecs console streaming is impossible with QEMU's VNC server, which never sends H.264.
-- A bridged-mode per-NIC egress override cannot stay on the same L2 segment as the rest of its switch.
-- libvirt networks (dnsmasq) and libvirt storage drivers are avoided: they are host-local and depend on external binaries.
+- The `virt` crate links C libvirt, glib, gnutls and libxml2, so Prism has its own RPC client, `prism-libvirt`.
+- QEMU's VNC server never sends H.264, so the console decodes VNC in the browser with a Rust WASM module.
+- libvirt networks (dnsmasq) and libvirt storage drivers are host-local and depend on external binaries, so Prism embeds DHCP, DNS and NAT and manages volumes itself with `qemu-img`.
+- Inter-node gRPC runs in plaintext inside WireGuard instead of TLS (owner decision, 2026-10-15). No release shipped the TLS design.
+- Port forwards on Prism networks are nftables DNAT. `passt` is an opt-in for user-mode NICs only.
+- Clusters use one replicated SQLite state machine under openraft, in hub-spoke or consensus mode.
+- Bridged switches, the host-bridge wizard, LVM and ZFS pools, scheduled backups and resumable (tus) uploads from the original plan were not built. Existing host bridges attach to a VM as plain NICs, and uploads are single streamed requests.
 
 ### Requirements traceability
 
 | Requirement | How it is met | Section |
 | --- | --- | --- |
-| Static binary, almost any modern Linux | musl + cargo-zigbuild; only SQLite and mimalloc as static C; kernel ≥ 5.6 | Dependencies |
-| React + Tailwind SPA/PWA, accelerated displays | Rust→WASM RFB decoder in a worker, WebGL2 on OffscreenCanvas | Web UI |
+| Static binary, almost any modern Linux | musl and cargo-zigbuild; SQLite is the only C library Prism compiles itself | Dependencies |
+| React and Tailwind web UI, accelerated console | Rust to WASM RFB decoder in a worker, WebGL2 on OffscreenCanvas | Web UI |
 | Full API with SSE, no polling | `/api/v1` REST, snapshot-then-stream SSE with replay | API |
 | Optional clustering, any node serves any request | Ownership router forwards over gRPC; cluster-wide event fan-in | Clustering |
 | Memory ballooning | virtio-balloon with free page reporting and a PSI-driven auto loop | VM lifecycle |
 | File-level archive load balancing | Archive pools place whole files by weighted free space | Storage |
-| ~~gRPC + Protobuf over self-signed TLS~~ **Superseded** (owner decision, 2026-10-15) | Plaintext h2c gRPC + Protobuf inside the `wg-prism` WireGuard mesh, the single inter-node boundary | Transport |
-| Portable config dir as argument | `prism serve --config <dir>`; copy the dir to move a node | Config |
-| Easily move VMs and files | Live migration, cold move, archive drain and transfers | Live ops, Storage |
-| Storage and pools managed in UI | Local pools and archive pools screens | Web UI, Storage |
-| Move and snapshot without downtime | Managed migration (≤ 300 ms pause), live external snapshots, push backups | Live ops |
-| Host and bridge networking | NAT and bridged switch types, safe host-bridge wizard | Networking |
-| Cluster virtual switch with remote egress | VXLAN overlay; per-NIC egress via per-node gateway VIPs | Networking |
-| Internal VM-to-VM switches | Isolated switches, VLAN access/trunk ports | Networking |
-| Idiomatic Rust, 0 clippy warnings | `clippy -D warnings` gate, workspace lints | Build |
-| Few non-pure-Rust crates, no OpenSSL | cargo-deny bans and a static-ELF check in CI | Dependencies |
-| Hub-spoke and consensus clusters, degraded spokes | Single-voter raft + learners, or 3/5-voter raft; frozen read-only cache | Clustering |
-| Disks local to the VM's host | Ownership invariant; migration copies disks via NBD | Storage, Live ops |
+| gRPC and Protobuf between nodes | Plaintext h2c gRPC inside the `wg-prism` mesh (replaces the TLS requirement) | Transport |
+| Portable config dir as argument | `prism serve --config <dir>`; copy the dir and pass `--adopt` to move a node | Config |
+| Easily move VMs and files | Live migration, cold move, archive drain and replicas | Live ops, Storage |
+| Storage and pools managed in UI | Storage and Archive pages | Web UI, Storage |
+| Move and snapshot without downtime | Managed migration (300 ms maximum pause), live external snapshots, push-mode backups | Live ops |
+| Host and bridge networking | NAT and isolated Prism networks; existing host bridges and user-mode NICs attach directly | Networking |
+| Cluster virtual switch with remote egress | VXLAN overlay inside WireGuard; egress node per network and per NIC | Networking |
+| Internal VM-to-VM switches | Isolated networks, VLAN access and trunk ports, VLAN subnets | Networking |
+| Idiomatic Rust, 0 clippy warnings | `clippy -D warnings` over the workspace, pedantic lints on | Build |
+| Few non-pure-Rust crates, no OpenSSL | SQLite and ring (through rustls, for URL downloads) are the only C code; no OpenSSL | Dependencies |
+| Hub-spoke and consensus clusters, degraded spokes | Single-voter raft with learners, or 3 or 5 voters; changes refused while degraded | Clustering |
+| Disks local to the VM's host | Ownership invariant; migration copies disks over NBD | Storage, Live ops |
 | Backups on any node, for any VM | Backups stream into any archive pool | Storage, Live ops |
-| No auth on a private network (non-goal) | Two boundaries: WireGuard between nodes, the operator network for HTTP; guest, browser and local-process isolation | Threat model |
-| Copy-paste cluster join (owner direction) | Two secret-free base64 blobs: an invite from any member, a reply from the new node | Transport |
+| No auth on a private network (non-goal) | Two boundaries: WireGuard between nodes, the operator network for HTTP | Threat model |
+| Copy-paste cluster join | Two secret-free text blobs: an invite from any member, a reply from the new node | Transport |
 
 ## System architecture
 
-Prism is a single process on a tokio runtime, built from one Cargo workspace. Every node runs the same binary with the same features; cluster role is data, not a build option.
+Prism is a single process on a tokio runtime, built from one Cargo workspace. Every node runs the same binary; cluster role is data, not a build option. The `prism` crate holds the API, the node logic, the state machine and the network agent as modules. Protocol, kernel and consensus plumbing live in separate library crates.
 
 ```mermaid
 flowchart TB
-    browser["Browser PWA"]
+    browser["Browser UI"]
     subgraph prism["prism: one process per host"]
-        api["prism-api<br/>REST, SSE, WebSocket, embedded UI"]
-        cluster["prism-cluster<br/>router, membership, event fan-in"]
-        state[("prism-state<br/>SQLite: replicated + node-local")]
-        nodec["prism-node<br/>reconciler, balloon, live ops, tasks"]
-        libvirt["prism-libvirt<br/>native XDR RPC client"]
-        net["prism-net<br/>bridges, VXLAN, DHCP, DNS, nftables, WireGuard"]
-        storage["prism-storage<br/>local pools, archive pools, transfers"]
+        api["api<br/>REST, SSE, WebSocket, embedded UI"]
+        cluster["cluster<br/>router, membership, join, event fan-in"]
+        state[("state<br/>SQLite: replicated + node-local")]
+        nodec["node<br/>reconciler, balloon, live ops, tasks"]
+        netagent["network<br/>per-network agent and rule plan"]
+        storage["storage and archive<br/>pools, archive pools, transfers"]
         api --> cluster
         cluster --> state
         cluster --> nodec
-        nodec --> libvirt
-        nodec --> net
+        nodec --> netagent
         nodec --> storage
     end
+    libvirt["prism-libvirt<br/>native XDR RPC client"]
+    pnet["prism-net<br/>netlink, nftables, WireGuard, DHCP, DNS, RA"]
+    pcluster["prism-cluster<br/>openraft log store and state machine glue"]
     virtqemud[("virtqemud or libvirtd<br/>+ QEMU")]
     kernel[("Linux kernel<br/>bridge, vxlan, wireguard, nf_tables")]
     disks[("Local pools<br/>archive member directories")]
     peers["Other Prism nodes"]
     browser -->|"REST, SSE, WebSocket"| api
+    nodec --> libvirt
     libvirt -->|"XDR over UNIX socket"| virtqemud
-    net -->|"netlink"| kernel
+    netagent --> pnet
+    pnet -->|"netlink"| kernel
     storage -->|"qemu-img, files"| disks
+    cluster --> pcluster
     cluster <-->|"gRPC inside WireGuard"| peers
 ```
 
@@ -105,8 +112,8 @@ sequenceDiagram
     A->>A: Router resolves owner = Node B
     A->>O: HttpTunnel.Forward over gRPC
     O->>L: DOMAIN_CREATE_WITH_FLAGS
-    O-->>A: 202 Accepted with task ID
-    A-->>B: 202 Accepted, Location /api/v1/tasks/ID
+    O-->>A: 200 with the VM view
+    A-->>B: 200 with the VM view
     L-)O: Lifecycle event STARTED
     O-)A: Events stream: vm.state running
     A-)B: SSE vm.state running
@@ -114,103 +121,96 @@ sequenceDiagram
 
 | Crate | Role |
 | --- | --- |
-| `prism-xdrgen` | Build-time parser and code generator for libvirt `.x` files (about 1.5k lines; existing XDR crates are stale) |
-| `prism-libvirt` | Async libvirt RPC client: framing, serial dispatch, keepalive, events, streams |
-| `prism-proto` | `.proto` files compiled with tonic-prost-build + protox (no protoc) |
-| `prism-state` | Replicated `Command` log applied to SQLite; VM ownership and epochs; archive index |
-| `prism-cluster` | Mode policy, membership and invites, membership reconciler, degraded-mode gate, request router, event fan-in |
-| `prism-node` | VM reconciler, domain XML renderer, balloon loop, migration/snapshot/backup orchestration, tasks |
-| `prism-storage` | Local disk pools, archive pools, BLAKE3 chunked transfer, ISO cache |
-| `prism-net` | Bridges, VXLAN, FDB reconciler, embedded DHCP/DNS, nftables-netlink layer, WireGuard |
-| `prism-api` | axum REST, SSE, WebSockets, OpenAPI (utoipa), embedded UI assets |
-| `prism-rfb-wasm` | Rust→WASM VNC (RFB) decoder used by the browser console |
-| `prism` (bin) | clap CLI: `serve --config <dir>`, `init`, `join [--abort]`, `leave [--force]`, `cluster invite`, `cluster accept`, `cluster remove`, `cluster promote`, `cluster recover`, `doctor`, `backup-config`, `install` |
-| `web/` | React + TypeScript + Vite + Tailwind SPA |
+| `prism-libvirt` | Async libvirt RPC client: XDR types, framing, serial dispatch, keepalive, events, streams. `build.rs` generates the procedure-number constants from the vendored `remote_protocol.x` with `quote` |
+| `prism-proto` | `prism.proto` compiled with tonic-prost-build and protox (no protoc) |
+| `prism-cluster` | openraft log store (`raft.db`), state machine adapter and network types |
+| `prism-net` | Netlink links, bridges, VXLAN, FDB and VLANs; the nftables layer; WireGuard keys and devices; embedded DHCP, DNS and router advertisements |
+| `prism-iso` | ISO 9660 writer with Joliet for cloud-init seed images |
+| `prism-rfb-wasm` | Rust to WASM VNC (RFB) decoder used by the browser console |
+| `prism` | The binary and its modules: `api`, `node`, `state`, `cluster`, `network`, `storage`, `archive`, `tasks`, `events`, `fetch`, `render`, `spec`, `cli` |
+| `web` (`prism-web`) | React, TypeScript, Vite and Tailwind UI; its `build.rs` builds the WASM decoder and the UI and embeds both |
+| `xtask` | `cargo xtask testbed`: nested-VM Prism nodes on the local libvirt |
 
-**Request flow.** The browser calls the HTTP API on any node. Local requests go through `prism-node` to `prism-libvirt` and the libvirt daemon. Remote ones are forwarded over gRPC to the owner and run through the same handlers there.
+The command line has `init`, `serve [--adopt]`, `doctor`, `join <invite>`, `leave [--force]` and `cluster` with `init`, `status`, `invite`, `accept`, `remove`, `promote` and `removed`. The cluster, join and leave subcommands call the running daemon over loopback HTTP.
 
-**Event flow.** libvirt domain events, task progress and state changes enter a per-node event bus. Each node subscribes to every peer's bus, so any node's SSE stream covers the whole cluster.
+Local requests go through the `node` module to `prism-libvirt` and the libvirt daemon. Requests for another node's resources are forwarded over gRPC to the owner and run through the same handlers there. libvirt domain events, task progress and state changes enter a per-node event bus. Each node subscribes to every peer's bus, so any node's SSE stream covers the whole cluster.
 
 ## Dependency strategy and static build
 
-Prism builds as a fully static musl binary with two statically compiled C components: SQLite and mimalloc. Nothing links OpenSSL, any TLS library or libvirt, and the binary has no `NEEDED` entries.
+Prism builds as a static musl binary. SQLite (through `rusqlite` with `bundled`) is C code compiled by the build. rustls with the ring provider, used for HTTPS downloads from a URL, brings ring's C and assembly. Nothing links OpenSSL, native-tls or libvirt. The README gives the cargo-zigbuild commands and the `readelf -d` check that shows no `NEEDED` entries.
 
 ### Reaching libvirt without linking it
 
-Prism speaks libvirt's remote RPC protocol (XDR frames over the local UNIX socket) directly. This is the approach DigitalOcean's pure-Go `go-libvirt` uses in production.
+`prism-libvirt` speaks libvirt's remote RPC protocol (XDR frames over the local UNIX socket) directly, as the pure-Go `go-libvirt` does.
 
-- **Codegen.** `prism-xdrgen` parses vendored `remote_protocol.x`, `qemu_protocol.x` and `virkeepaliveprotocol.x` from a pinned libvirt tag. It emits structs, XDR encode/decode traits and typed async stubs for an allowlist of about 70 procedures, not all 450+.
-- **Wire layer.** Frames carry a length and a header (`prog, vers, proc, type, serial, status`). One reader task dispatches replies by serial, so long calls like `Perform3` run while `GetJobStats` and `AbortJob` proceed.
-- **Keepalive.** The reader answers server PINGs immediately and sends its own every 5 s. After 5 misses it reconnects and re-registers event callbacks.
-- **Socket.** Prism tries `/run/libvirt/virtqemud-sock` first, then `/run/libvirt/libvirt-sock`. It uses only the QEMU driver, so it never needs virtnetworkd or virtstoraged.
-- **Auth.** Prism runs as root; polkit and none are accepted. SASL-only setups fail fast with a remediation message.
-- **Events.** `DOMAIN_EVENT_CALLBACK_REGISTER_ANY` covers lifecycle, reboot, balloon change, job completed, block job, migration iteration, device add/remove and agent lifecycle.
+- Only the `remote` program (version 1) and the keepalive program are implemented, and only the procedures Prism uses. The XDR types are written by hand in `proto.rs`, `typed.rs` and `xdr.rs`. The `build.rs` generates only the `REMOTE_PROC_*` constants, so the list cannot drift from the vendored protocol file.
+- Frames carry a length and a header (`prog, vers, proc, type, serial, status`). One reader task dispatches replies by serial, so a long call such as `Perform3` runs while `GetJobStats` and `AbortJob` proceed.
+- A background task pings the daemon every 30 seconds and closes the connection after 120 seconds of silence. Prism reconnects with backoff (1 s up to 30 s), re-registers event callbacks and reconciles.
+- With `libvirt.socket = "auto"` Prism tries `/run/libvirt/virtqemud-sock`, then `/run/libvirt/libvirt-sock`. It uses only the QEMU driver, so it never needs virtnetworkd or virtstoraged.
+- Prism runs as root and connects without authentication. A daemon that requires SASL fails the connection.
+- The registered events are lifecycle, block job, job completed, balloon change, device removed, agent lifecycle and migration iteration.
 
-libvirt maintainers call this protocol private, but procedures are only ever appended. Prism pins libvirt ≥ 8.0, feature-detects newer calls and tests against a version matrix.
+libvirt maintainers call this protocol private, but procedures are only ever appended. Prism requires libvirt 8.0 or later. Features that need more are gated on the version at run time: external snapshot revert and delete need libvirt 9.9.
 
 ### Crates
 
-| Crate | Purpose | C code? |
+| Crate | Purpose | C code |
 | --- | --- | --- |
-| tokio, tokio-util, bytes | Runtime and codecs | No |
-| axum, tower-http, rust-embed | REST, SSE, WebSocket, embedded UI | No |
+| tokio, tokio-util, tokio-stream, bytes, futures | Runtime and codecs | No |
+| axum, tower-http, rust-embed (in `prism-web`) | REST, SSE, WebSocket, embedded UI | No |
 | tonic 0.14 (no TLS features), tonic-prost, prost, protox | gRPC (h2c) without protoc | No |
 | rusqlite (`bundled`) | Local and replicated state | SQLite amalgamation, static |
-| openraft 0.9.x (pinned) | Consensus and hub-spoke replication | No |
-| rtnetlink, netlink-packet-route, netlink-packet-wireguard | Bridges, VXLAN, FDB, VLANs, WireGuard | No |
-| quick-xml + serde | Domain XML | No |
-| blake3, lz4_flex | Checksums, transfer compression | No (blake3 `pure` optional) |
-| rustix | Sockets, `SEEK_DATA/HOLE`, statx | No |
+| openraft 0.9 | Consensus and hub-spoke replication | No |
+| rtnetlink, netlink-packet-route, netlink-packet-wireguard, genetlink | Bridges, VXLAN, FDB, VLANs, WireGuard | No |
+| quick-xml, serde, serde_json, toml, ciborium | Domain XML, documents, config, join blobs | No |
+| blake3 (`pure`), sha2 | File checksums, download checksums | No |
+| x25519-dalek, getrandom | WireGuard key generation and public-key derivation | No |
 | dhcproto, hickory-proto | Embedded DHCP and DNS | No |
-| zbus | NetworkManager checkpoints | No |
-| mimalloc | Global allocator | Vendored C, static |
-| tracing, clap, thiserror, uuid, serde_json, getrandom, secrecy | Basics, key generation, secret handling | No |
+| rustls (ring provider), tokio-rustls, webpki-roots | HTTPS downloads from a URL | ring: C and assembly |
+| rustix | Sockets, `openat2`, `renameat2`, statx | No |
+| clap, anyhow, thiserror, uuid, tracing, base64, ipnet, socket2, zeroize | Basics | No |
 
-mimalloc replaces musl's malloc, whose global lock throttles migration and transfer throughput; it stays behind a default-on feature so it can be benchmarked. Prism needs no TLS or Curve25519 crate: WireGuard private keys come from `getrandom`, and the kernel derives the public key.
+Prism uses the system allocator. There is no mimalloc.
 
 ### Build and enforcement
 
-- `cargo-zigbuild` targets `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` with no Docker.
-- Release profile: `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`.
-- cargo-deny bans `openssl*`, `native-tls`, `aws-lc*`, `ring`, `rustls`, `rcgen`, `libz-sys`, `zstd-sys`, `virt*`, `bindgen` and `pkg-config`. Only `libsqlite3-sys` and `libmimalloc-sys` may be `-sys` crates.
-- `cargo build --locked`, `npm ci --ignore-scripts`, and GitHub Actions pinned by commit SHA.
-- CI runs `readelf -d` on the binary and fails on any `NEEDED` entry.
+- The workspace sets `unsafe_code = "forbid"` and enables clippy `all` and `pedantic`. `prism-rfb-wasm` uses `deny` so its WASM export module can allow `#[unsafe(no_mangle)]`.
+- The release profile is `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
+- The `readelf` check in the README is manual. The repository has no CI configuration and no cargo-deny file.
 
 ### Host prerequisites
 
-`prism doctor` checks each of these and prints a fix:
+`prism doctor` checks the libvirt connection and version, `/dev/kvm`, `qemu-img`, the optional `passt` and `ip` programs and the pools in `prism.toml`. It prints a hint for each warning. It does not check kernel modules, IPv6, PSI, `qemu.conf` or directory ownership.
 
 | Requirement | Standalone | Clustered |
 | --- | --- | --- |
-| libvirt ≥ 8.0, QEMU ≥ 6.2, `qemu-img` | Yes | Yes |
-| Kernel | ≥ 5.6 (openat2) | ≥ 5.6 (openat2, WireGuard) |
-| Modules: bridge, vxlan, tun, vhost_net, nf_tables (+ nat, masq, ct) | Yes | Yes |
+| libvirt 8.0 or later, QEMU, `qemu-img` | Yes | Yes |
+| Kernel with openat2 (5.6 or later) | Yes | Yes |
+| Modules: bridge, vxlan, tun, vhost_net, nf_tables (with nat, masq, ct) | Yes | Yes |
 | Module: wireguard | No | Yes |
-| IPv6 enabled in the kernel (no `ipv6.disable=1`) | No | Yes (mesh is IPv6) |
+| IPv6 enabled in the kernel (the mesh is IPv6) | No | Yes |
 | PSI (`/proc/pressure/memory`) | Optional | Optional |
 | Root | Yes | Yes |
-| `qemu.conf`: non-root `user`, `security_driver` not `none`, `seccomp_sandbox = 1` | Yes | Yes |
-| Pool and VM directories root-owned, not writable by the qemu uid | Yes | Yes |
-| `inet prism` boundary rules from [Threat model](#threat-model-and-security) present | Yes | Yes |
 
-The mesh does not need IPv6 forwarding, and the boundary rules hold when forwarding is on. IPv6 forwards and NAT66 on a switch turn it on.
+The mesh does not need IPv6 forwarding, and the boundary rules hold when forwarding is on. IPv6 networks and NAT66 turn it on.
 
 ## Config directory and persistence
 
-The config directory, passed as `prism serve --config <dir>`, is the node's entire identity: copying it to new hardware moves the node. Only bootstrap settings are hand-edited; everything else is desired state changed through the API. The directory is 0700, and Prism runs with `umask 0077`.
+The config directory, passed as `prism serve --config <dir>`, is the node's identity: copying it to new hardware moves the node. Only bootstrap settings are hand-edited; everything else is desired state changed through the API. The directory is 0700, and Prism runs with `umask 0077`.
 
 ```text
 <config>/
   prism.toml          # node-local bootstrap only (operator-edited)
-  wg/                 # wg.key (0600), the node's only secret — clustered nodes only
+  wg/                 # wg.key (0600), the node's only secret; clustered nodes only
   data/
-    identity          # node UUID + machine-id fingerprint
+    identity          # node ID and the machine ID of the host
     state.db          # replicated state machine (SQLite, WAL)
-    raft.db           # raft log, vote, snapshot metadata (absent when standalone)
-    node.db           # node-local: tasks, upload sessions, ISO cache index, event ring
-  cache/              # content-addressed ISO cache (path overridable)
+    raft.db           # raft log and vote (absent when standalone)
+    node.db           # node-local: tasks
   run/prism.lock      # flock; refuses a second instance
 ```
+
+`prism.toml` sections are `[node]`, `[http]`, `[libvirt]`, `[storage]`, `[cluster]`, `[pools.<name>]` and `[archive_members.<name>]`. Unknown keys are an error.
 
 ```toml
 [node]
@@ -221,12 +221,17 @@ listen = ["127.0.0.1:8080"]   # default; use tailscale serve or a management add
 allowed_hosts = ["kvm-a.example.ts.net"]   # IP literals, localhost and the hostname are always allowed
 allowed_origins = []
 
-[cluster]               # topology, mesh prefix and wg-prism MTU live in data/, not here
+[libvirt]
+socket = "auto"          # virtqemud-sock, then libvirt-sock
+uri = "qemu:///system"
+domain_type = "auto"     # kvm when /dev/kvm exists, else qemu (TCG)
+
+[storage]
+pool_roots = ["/var/lib/prism/pools"]   # where the API may create pools
+
+[cluster]               # topology, mesh prefix and wg-prism MTU live in the replicated state
 advertise = ["192.168.10.11", "100.101.102.103"]   # underlay endpoints, preference order
 wireguard_port = 51820
-
-[libvirt]
-socket = "auto"         # virtqemud-sock, then libvirt-sock
 
 [pools.default]         # local VM disk pool
 type = "dir"
@@ -240,113 +245,95 @@ weight = 1.0
 reserve = "50GiB"
 ```
 
-### What lives where
-
 | Data | Location | Changed by |
 | --- | --- | --- |
-| Listen addresses, libvirt socket, local pool and archive-member paths | `prism.toml` | Operator |
-| Cluster mode, membership, mesh prefix and addresses | `data/state.db` | `prism init / join / cluster …` |
-| VMs, switches, archive pools, schedules, IPAM, invites, tombstones, `wg-prism` MTU | `data/state.db` (replicated) | API |
-| Tasks, uploads, ISO cache index, SSE replay ring | `data/node.db` | Prism |
+| Listen addresses, libvirt socket, local pool and archive-member paths, advertised endpoints | `prism.toml` | Operator |
+| Cluster mode, membership, mesh prefix, MTU, feature level | `data/state.db` | `prism cluster …`, `prism join` |
+| VMs, networks, IPAM, archive pools and file index, backups, invites, tombstones | `data/state.db` (replicated) | API |
+| Tasks (kept 7 days) | `data/node.db` | Prism |
 | Raft log | `data/raft.db` | Prism |
 
-Cluster mode is never in the toml, so the toml and the stored state cannot disagree. Schema changes run as forward-only SQLite migrations, keyed by `user_version`, at startup.
+Cluster mode is never in the toml, so the toml and the stored state cannot disagree. Schema changes run as forward-only SQLite migrations, keyed by `user_version`, at startup. The SSE replay ring is in memory only.
 
-### Portability and safety
-
-- `identity` records the machine-id. On a mismatch Prism refuses to start unless run with `--adopt`, so a cloned directory cannot run as two nodes.
-- `prism backup-config <file>` takes a consistent SQLite online backup plus `wg/`, for disaster recovery of a node. The file is written 0600, and the CLI warns that it holds the node's private key.
+Prism records the machine ID of the host in the config directory. On a mismatch it refuses to start unless run with `--adopt`, so a copied directory cannot run as two nodes by accident.
 
 ## Clustering
 
-All three modes share one replicated-state engine; they differ only in who may vote. Every config write is a versioned protobuf `Command` applied deterministically to `state.db`, in the same transaction that records `applied_index`.
+All modes share one replicated-state engine; they differ only in who may vote. Every config write is a `Command` (a serde enum, carried as JSON) applied deterministically to `state.db`. A node that is not the writer sends the command to the hub or raft leader with the `Cluster.ForwardWrite` gRPC call and waits until its own state machine has applied the log index the leader returns.
 
 | Mode | Voters | Other nodes | Writes go to |
 | --- | --- | --- | --- |
-| Standalone | None; commands apply directly | — | Local node |
-| Hub-spoke | The hub only | Spokes, as raft learners | Hub |
-| Consensus | 3 or 5 peers | Extra nodes, as learners | Raft leader |
+| Standalone | None; commands apply directly | none | Local node |
+| Hub-spoke (`hub_spoke`) | The hub only | Spokes, as raft learners | Hub |
+| Consensus (`consensus`) | 1, 3 or 5 members (1 only while setting up) | Extra nodes, as learners | Raft leader |
 
-Hub-spoke is a single-voter openraft group. That gives spokes the required "pull all config from the hub" for free: a learner that falls behind log compaction receives `InstallSnapshot`, then the tail. Every node, including the hub, runs VMs. Clustering requires the WireGuard mesh described under [Transport](#inter-node-transport-and-security). Membership is full trust: any member is root on every member, and removal is the containment control.
+The mode is chosen with `prism cluster init [--consensus]` and does not change afterwards. Hub-spoke is a single-voter openraft group, so a spoke that falls behind log compaction receives `InstallSnapshot`, then the tail. Every node, including the hub, runs VMs. Clustering requires the WireGuard mesh described under [Transport](#inter-node-transport-and-security). Membership is full trust: any member is root on every member, and removal is the containment control.
 
 ### Desired vs runtime state
 
-- **Replicated (desired):** VM specs, VM ownership `(host_node, owner_epoch)`, migration intents, switches and VNIs, IPAM, archive pools and file index, schedules, members with their mesh addresses, WireGuard public keys and states (`invited`, `joining`, `active`), the cluster `wg-prism` MTU, open invites, tombstones `{node_id, wg_pubkey, mesh_addr}`.
-- **Node-authoritative (runtime):** power state, stats, pool usage, free space, task progress. These never enter raft.
+The replicated (desired) state is VM specs with their owner `(node, owner_epoch)` and any migration intent, networks with their VNIs and IPAM leases, archive pools, members and file index, backups, cluster members (mesh address, WireGuard public key, state), the cluster `wg-prism` MTU and feature level, open invites, and tombstones `{node_id, wg_pubkey, mesh_addr}`.
 
-Each node pushes runtime deltas to every peer over `NodeStatus.Stream` and keeps an in-memory cluster view. The full mesh is supported up to 32 nodes.
+The node that owns a resource is authoritative for its runtime state: power state, stats, pool usage and task progress. These never enter raft. Each node subscribes to every peer's `Events` stream, which starts with a runtime snapshot and continues with events, and keeps an in-memory cluster view from them.
 
-Writes carry an `expected_revision`, which appears in HTTP as `ETag` / `If-Match`.
+VM writes carry the `generation` the client read. A mismatch is refused with 409 (`vm <id> is at generation <n>, not <m>`). Other resources have no revision check.
 
 ### Degraded mode
 
-A node is degraded when a spoke cannot reach the hub, or when consensus quorum is lost. Config freezes to the last applied revision. Responses carry `X-Prism-Degraded: true` and `stale_since`.
+A node is degraded when it sees no leader: a spoke that cannot reach the hub, or a consensus cluster that lost its majority. Config freezes at the last applied state. Every API response carries `X-Prism-Degraded: true`, and any change that must commit to the replicated state fails with 503 `cluster_degraded` (retryable). Reads, consoles and the VMs themselves keep working. The reconciler does not quarantine VMs while the node is degraded, because ownership is frozen.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Healthy
     Healthy --> Degraded: hub unreachable or quorum lost
     Degraded --> Healthy: hub or quorum back, log caught up
-    Degraded --> Recovering: promote --force or recover --force-single
-    Recovering --> Healthy: new generation committed
     note right of Degraded
         Config frozen read-only.
-        Power, console, reads still work.
+        Reads, consoles and running VMs continue.
     end note
 ```
 
-| Allowed while degraded | Denied (503 `cluster_degraded`) |
-| --- | --- |
-| All reads, from cache, marked stale | Create, edit or delete anything |
-| Power actions on existing VMs (start, shutdown, stop, reboot, reset, pause, resume) on reachable owners | Move or migrate |
-| Console and serial | Snapshot and backup creation |
-| Archive downloads, ISO cache use | Archive upload and delete |
-| Task cancel, local event stream | Invite, accept, leave, remove, pool changes |
+### Changing the hub
 
-Scheduled backups that fall in a degraded window are recorded as failed tasks.
+`prism cluster promote <node>` (API `POST /cluster/hub`, also offered by the Leave card in the UI) adds the target as a voter, then removes the old hub's vote, which leaves the old hub as a spoke. These are two membership changes with no data loss. The command waits up to 30 seconds for the new hub to take over. Consensus clusters have no hub; `POST /cluster/members/{node}/voter` changes the voter set, which must stay at 1, 3 or 5.
 
-### Changing the hub and recovering quorum
-
-- **Planned:** `prism cluster promote <node>` (API `POST /cluster/hub`, also offered by the Leave dialog) adds the target as a voter, removes the old hub's vote and demotes the old hub to learner. These are two membership changes with no data loss.
-- **Forced:** `prism cluster promote --force` (hub dead) or `prism cluster recover --force-single` (quorum lost) re-initialises membership from the most up-to-date survivor and bumps `cluster_generation`.
-- **Fencing:** a returning node that sees a higher generation demotes itself. It writes any un-replicated entries to `data/lost-<gen>.jsonl`; they are reported, never merged.
+A hub that is dead and will not return cannot be replaced: there is no forced promotion or quorum recovery. See [Known limitations](#known-limitations).
 
 ### Any node serves any request
 
-The router resolves the owner of each request:
+A middleware in front of the API resolves the owner of each request and forwards it when the owner is another node.
 
-| Target | Owner |
+| Request | Owner |
 | --- | --- |
-| VM operation | `host_node` |
-| Local pool or volume | Its node |
-| Archive file read | A healthy replica holder |
-| Config write | Hub or raft leader |
-| Task | The node running it |
+| `/vms/{id}/…`, `POST /vms?node=<id>` | The VM's node, or the named node |
+| `/nodes/{id}/…` other than `local` | That node |
+| `/tasks/{id}` | The node running the task |
+| Config write (any change to replicated state) | Hub or raft leader, through `ForwardWrite` |
+| Archive file read or write | The handler picks a replica holder or the placed member and forwards there itself |
 
-REST calls are forwarded verbatim over `HttpTunnel.Forward` and run through the owner's own axum handlers. `X-Prism-Forwarded-By` enforces a one-hop limit. Console, serial and file streams are proxied byte-for-byte over bidirectional gRPC streams with backpressure.
+REST calls are forwarded verbatim over `HttpTunnel.Forward` and run through the owner's own handlers. A forwarded request carries an internal marker, so the owner never forwards it again. WebSocket upgrades are not forwarded by the middleware: console and serial streams are tunnelled over the bidirectional `Console` gRPC stream. A missing owner answers 404 `no_such_node`, and an unreachable one 502 `owner_unreachable`.
 
 ### Cluster-wide events
 
-Each node subscribes to every peer with `Events.Subscribe(since = node, boot_epoch, seq)` and merges those streams with its own. After a reconnect it resumes from the last sequence. If the peer's buffer has rolled over, it fetches that peer's runtime snapshot and emits `resync`.
+Each node subscribes to every active peer with `Events.Subscribe`. The peer sends a runtime snapshot first, then its own events (events it relayed from others are not repeated). The subscriber applies them to its caches and republishes them on its own bus with the original `origin_node`. A broken stream is retried with backoff and starts again from a fresh snapshot; the `since` field is not used.
 
 ### A VM never runs on two nodes
 
-1. A node starts a VM only if committed state says it owns that VM at the current epoch and no `Migrating` intent covers it. Ownership is frozen while degraded.
-2. A cold move commits `owner_epoch + 1` for the destination before the destination defines the domain.
-3. A live migration first commits a `Migrating{src, dst}` intent, which allows the domain on both nodes for the duration. After `Confirm3`, Prism commits `owner_epoch + 1` for the winning side and clears the intent. If quorum is lost mid-migration, or `src` or `dst` becomes unreachable, the intent stays until quorum and both nodes are back. Prism then resolves it from which node actually runs the domain, commits `owner_epoch + 1` for that node and clears the intent. A partitioned destination may already run the guest after `Finish3`, so Prism never resumes the source while the destination is unreachable.
-4. A reconciler runs at boot and every 30 s. It force-stops and quarantines any Prism domain the node does not own and that no intent covers, keeping its disks.
-5. libvirt autostart is never used; Prism decides what starts after a host reboot.
+1. A node defines and starts a VM only if committed state names it as the owner. `autostart` is handled by Prism after libvirt connects; libvirt autostart is never used.
+2. A cold move increments `owner_epoch` for the destination in the same command that hands the VM over.
+3. A live migration first commits a `migrating {src, dst}` intent on the VM, which stops either node from quarantining the domain. After `Confirm3` Prism commits the destination as owner with `owner_epoch + 1` and clears the intent.
+4. When Prism connects to libvirt, and after a reconnect, the reconciler defines every VM the node owns and stops and undefines (keeping the disks) any Prism VM that committed state gives to another node and no migration intent covers. It skips the quarantine step while degraded.
+5. If a migration fails after the destination may already run the guest, the source is never resumed.
 
 ## Threat model and security
 
-Prism has two trust boundaries: the `wg-prism` WireGuard mesh between nodes, and the operator's access-controlled network for HTTP. Prism adds no authentication, no user accounts and no PKI of its own. Cheap kernel-level rules stop guests, websites and LAN devices from passing as the parties those boundaries trust.
+Prism has two trust boundaries: the `wg-prism` WireGuard mesh between nodes, and the operator's access-controlled network for HTTP. Prism adds no authentication, no user accounts and no PKI. Kernel-level rules stop guests, websites and LAN devices from passing as the parties those boundaries trust.
 
 ### Assumptions
 
 | ID | Assumption | Consequence |
 | --- | --- | --- |
 | A1 | Prism runs only on an access-controlled network, such as a Tailscale tailnet or an isolated LAN. No Prism port, HTTP or otherwise, is reachable from the internet. | Internet attackers are out of scope. Tailnet ACLs or LAN firewalls are the HTTP access control. |
-| A2 | Every HTTP request from the operator network is trusted, including `X-Forwarded-*`. | No auth, users, multi-tenancy, HTTP TLS or HTTP load balancing. Any operator-network device can admit a node. |
+| A2 | Every HTTP request from the operator network is trusted. | No auth, users, multi-tenancy, HTTP TLS or HTTP load balancing. Any operator-network device can admit a node. |
 | A3 | Member hosts are dedicated hypervisors. Local root is fully trusted. | Untrusted local accounts are unsupported. The qemu uid is the only untrusted local principal. |
 | A4 | Guests, guest workloads and websites are not part of the trusted network. | Prism keeps them from reaching the API and the mesh, even though guests run on every host. |
 | A5 | Cluster membership is all-or-nothing. | A member is root on every member. Removal is the containment control. |
@@ -360,7 +347,7 @@ Prism has two trust boundaries: the `wg-prism` WireGuard mesh between nodes, and
 | `wg.key` | `<config>/wg/wg.key`, 0600 | The node's mesh identity and the only secret Prism stores |
 | Desired state, including cloud-init user-data | `state.db`, `raft.db` on every node | Guest passwords and keys |
 | VM disks, RAM and backups | Local pools, archive members, the data plane in flight | Guest data; backups land on any node |
-| Switch isolation | `ps*` bridges, VXLAN VNIs | L2 separation between switches |
+| Network isolation | `ps*` bridges, VXLAN VNIs | L2 separation between networks |
 | Host files and devices | Root-owned paths | Prism runs as root |
 
 ### Actors
@@ -370,10 +357,10 @@ Prism has two trust boundaries: the `wg-prism` WireGuard mesh between nodes, and
 | Operator (browser, CLI, curl) | Trusted (A2) | HTTP API |
 | Other tailnet or LAN device | Trusted for HTTP (A2), not a member | HTTP API if routed, UDP 51820, any host address |
 | Website open in the operator's browser | Untrusted | HTTP API through the browser |
-| Guest VM or its workload | Untrusted (A4) | Gateway VIPs, DHCP, DNS, masqueraded egress; console, serial, agent and balloon output |
+| Guest VM or its workload | Untrusted (A4) | Gateway addresses, DHCP, DNS, masqueraded egress; console, serial, agent and balloon output |
 | Escaped QEMU (qemu uid, sVirt) | Untrusted | Loopback, local sockets, its own image files, the host's mesh source address |
 | Member node | Fully trusted (A5) | Every gRPC service |
-| Joining node | Trusted after `active` | Cluster.Bootstrap and Cluster.Status only |
+| Joining node | Trusted after `active` | `Cluster.Bootstrap` and `Cluster.Status` only |
 | Removed member or holder of a stolen `wg.key` | Untrusted | UDP 51820 |
 | Internet attacker | Out of scope (A1) | Nothing |
 
@@ -413,11 +400,11 @@ flowchart LR
 
 | Boundary | Between | Enforced by |
 | --- | --- | --- |
-| B0 Internet | The internet and everything | A1. `prism doctor` warns about globally routable listen or `advertise` addresses |
+| B0 Internet | The internet and everything | A1. Nothing in Prism checks it; the default listen address is loopback |
 | B1 HTTP | Operator network and the API | Loopback default or explicit management address; Host allowlist; Origin and `Sec-Fetch-Site` checks |
 | B2 Guest | Guest bridges, the host and the operator network | `inet prism` input and forward chains; `bridge prism` table |
 | B3 Mesh | Members and everything else | WireGuard cryptokey routing; prerouting interface rule; forward drop on `wg-prism`; source /128 mapped to member and state |
-| B4 Local process | QEMU and Prism's services | sVirt and seccomp; output rules on socket uid; root-owned pool directories; 0700 socket directories with `SO_PEERCRED` |
+| B4 Local process | QEMU and Prism's services | sVirt and seccomp (libvirt's defaults); output rules on socket uid |
 
 ### Scope
 
@@ -430,88 +417,89 @@ flowchart LR
 | Join blob leakage | Yes | Blobs travel through chat and logs |
 | Removed node returning; stolen `wg.key` | Yes | The peer set is the whole credential |
 | Root file handling: paths and image headers | Yes | Prism runs as root |
-| Guest resource abuse: disk, memory, agent, floods | Yes | Availability for other VMs |
+| Guest resource abuse: disk, memory, agent, floods | Partly | The balloon bounds guest memory and archive member reserves bound archive disk use; there are no per-guest rate limits |
 | Internet attacker on any port | No | A1: never exposed |
 | Misuse by anyone on the trusted network, including admitting a node or altering a pasted blob | No | A2: every request reaching Prism is trusted; use tailnet ACLs |
 | Authentication, users, multi-tenancy, HTTP TLS, load balancing | No | A2: non-goals by requirement |
 | A compromised member acting as root | Accepted | A5: removal contains it |
 | Untrusted non-root local users on a member host | No | A3. The output rules still block non-root sockets toward the mesh |
-| Strong isolation between guests on one switch | No | No multi-tenancy. The cheap `bridge prism` rules still apply |
-| Physical theft of disks | No mechanism | Recommend LUKS; no Prism crypto at rest |
-| Post-quantum recording of mesh traffic | No | No WireGuard PSK in v1 |
+| Strong isolation between guests on one network | No | No multi-tenancy. The `bridge prism` rules still apply |
+| Physical theft of disks | No mechanism | No Prism crypto at rest; use LUKS |
+| Post-quantum recording of mesh traffic | No | No WireGuard PSK |
 
 ### Threats
 
+The status column says what the code does today: Implemented, Partial (with the gap named), Not implemented, or Accepted.
+
 | ID | Threat | Boundary | Mitigation | Status |
 | --- | --- | --- | --- | --- |
-| S1 | A guest calls the API at its gateway VIP or any host address (weak-host model) | B2 | `inet prism` input: from `ps*` accept only UDP 67, UDP/TCP 53 to the VIP, ICMP echo, ICMPv6 ND and established traffic, then drop. HTTP defaults to `127.0.0.1:8080`. Prism refuses listen addresses on `ps*`, `vx*`, `pn*` and `wg-prism`. `prism doctor` fails if the API answers from a bridge | New, M1 and M6 |
-| S2 | A guest reaches other nodes' APIs or tailnet devices through masquerade | B2 | Forward chain drops `ps*` traffic to `wg-prism`, `tailscale0`, the mesh /48, `100.64.0.0/10`, `fd7a:115c:a1e0::/48` and `@node_addrs`. Masquerade only on the switch's uplink. Per-switch `allow_prefixes` opts back in | New, M6 |
-| S3 | A bridged guest on the management LAN reaches the API | B1, B2 | A bridged switch on the management LAN puts guests on the trusted network. The wizard warns, and it refuses without `--i-know` to enslave the interface that carries the HTTP listen address or the `wg-prism` underlay route | New, M6 |
-| S4 | A LAN device, tailnet device or guest injects VXLAN into a switch through UDP 4789 | B3 | Prerouting: `udp dport 4789 iifname != "wg-prism" drop`. e2e test sends VXLAN from a guest and from the LAN | New, M6 |
-| S5 | A LAN or tailnet device spoofs a member's mesh address, either directly or through a node with IPv6 forwarding that then encrypts the packet as itself | B3 | Prerouting drops mesh-prefix source or destination unless the packet arrives on `wg-prism` or `lo`. Forward drops everything entering or leaving `wg-prism`. e2e test sends a spoofed packet through a node with `net.ipv6.conf.all.forwarding=1` | New, M4 |
-| S6 | A non-root local process or escaped QEMU sends gRPC, data-plane or VXLAN traffic to a peer from the node's own mesh address | B4 | Output: `ip6 daddr <mesh>/48 meta skuid != 0 drop`, on every protocol. Kernel VXLAN and WireGuard packets have no file-backed socket and are unaffected. e2e test sends VXLAN as an unprivileged user | New, M4 |
-| S7 | An escaped QEMU reaches the API on loopback, on a management address or through `tailscale serve` | B4 | Output: `meta skuid <qemu uid> ct state new drop`, with the uid resolved from `qemu.conf`. `prism doctor` fails on `user = "root"`, `security_driver = "none"` or `seccomp_sandbox = 0` | New, M4 |
-| S8 | A website sends cross-site POSTs, opens console or serial WebSockets, or uses DNS rebinding | B1 | Host allowlist (421); Origin or `Sec-Fetch-Site` check on unsafe methods, WebSocket upgrades and SSE; JSON or tus Content-Type on writes; `X-Forwarded-Host` checked against the allowlist; relative `Location` | New, M1 |
-| S9 | XSS or clickjacking through guest-controlled strings | B1 | Concrete CSP with `frame-ancestors 'none'`; `X-Frame-Options: DENY`; lint ban on `dangerouslySetInnerHTML`; hrefs built only from IDs; guest strings capped and stripped of control characters | New, M2 |
-| S10 | Stored XSS from an archive file served inline | B1 | Downloads are `application/octet-stream`, `Content-Disposition: attachment`, `nosniff`, `Content-Security-Policy: sandbox` | New, M7 |
-| S11 | Guest terminal or RFB abuse: OSC 52 clipboard writes, OSC 8 links, huge framebuffers | B1 | No xterm ClipboardAddon; links allow only http and https and ask first; framebuffer capped at 8192x8192 and cursor at 256x256; per-rectangle decompression cap | New, M2 |
-| S12 | Path traversal, symlinks or option injection in pool, archive, upload or volume names | Root files | `openat2` with `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_MAGICLINKS` and `RESOLVE_NO_XDEV` from root fds. Names match `[A-Za-z0-9._-]{1,128}` with no leading `-` or `.`. Children get an argv list, never a shell, with `--` before positional arguments | New, M1 and M7 |
-| S13 | An escaped QEMU swaps a checked image path for a symlink before `qemu-img` or libvirt opens it | B4 | Pool and VM directories are root-owned and not writable by the qemu uid; libvirt relabels only image files. `qemu-img` gets fds through `json:{"driver":"file","filename":"/dev/fd/N"}`. `prism doctor` checks directory ownership | New, M1 |
-| S14 | A malicious qcow2 header (backing file `/dev/sda`, a data-file) from an upload or an escaped QEMU | B4 | Explicit `-f` and `-F`, never probing. Chains are recorded in state, and only recorded paths are copied. Unexpected references are rejected. Imports are flattened. `qemu-img` runs under rlimits | New, M1 and M7 |
-| S15 | A guest spoofs other guests on a shared switch: rogue DHCP, RA, ARP for the VIP, MAC spoofing, double tagging | B2 | `bridge prism`: per-tap MAC and lease binding; drop UDP sport 67 and ICMPv6 type 134 from `pn*`; drop tagged ingress on access ports; static FDB. Per-NIC `trusted` opt-out | New, M6 |
-| S16 | A guest abuses embedded DNS or DHCP: open resolver, tailnet name recon, floods | B2 | Sockets bound per VIP with `SO_BINDTODEVICE`. `.ts.net`, search domains and `100.100.100.100` are never forwarded by default. Per-tap `limit rate` | New, M6 |
-| S17 | A guest abuses the agent, balloon or disk: a freeze it never thaws, fake stats, a full pool | B2 | Agent timeouts with `FSTHAW` in a finally path; agent data is display-only; host PSI is authoritative; `balloon_unresponsive` flag; per-pool `reserve`; ENOSPC pause alert | New, M3 |
-| S18 | A local process hijacks migration splice sockets | B4 | 0700 root directory under `/run/prism/mig`; `SO_PEERCRED` must match the domain's QEMU PID; expected connection count, then unlink; no loopback-TCP fallback | New, M7 |
-| S19 | A device on the operator network creates and accepts its own invite | B1 | Accepted (A2): it could call any other API too. Tailnet ACLs limit who reaches the API. `member.added` is an event and a UI banner | Accepted |
-| S20 | A blob leaks through chat or logs | B1 | Neither blob holds a secret. An invite is single-use, expires after 1 h and is consumed on accept | Mitigated by design, M4 |
-| S21 | A joining node uses services before it is confirmed | B3 | A `joining` member may call only `Cluster.Bootstrap` and `Cluster.Status` | New, M4 |
-| S22 | A removed node returns, or a member that was offline during the removal still trusts it | B3 | Peers come only from committed state, reconciled on apply and at boot. Tombstones block reuse of keys, node IDs and addresses. Removal status lists members that have not applied it. The window until a lagging member catches up is accepted | Partly accepted, M4 |
-| S23 | A stolen `wg.key` or `backup-config` file | B3 | `umask 0077`; config dir 0700; start refused if `wg.key` is group- or world-readable; `backup-config` written 0600 with a warning. Response: remove, `prism leave --force`, re-invite | New, M4 |
-| S24 | A compromised member | B3 | Accepted (A5). Blob and Tunnel are size- and rate-limited; `prism cluster remove` | Accepted |
-| S25 | An eavesdropper or tamperer on the underlay | B3 | WireGuard: ChaCha20-Poly1305, Curve25519 peers, replay counters, 2-minute rekey | Mitigated by design |
-| S26 | Secrets in cloud-init or logs | Data | SSE `vm.config` carries only a hash of user-data; `secrecy::SecretString`; no request bodies logged; seed ISO 0600; user-data is visible cluster-wide | New, M1 |
-| S27 | Disks at rest on any node; residual data in thick LVs | Data | Recommend LUKS; `BLKZEROOUT` on thick-LV delete; doctor checks thin-pool zeroing | New, M1 |
-| S28 | A replica altered on one archive member | Data | The BLAKE3 in the replicated index is the trust anchor; verify before restore, import or attach | Clarified, M7 |
-| S29 | Resource exhaustion through uploads, SSE or tasks | B1 | `Upload-Length` required and reserved; partial uploads garbage-collected after 24 h; SSE and WebSocket caps; per-kind task queues | New, M1 and M7 |
-| S30 | A compromised build dependency | Build | `cargo build --locked`, `npm ci --ignore-scripts`, Actions pinned by SHA, GitHub artifact attestations | New, M0 |
+| S1 | A guest calls the API at its gateway address or any host address (weak-host model) | B2 | `inet prism` input: from `ps*` accept only UDP 67, UDP and TCP 53 to the gateway address, ICMP echo, ICMPv6 neighbour discovery and established traffic, then drop. HTTP defaults to `127.0.0.1:8080` | Partial: Prism does not refuse a `listen` address on a guest bridge, and `doctor` does not test it |
+| S2 | A guest reaches other nodes' APIs or tailnet devices through masquerade | B2 | The forward chain drops `ps*` traffic to the mesh /48, `100.64.0.0/10`, `fd7a:115c:a1e0::/48` and the members' advertised and HTTP addresses. Masquerade only out of the uplink. Per-network `allow_prefixes` (IPv4) opts back in | Implemented |
+| S3 | A guest NIC on a host bridge sits on the management LAN | B1, B2 | The operator picks the bridge. Prism lists host bridges and attaches to the one named | Accepted: no warning or refusal |
+| S4 | A LAN device, tailnet device or guest injects VXLAN through UDP 4789 | B3 | Prerouting: `udp dport 4789 iifname != "wg-prism" drop` | Implemented, covered by netns tests of the ruleset |
+| S5 | A LAN or tailnet device spoofs a member's mesh address, directly or through a node with IPv6 forwarding | B3 | Prerouting drops mesh-prefix source or destination unless the packet arrives on `wg-prism` or `lo`. Forward drops everything entering or leaving `wg-prism` | Implemented |
+| S6 | A non-root local process or escaped QEMU sends gRPC, data-plane or VXLAN traffic to a peer from the node's mesh address | B4 | Output: `ip6 daddr <mesh>/48 meta skuid != 0 drop`, except ICMPv6 echo on `wg-prism`. Kernel VXLAN and WireGuard packets have no file-backed socket and are unaffected | Implemented |
+| S7 | An escaped QEMU reaches the API on loopback or a management address | B4 | Output: `meta skuid <qemu uid> ct state new drop`. The uid is the `libvirt-qemu` or `qemu` user in `/etc/passwd`; the rule is left out when neither exists | Partial: no check of `qemu.conf` (`user`, `security_driver`, `seccomp_sandbox`) |
+| S8 | A website sends cross-site writes, opens console or serial WebSockets, or uses DNS rebinding | B1 | Host allowlist (421); Origin or `Sec-Fetch-Site` check on writes and WebSocket upgrades; `application/json` or `application/octet-stream` required on writes (415); `X-Forwarded-Host` checked as the Host | Implemented. Reads, including SSE, are not origin-checked |
+| S9 | XSS or clickjacking through guest-controlled strings | B1 | `index.html` carries a CSP with `frame-ancestors 'none'`, `object-src 'none'` and `script-src 'self' 'wasm-unsafe-eval'`, plus `X-Frame-Options: DENY`. The UI is React, which escapes text | Partial: no lint ban on `dangerouslySetInnerHTML` |
+| S10 | Stored XSS from an archive file served inline | B1 | Downloads carry `Content-Disposition: attachment`, `nosniff` and `Content-Security-Policy: sandbox` | Implemented |
+| S11 | Guest terminal or RFB abuse: clipboard writes, huge framebuffers | B1 | The terminal loads no clipboard addon. The decoder caps the framebuffer at 8192x8192 | Partial |
+| S12 | Path traversal, symlinks or option injection in pool, archive, upload or volume names | Root files | `openat2` with `RESOLVE_BENEATH` and related flags from root fds in pools and archive members; `renameat2(RENAME_NOREPLACE)` for commits. Names match `[A-Za-z0-9._-]` with no leading `-` or `.`. Children get an argv list, never a shell | Implemented |
+| S13 | An escaped QEMU swaps a checked image path for a symlink before `qemu-img` opens it | B4 | `qemu-img` runs on paths inside Prism's pool directories; it does not receive file descriptors | Not implemented |
+| S14 | A malicious qcow2 header (backing file, data-file) from an upload or an escaped QEMU | B4 | `qemu-img` always gets `-f` and `-F`. Backing files outside the pool, over-deep chains and unflattened imports are refused | Partial: no rlimits on `qemu-img` |
+| S15 | A guest spoofs other guests on a shared network: rogue DHCP, RA, ARP, MAC spoofing, VLAN tags | B2 | `bridge prism`: per-tap MAC binding, IPv4 and ARP source bound to the lease (`0.0.0.0` allowed for DHCPDISCOVER), IPv6 source and neighbour advertisements bound to the SLAAC address, drop UDP source port 67 and ICMPv6 type 134, drop tagged ingress on access ports | Implemented. No per-NIC opt-out for router VMs |
+| S16 | A guest abuses embedded DNS: open resolver, tailnet name recon | B2 | DNS sockets are bound to the bridge with `SO_BINDTODEVICE`. `ts.net` names are never forwarded | Partial: no per-guest rate limits |
+| S17 | A guest abuses the balloon or agent | B2 | Auto-ballooning is bounded by host pressure; a VM that misses its target for 6 ticks is flagged unresponsive. Agent data is used only for display. A quiesced snapshot retries without quiesce if the agent fails | Partial: no local pool reserve or ENOSPC alert |
+| S18 | A local process hijacks migration splice sockets | B4 | The sockets live under `/run/prism/mig/<id>/`. The directory and sockets are mode 0777 so that QEMU's uid can reach them | Not implemented: no `SO_PEERCRED` check or 0700 directory |
+| S19 | A device on the operator network creates and accepts its own invite | B1 | Accepted (A2): it could call any other API too | Accepted |
+| S20 | A blob leaks through chat or logs | B1 | Neither blob holds a secret. An invite is single-use, expires after 1 hour by default (7 days at most) and is consumed on accept | Implemented |
+| S21 | A joining node uses services before it is confirmed | B3 | A `joining` member may call only `Cluster.Bootstrap` and `Cluster.Status` | Implemented |
+| S22 | A removed node returns, or a member that was offline during the removal still trusts it | B3 | Peers come only from committed state. Tombstones block reuse of keys, node IDs and addresses. `prism cluster removed` lists members that have not applied the removal | Partly accepted: the window until a lagging member catches up remains |
+| S23 | A stolen `wg.key` | B3 | `umask 0077`; config dir 0700; `wg.key` created 0600. Response: remove, `prism leave --force`, re-invite | Partial: no check of `wg.key` permissions at start |
+| S24 | A compromised member | B3 | Accepted (A5). `prism cluster remove` | Accepted |
+| S25 | An eavesdropper or tamperer on the underlay | B3 | WireGuard: ChaCha20-Poly1305, Curve25519 peers, replay counters, 2-minute rekey | Implemented by WireGuard |
+| S26 | Secrets in cloud-init | Data | The API returns a `blake3:` hash in place of user-data. The seed ISO is a hidden volume in the pool. User-data is in replicated state, visible to every member | Partial |
+| S27 | Disks at rest on any node | Data | Use LUKS | Not implemented |
+| S28 | A replica altered on one archive member | Data | The BLAKE3 in the replicated index is the trust anchor, checked by scrub and before an archive ISO is attached or a backup is restored | Implemented |
+| S29 | Resource exhaustion through uploads, SSE or tasks | B1 | Uploads stream to disk without a reservation. SSE subscribers have bounded queues, and a slow one gets `reset` | Partial: no connection caps |
+| S30 | A compromised build dependency | Build | `Cargo.lock` and `bun.lock` are committed and the build uses frozen installs | Partial: no CI, cargo-deny or attestation |
 
 ### Hardening defaults
 
-- HTTP listens on `127.0.0.1:8080` unless configured. Remote access uses `tailscale serve` or an explicit management address.
-- One middleware enforces the Host allowlist and the Origin and `Sec-Fetch-Site` checks. The CSP is concrete and includes `frame-ancestors 'none'`.
+- HTTP listens on `127.0.0.1:8080` unless configured. Remote access uses `tailscale serve`, an SSH tunnel or an explicit management address.
+- One middleware enforces the Host allowlist, the Origin and `Sec-Fetch-Site` checks and the write content types.
 - `inet prism` prerouting accepts mesh addresses and VXLAN only on `wg-prism` (and `lo` for mesh addresses). Forward never routes into or out of `wg-prism`.
 - `inet prism` output lets only root sockets reach the mesh, and the qemu uid starts no connections.
 - Guest bridges reach only DHCP, DNS and ND on the host. The forward chain keeps guests away from nodes, the mesh and the tailnet.
 - `bridge prism` binds each tap to its MAC and lease, and drops rogue DHCP, RAs and tagged ingress on access ports.
-- `openat2` confinement, root-owned pool directories, explicit image formats and argv-only children.
+- `openat2` confinement and argv-only children.
 - `umask 0077`, a 0700 config dir, and `wg.key` as the only secret.
 - Downloads are attachments with `nosniff` and a sandbox CSP.
-- `prism doctor` verifies all of the above, plus sVirt and seccomp in `qemu.conf`.
 
 ## Inter-node transport and security
 
 Clustering requires a kernel WireGuard mesh, `wg-prism`, and it is the only trust and encryption boundary between nodes. gRPC, the bulk data plane and the VXLAN overlay run in plaintext inside it. Standalone nodes need none of this.
 
-This supersedes the original requirement "gRPC over a TLS socket (self-signed cert)". WireGuard already provides what TLS added: AEAD confidentiality and integrity, mutual authentication, replay protection and forward secrecy. Dropping TLS removes the cluster CA, node certificates, renewal, revocation, CA rotation, the public join port and join tokens. It also removes rustls, tokio-rustls, ring, rcgen and x509-parser from the build. No Prism release shipped the TLS design, so no transition is needed.
+This replaces the original requirement "gRPC over a TLS socket (self-signed cert)". WireGuard already provides AEAD confidentiality and integrity, mutual authentication, replay protection and forward secrecy. Dropping TLS removed the cluster CA, node certificates, renewal, revocation and the public join port. The only TLS client left in Prism is the one for HTTPS downloads from a URL.
 
 ### Layers
 
 | Layer | Carries | Port | Protection |
 | --- | --- | --- | --- |
 | WireGuard `wg-prism` | Everything below | UDP 51820 on the underlay, IPv4 or IPv6 | Curve25519 static keys, ChaCha20-Poly1305, replay counters, 2-minute rekey |
-| gRPC control plane (h2c) | Raft, status, events, forwarding, console | TCP 7443 on the mesh address | WireGuard; source /128 mapped to a member |
-| Data plane | Migration RAM, NBD disk copy, blobs, cold-move extents | TCP 7444 on the mesh address | WireGuard; session ID bound to the opener's address |
-| VXLAN overlay | VM switch traffic | UDP 4789 | WireGuard; accepted only from `wg-prism` |
+| gRPC control plane (h2c) | Raft, bootstrap, events, forwarding, console | TCP 7443 on the mesh address | WireGuard; source /128 mapped to a member |
+| Data plane | Migration RAM and NBD disk streams, cold-move and archive volumes | TCP 7444 on the mesh address | WireGuard; single-use session ID bound to the opener's address |
+| VXLAN overlay | VM network traffic | UDP 4789 | WireGuard; accepted only from `wg-prism` |
 
 ### What makes WireGuard the boundary
 
-Linux uses the weak-host model, IPv6 has no `rp_filter`, and the kernel VXLAN socket binds the wildcard address. So "addressed to the mesh" does not mean "came through WireGuard". Three controls close the gap. They ship in the same change that removes TLS.
+Linux uses the weak-host model, IPv6 has no `rp_filter`, and the kernel VXLAN socket binds the wildcard address. So "addressed to the mesh" does not mean "came through WireGuard". Three controls close the gap.
 
-1. **Interface rule (prerouting).** A packet with a mesh-prefix source or destination is accepted only on `wg-prism` or `lo`. UDP 4789 is accepted only from `wg-prism`. The forward chain drops everything entering or leaving `wg-prism`, because the mesh never routes. These rules must sit before routing. Otherwise a node with IPv6 forwarding enabled would encrypt a spoofed LAN packet to its peers as itself.
-2. **Cryptokey routing.** Every peer has `AllowedIPs` = exactly its /128, with no overlaps. WireGuard drops any inner packet whose source is not the sending peer's /128. A mesh source address therefore identifies one key.
-3. **Process rule (output).** WireGuard authenticates hosts, not processes. Only root sockets may send to the mesh, on every protocol, and the qemu uid may not start any connection. Prism resolves the qemu uid from `user` in `/etc/libvirt/qemu.conf` at startup.
+1. Interface rule (prerouting). A packet with a mesh-prefix source or destination is accepted only on `wg-prism` or `lo`. UDP 4789 is accepted only from `wg-prism`. The forward chain drops everything entering or leaving `wg-prism`, because the mesh never routes. These rules sit before routing. Otherwise a node with IPv6 forwarding enabled would encrypt a spoofed LAN packet to its peers as itself.
+2. Cryptokey routing. Every peer has `AllowedIPs` = exactly its /128, with no overlaps. WireGuard drops any inner packet whose source is not the sending peer's /128. A mesh source address therefore identifies one key.
+3. Process rule (output). WireGuard authenticates hosts, not processes. Only root sockets may send to the mesh, and the qemu uid may not start any connection.
 
-Handlers map `remote_addr()` to a committed member and its state. Unknown addresses get `PERMISSION_DENIED`. A `joining` member may call only `Cluster.Bootstrap` and `Cluster.Status`. Raft RPCs carry no role filter: openraft's term and vote rules decide, and a member is fully trusted (A5).
+Handlers map `remote_addr()` to a committed member and its state. A `joining` member may call only `Cluster.Bootstrap` and `Cluster.Status`. Raft RPCs carry no role filter: openraft's term and vote rules decide, and a member is fully trusted (A5).
 
 Prism generates these rules over netlink in its own `inet prism` table. With the example mesh prefix `fd12:3456:789a::/48` and qemu uid 64055:
 
@@ -530,17 +518,14 @@ table inet prism {
     }
     chain output {
         type filter hook output priority filter; policy accept;
-        ip6 daddr fd12:3456:789a::/48 meta skuid != 0 drop
         meta skuid 64055 ct state new drop
+        oifname "wg-prism" ip6 daddr fd12:3456:789a::/48 icmpv6 type echo-request accept
+        ip6 daddr fd12:3456:789a::/48 meta skuid != 0 drop
     }
 }
 ```
 
-- A drop in any nftables base chain is final, so these rules hold next to Docker and firewalld.
-- Kernel WireGuard and VXLAN packets have no file-backed socket, so `meta skuid` does not match them and the output chain lets them through.
-- In v1, QEMU uses only taps and UNIX sockets, so it never needs to start a network connection.
-- The rules use only `meta skuid`, `iifname` and `ct`, which kernel 5.6 supports.
-- `prism doctor` and CI check that the rules are present. e2e tests send spoofed mesh packets through a forwarding node, and VXLAN from an unprivileged local user.
+The same table also holds the guest input and forward chains (see [Networking](#networking)). A drop in any nftables base chain is final, so these rules hold next to Docker and firewalld. Kernel WireGuard and VXLAN packets have no file-backed socket, so `meta skuid` does not match them. The rules use only `meta skuid`, `iifname` and `ct`, which kernel 5.6 supports.
 
 ### Ports
 
@@ -550,111 +535,56 @@ table inet prism {
 | TCP 7443 gRPC h2c | Node mesh /128 | Members, through `wg-prism` |
 | TCP 7444 data plane | Node mesh /128 | Members, through `wg-prism` |
 | UDP 4789 VXLAN | Kernel wildcard | `wg-prism` only (prerouting) |
-| TCP 8080 HTTP | `127.0.0.1` by default, or `[http] listen` | Operator network only; never the mesh or bridges |
-| UDP 67, UDP/TCP 53 | Switch VIPs, `SO_BINDTODEVICE=ps<id>` | Guests on that switch |
+| TCP 8080 HTTP | `127.0.0.1` by default, or `[http] listen` | Operator network only |
+| UDP 67, UDP and TCP 53 | Network gateway addresses, per bridge | Guests on that network |
 
-**Firewall result:** between nodes, only UDP 51820 must be open on the underlay. There is no join port. On a tailnet, the ACL must allow `udp:51820` between Prism hosts.
+Between nodes, only UDP 51820 must be open on the underlay. There is no join port. On a tailnet, the ACL must allow `udp:51820` between Prism hosts.
 
-**gRPC without TLS:** tonic serves HTTP/2 with prior knowledge (h2c). Prism builds the listener with socket2 (bound to the mesh /128, `IPV6_V6ONLY`) and passes it to `serve_with_incoming`. `remote_addr()` then comes from `TcpConnectInfo`. Clients need no source binding, because `wg-prism`'s only global address is the mesh /128. The router never dials its own node; it short-circuits locally.
-
-**Data plane without TLS:** WireGuard already protects it, and HTTP/2 framing caps gRPC bulk throughput at about 1–3 Gb/s. `Tunnel.Open` returns a 128-bit session ID. The 7444 listener accepts one connection carrying that ID, from the mesh address that opened it, within 30 s. The ID only matches a stream to its session; it is not a credential.
+tonic serves HTTP/2 with prior knowledge (h2c). The data plane is a raw TCP listener: `DataPlane.Open` registers a single-use session with a random 128-bit ID bound to the caller's mesh address and returns the ID. The caller connects within 60 seconds and sends the ID first. The ID only matches a stream to its session; it is not a credential. Volume transfers send sparse extents (holes skipped) in 1 MiB chunks and end with a BLAKE3 over the data.
 
 ### Mesh addressing (IPv6)
 
-- `prism init` generates a random IPv6 Unique Local Address prefix per [RFC 4193](https://www.rfc-editor.org/rfc/rfc4193): `fdXX:XXXX:XXXX::/48`, with a 40-bit random Global ID. The mesh uses subnet `:1::/64` of it.
-- Each node gets `fdXX:XXXX:XXXX:1::<n>/128`, allocated sequentially in replicated state when an invite is created. Addresses are never reused, including after removal or an expired invite.
+- `prism cluster init` generates a random IPv6 Unique Local Address prefix per [RFC 4193](https://www.rfc-editor.org/rfc/rfc4193): `fdXX:XXXX:XXXX::/48`, with a 40-bit random Global ID. The mesh uses subnet `:1::/64` of it.
+- Each node gets an address in that /64, allocated sequentially in replicated state when an invite is created. Addresses are never reused, including after removal or an expired invite.
 - `wg-prism` peers use `AllowedIPs = <peer address>/128`.
-- **Why IPv6:** an IPv4 mesh would compete with Tailscale (`100.64.0.0/10`), Docker (`172.17.0.0/16`) and site RFC 1918 ranges. A random ULA /48 avoids them, including Tailscale's own `fd7a:115c:a1e0::/48`. `prism init` and `prism join` refuse a prefix already routed on the host.
-- Only the mesh is IPv6. Underlay endpoints (`advertise`, UDP 51820) may be IPv4 or IPv6, and guest networks on switches are independent of the mesh.
+- A random ULA /48 avoids Tailscale (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`), Docker and site RFC 1918 ranges.
+- Only the mesh is IPv6. Underlay endpoints (`advertise`, UDP 51820) may be IPv4 or IPv6, and guest networks are independent of the mesh.
 - `PersistentKeepalive = 25` keeps peers behind NAT reachable. At least one side of each peer pair needs a reachable endpoint.
 
 ### MTU
 
-The `wg-prism` MTU, W, is one replicated, cluster-wide value. It defaults to 1420, which fits a 1500-byte underlay of either address family.
+The `wg-prism` MTU, W, is one replicated, cluster-wide value. It defaults to 1420, which fits a 1500-byte underlay of either address family, and is carried in the invite. The API and CLI have no setting for another value.
 
-| Underlay | WireGuard overhead | Outer packet at W = 1420 | VXLAN over IPv6 | Switch MTU at W = 1420 |
+| Underlay | WireGuard overhead | Outer packet at W = 1420 | VXLAN over IPv6 | Network MTU at W = 1420 |
 | --- | --- | --- | --- | --- |
 | IPv4 | 60 B | 1480 | 70 B | 1350 |
 | IPv6 | 80 B | 1500 | 70 B | 1350 |
 
-- Switch MTU = min(1500, W − 70), and 4 B less on switches with VLANs (1346 by default). Guest IPv6 needs ≥ 1280, so W must be ≥ 1350.
-- `prism init --mtu <W>` raises W for a jumbo-frame underlay. W must be between 1350 and the smallest underlay MTU minus 80. Guests keep 1500 once W ≥ 1570, which takes an underlay ≥ 1650 on every path.
-- Changing W later needs a maintenance window, because every switch MTU follows it.
-- After a peer's first handshake, and whenever its endpoint changes, Prism pings the peer's mesh address over `wg-prism` with a full-size, unfragmentable inner packet (W − 48 bytes of ICMPv6 payload). This exercises the real outer path.
-- Each peer gets one of three flags: `direct` when the route MTU to its endpoint carries W plus overhead; `fragmented` when it does not but the ping succeeds; `unhealthy` when the ping fails. The UI shows the flags, and none of them blocks a join.
+The network MTU is min(1500, W - 70), and 4 B less on networks with VLANs (1346 by default). A standalone node uses 1500. The MTU reaches guests through the libvirt XML `<mtu>` element and DHCP option 26.
 
-#### Prism over Tailscale
-
-Running `wg-prism` over `tailscale0` (MTU 1280) is supported through outer IPv4 fragmentation, with a warning.
-
-- Without fragmentation, W would be 1280 − 60 = 1220 over a `100.x` address, or 1280 − 80 = 1200 over `fd7a:`. Both are below 1280, so the IPv6 mesh could not come up.
-- Prism therefore keeps W = 1420. Kernel WireGuard sends outer IPv4 without DF, so the kernel splits each 1480-byte outer datagram into 2 fragments for `tailscale0`. The peer reassembles them, and guests keep 1350.
-- Advertise the node's `100.x` IPv4 tailnet address for this path, not `fd7a:`. Outer IPv6 adds 20 B, and its local fragmentation is unverified.
-- Costs: about 2 tailnet packets per full-size frame, double encryption, and loss of the whole packet when one fragment is lost. DERP-relayed paths are slow.
-- Prefer direct LAN endpoints whenever nodes share a network, even when operators reach the hosts over Tailscale. List them first in `advertise`. Prism configures each peer with the first endpoint that completes a handshake, and WireGuard roaming then follows the peer's real source.
-- The e2e suite runs a "mesh over Tailscale" scenario. It must confirm that non-initial fragments cross `tailscaled` and its ACL filter.
-- Using the tailnet as the boundary, with no `wg-prism`, is rejected. The tailnet's peer set is not Prism membership, so any tailnet device could reach raft and VXLAN.
+The mesh can run over `tailscale0` (MTU 1280) because kernel WireGuard sends outer IPv4 without the DF bit, so the kernel fragments each outer datagram. Advertise the node's `100.x` address for that path and prefer direct LAN endpoints when nodes share a network. Prism has no in-tunnel MTU probe and no `direct`, `fragmented` or `unhealthy` flags; `GET /cluster/mesh` reports each peer's endpoint and handshake age.
 
 ### Joining
 
-A node joins by a copy-paste exchange of two blobs, neither of which contains a secret. The operator copies an invite from any member to the new node, then copies the reply back. Each side generates its own WireGuard private key, and the key never leaves its host.
+A node joins by a copy-paste exchange of two blobs, neither of which contains a secret. The operator copies an invite from any member to the new node, then copies the reply back. Each side generates its own WireGuard private key, and the key never leaves its host. Admission is an ordinary API action. Any device on the operator network can create and accept an invite (A2), so the blobs need integrity against typos, not against attackers.
 
-Admission is an ordinary API action. Any device on the operator network can create and accept an invite (A2), so the blobs need integrity against typos, not against attackers.
+Each blob is a text prefix, then base64url without padding. The base64 encodes a CBOR map with integer keys, followed by the first 4 bytes of BLAKE3 over the CBOR. The prefix names the blob type and major version: `prism-invite1.` or `prism-reply1.`. Whitespace in a paste is stripped before decoding. Pasting a reply into `prism join`, or an invite into `prism cluster accept`, names the right command.
 
-**Encoding.** Each blob is a text prefix, then base64url without padding. The base64 encodes a deterministic CBOR map with integer keys, followed by the first 4 bytes of BLAKE3 over the CBOR. The prefix names the blob type and major version: `prism-invite1.` or `prism-reply1.`. Key 0 is the minor version. Readers ignore unknown keys. An unknown prefix or major version is refused. Whitespace and line breaks in a paste are stripped before decoding. Blob A is about 300 characters; blob B is about 200.
+The invite, from `prism cluster invite [--name kvm-c] [--ttl <seconds>]` or the Cluster page, carries the cluster ID and name, a random 128-bit invite ID, an expiry (default 1 hour, at most 7 days), the mesh prefix, the address reserved for the new node, the cluster MTU, the sponsor (node ID, name, public key, mesh address, endpoints), the sponsor's feature level and version, and an optional suggested name. The new node's reply carries the cluster and invite IDs, the reserved address, its node ID, name and public key, its endpoints (empty behind NAT), its feature level, version and CPU architecture.
 
-**Blob A, the invite**, from `prism cluster invite [--name kvm-c] [--ttl 1h]` or the UI:
+Creating an invite commits `CreateInvite` through the hub or leader, so concurrent invites never share an address. Invites are refused while the node is degraded, and the sponsor needs a reachable endpoint (`advertise`).
 
-| Key | Field | Notes |
-| --- | --- | --- |
-| 0 | Minor version | 0 |
-| 1 | `cluster_id` | UUID from `prism init` |
-| 2 | `cluster_name` | Display only |
-| 3 | `invite_id` | 128-bit random. Not a secret: it names the reservation |
-| 4 | `exp` | Unix seconds, default 1 h. The accepting member enforces it |
-| 5 | `mesh_prefix` | `fdXX:XXXX:XXXX::/48` |
-| 6 | `assigned_addr` | `fdXX:XXXX:XXXX:1::<n>`, reserved for this invite |
-| 7 | `wg_mtu` | The cluster's W |
-| 8 | `sponsor` | `{node_id, name, wg_pubkey, mesh_addr, endpoints [host:port, …]}` |
-| 9 | `versions` | Cluster `feature_level` and the sponsor's Prism version |
-| 10 | `name_hint` | Optional suggested node name |
+On the new node, `prism join <invite>` (which needs `prism serve` running) verifies the checksum and version, creates `wg-prism` with the reserved address, generates `wg/wg.key` (0600), adds the sponsor as the only peer and prints the reply and the key fingerprint (the first 8 base64 characters of the public key). The node then waits in the `joining` state. The join finishes in the background, so a Ctrl-C does not abort it.
 
-Creating an invite commits `CreateInvite{invite_id, assigned_addr, exp, created_by}` through raft. Concurrent invites therefore never share an address, and any member can accept the reply. Invites are refused while the cluster is degraded. The sponsor needs a reachable endpoint. Invite from the hub or another node with a stable address.
+The operator pastes the reply into any member (`prism cluster accept <reply>` or the invite dialog on the Cluster page). The member refuses with a named error unless all of these hold:
 
-**On the new node,** `prism join <blob A>` does the following:
+- The cluster ID matches (`cluster_mismatch`).
+- The invite exists, is unexpired by the cluster's clock and is unconsumed (`invite_not_found`, `invite_expired`, `invite_consumed`).
+- The address matches the reservation (`address_mismatch`).
+- The key and node ID are neither members nor tombstoned (`member_exists`, `member_tombstoned`).
+- The feature levels differ by at most one (`version_skew`).
 
-1. Verifies the checksum and major version. It warns, without refusing, if `exp` has passed by its own clock, and shows the skew.
-2. Checks that IPv6 and the `wireguard` module are present, that the mesh prefix is not already routed, and that the node is not already a member.
-3. Records a pending join in `data/`, with a new `node_id` unless a pending join already exists.
-4. Creates `wg-prism` with `assigned_addr` and MTU W. It writes 32 bytes from `getrandom` to `wg/wg.key` (0600), or reuses the key from an earlier attempt, and sets it over netlink. It reads the public key back with `WG_CMD_GET_DEVICE`.
-5. Adds the sponsor as the only peer (`AllowedIPs` = its /128, `PersistentKeepalive = 25`).
-6. Prints blob B and the new key's fingerprint (its first 8 base64 characters), then shows progress until the node is active.
-
-Ctrl-C leaves the pending join for `prism serve` to finish. `prism join --abort` removes `wg-prism` and the pending record but keeps the key.
-
-**Blob B, the reply:**
-
-| Key | Field | Notes |
-| --- | --- | --- |
-| 0 | Minor version | 0 |
-| 1 | `cluster_id` | Echoed |
-| 2 | `invite_id` | Echoed |
-| 3 | `assigned_addr` | Echoed |
-| 4 | `node_id` | UUID from the pending join |
-| 5 | `name` | Node name |
-| 6 | `wg_pubkey` | 32 bytes |
-| 7 | `endpoints` | `[host:port, …]`, preference-ordered. Empty behind NAT; peers learn it by roaming |
-| 8 | `versions` | Prism version, `feature_level`, architecture |
-
-**Acceptance.** The operator pastes blob B into any member, with `prism cluster accept <blob B>` or the paste box on the UI's Cluster screen (`POST /api/v1/cluster/invites/{id}/accept`). The member refuses with a named error unless all of the following hold:
-
-- `cluster_id` matches.
-- The invite exists, is unexpired by the cluster's clock and is unconsumed.
-- `assigned_addr` matches the reservation.
-- `wg_pubkey` and `node_id` are neither members nor tombstoned.
-- Versions are within one minor version.
-
-The member then shows "Admit kvm-c (192.168.10.13:51820, key Xr3fQ9aL)?". The key fingerprint matches what the new node printed, which catches a reply pasted into the wrong cluster. On confirmation, the member sends `AddMember{node_id, name, wg_pubkey, endpoints, mesh_addr, invite_id}` through `ForwardWrite` to the hub or leader. The same command consumes the invite. Accepting the same blob B again returns success without a change. A different blob B for a consumed invite is refused.
+The member shows the new node's name, endpoints and key fingerprint, and the operator confirms that the fingerprint matches what the new node printed. That catches a reply pasted into the wrong cluster. On confirmation, `AddMember` is committed through the hub or leader and consumes the invite in the same command.
 
 ```mermaid
 sequenceDiagram
@@ -667,11 +597,11 @@ sequenceDiagram
     Op->>E: prism cluster invite with name kvm-c
     E->>L: ForwardWrite CreateInvite with invite_id, address, expiry
     L-->>E: Committed
-    E-->>Op: Blob A
-    Op->>N: prism join with blob A
-    N->>N: Check blob, set wg.key, bring up wg-prism with peer E
-    N-->>Op: Blob B and key fingerprint
-    Op->>E: prism cluster accept with blob B
+    E-->>Op: Invite blob
+    Op->>N: prism join with the invite
+    N->>N: Check blob, create wg.key, bring up wg-prism with peer E
+    N-->>Op: Reply blob and key fingerprint
+    Op->>E: prism cluster accept with the reply
     E->>E: Check invite, address, key, versions
     E-->>Op: Admit kvm-c with key fingerprint?
     Op->>E: Confirm
@@ -681,7 +611,6 @@ sequenceDiagram
     P->>P: Add WireGuard peer N
     E->>E: Add WireGuard peer N
     N->>E: WireGuard handshake
-    N->>E: In-tunnel MTU probe
     N->>E: Cluster.Bootstrap over h2c on the mesh
     E-->>N: Members, keys, endpoints, leader identity
     N->>N: Install all peers
@@ -689,136 +618,85 @@ sequenceDiagram
     L->>L: Commit SetMemberState active once caught up
 ```
 
-**After acceptance:**
+After acceptance every node's membership reconciler adds the WireGuard peer for the new key (`AllowedIPs` = its /128). The new node calls `Cluster.Bootstrap`, which answers every member's ID, key, endpoints and mesh address plus the leader's identity, and installs all peers. The leader adds the node as a raft learner after it has applied `AddMember`, never from inside state-machine apply. The node receives a snapshot and the log tail, and the leader commits `SetMemberState{active}` once the node has caught up. Only `active` members get full gRPC access, VMs and archive placement. In consensus mode a new member is a learner until someone makes it a voter.
 
-1. Every node's reconciler applies `AddMember`. It adds the WireGuard peer: the new key, `AllowedIPs` = its /128, and its first endpoint if it has one.
-2. The new node completes a handshake with the sponsor and runs the in-tunnel MTU probe.
-3. The new node calls `Cluster.Bootstrap`. Its source maps to a `joining` member, which may call only `Bootstrap` and `Status`.
-4. Bootstrap returns every member's node ID, key, endpoints and mesh address, plus the leader's identity. The new node installs all peers with `PersistentKeepalive = 25`, so peers learn its endpoint by roaming even behind NAT.
-5. On the leader, a membership reconciler task calls openraft `add_learner(blocking = false)`. It runs only after the leader has applied `AddMember` and installed the peer, never from inside state-machine apply. It retries until the node is reachable.
-6. The node receives `InstallSnapshot`, then the log tail. When its `applied_index` reaches the commit index of `AddMember`, the leader commits `SetMemberState{active}`.
-7. Only `active` members get full gRPC access, VMs, archive placement or a vote. Promotion to voter in consensus mode stays a separate, explicit step.
-
-Member states: `invited` (reservation), then `joining`, then `active`, then `removed` (tombstone).
-
-**Failure and expiry:**
-
-| Situation | Behaviour |
-| --- | --- |
-| Truncated or mistyped paste | Checksum fails: "blob damaged, copy it again" |
-| Wrong blob in the wrong command | The prefix mismatch names the expected blob |
-| Unknown major version | "Upgrade prism to read `prism-invite2` blobs" |
-| Blob A past `exp` on the new node's clock | Warning with the clock skew; the accepting member decides |
-| Blob B after expiry | Refused `invite_expired`. The leader garbage-collects with `ExpireInvite`, and the address is not reused |
-| Fingerprints differ | The operator declines and revokes with `prism cluster invite --revoke <id>` |
-| Key or node ID already present | Refused `member_exists` |
-| Key or node ID tombstoned | Refused `member_tombstoned`: "run `prism leave --force` on the node, then join with a new invite" |
-| Cluster degraded | Invite and accept return 503 `cluster_degraded` |
-| No handshake within 120 s of acceptance | The new node prints per-endpoint UDP reachability. The member stays `joining` in the UI; `prism cluster remove` clears it |
-| In-tunnel MTU probe fails | The peer is marked `unhealthy` and the UI names the path. The join continues |
-| Sponsor unreachable before Bootstrap | The new node keeps retrying. If the sponsor is gone for good, remove the `joining` member and invite again from another node |
-| New node killed mid-join | Re-running `prism join` with the same blob A reuses the key and the pending record |
-| Version skew over one minor | Refused on both sides |
+Member states are `invited` (reservation), `joining`, `active` and `removed` (tombstone).
 
 ### Removal
 
-`prism cluster remove <node>` cuts a node off by deleting its peer everywhere. No other credential exists to revoke.
+`prism cluster remove <node>` cuts a node off by deleting its peer everywhere. No other credential exists to revoke. Prism refuses while the node owns VMs or holds archive replicas, and while it is the hub or a voter whose removal would leave an invalid voter count. It then commits `RemoveMember{node_id}` with a tombstone `{node_id, wg_pubkey, mesh_addr}`, and tombstoned keys, node IDs and addresses are never accepted again. Every node deletes the WireGuard peer, after which the kernel drops that key's packets. `prism cluster removed` lists tombstones and the members that have not yet applied the removal, from their reported log index. `prism leave` on the removed node wipes `data/` and `wg/`; `--force` does this offline. Security does not depend on it running.
 
-1. Drain or move the node's VMs first.
-2. If the node is a voter, openraft runs a membership change first (joint consensus, needs quorum).
-3. Prism commits `RemoveMember{node_id}` with a tombstone `{node_id, wg_pubkey, mesh_addr}`. Tombstoned keys, node IDs and addresses are never accepted again.
-4. Every node deletes the WireGuard peer, its FDB entries and its VXLAN all-zeros entry. From then on, the kernel drops that key's packets.
-5. Peers come only from committed state, reconciled on every apply and at boot.
-6. The removal status in the CLI and UI lists members that have not yet applied the removal, from their reported `applied_index`.
-7. `prism leave` on the removed node wipes `data/` and `wg/`. `--force` does this offline. Security does not depend on it running.
-
-A member that was offline during the removal still trusts the removed key until it catches up from another member. If the removed node is suspected to be compromised, catch up or isolate the lagging members listed in step 6 before the removed node can reach them. Risks records this window.
+A member that was offline during the removal still trusts the removed key until it catches up from another member. After a suspected compromise, catch up or isolate the lagging members before the removed node can reach them.
 
 ### Key compromise
 
-Prism has no in-place key rotation in v1. WireGuard rotates session keys every 2 minutes. A static key rotation that swaps the peer key on commit would cut the rotating node off from the commit it is waiting for.
-
-After a suspected compromise of `wg.key`, treat the host as compromised:
-
-1. `prism cluster remove <node>` on any member.
-2. `prism leave --force` on the host, or reinstall it.
-3. `prism cluster invite` and join again. The node gets a new node ID, key and mesh address.
-
-There is no WireGuard preshared key in v1. One can be added later as an optional blob field.
+There is no in-place key rotation, and no WireGuard preshared key. After a suspected compromise of `wg.key`, treat the host as compromised: run `prism cluster remove <node>` on another member, run `prism leave --force` on the host or reinstall it, then invite and join again. The node gets a new ID, key and mesh address.
 
 ### gRPC services (package `prism.v1`)
 
-Every call is plaintext h2c on the mesh. The caller is the member that owns the source /128. A `joining` member may call only `Cluster.Bootstrap` and `Cluster.Status`.
+Every call is plaintext h2c on the mesh. The caller is the member that owns the source /128. A `joining` member may call only `Cluster.Bootstrap` and `Cluster.Status`. Payloads that carry Prism or openraft types are JSON inside `bytes` fields.
 
 | Service | Purpose |
 | --- | --- |
-| `Raft` | AppendEntries, Vote, chunked InstallSnapshot; openraft's term rules decide |
-| `Cluster` | Status, Bootstrap (members for a `joining` node), Leave, Promote, ForwardWrite |
-| `NodeStatus` | Bidirectional heartbeats and runtime-state deltas, including `applied_index` |
-| `Events` | Subscribe(since) server stream |
-| `HttpTunnel` | Forward one REST request as a bidirectional stream |
-| `Console` | Bidirectional VNC and serial byte stream |
-| `Blob` | Stat, Delete and metadata for archive files; bytes move on the data plane. Size- and rate-limited |
-| `Tunnel` | Open a data-plane session; returns a 128-bit session ID bound to the caller's address |
-
-The `Join` service, `Cluster.RenewCert` and `Cluster.RotateWgKey` are removed. Bulk sessions use 4 MiB chunks, resumable offsets and a final whole-file BLAKE3.
+| `Raft` | AppendEntries, Vote, InstallSnapshot |
+| `Cluster` | `Status`, `Bootstrap` (members for a joining node), `ForwardWrite` (propose a command at the hub or leader) |
+| `Events` | `Subscribe`: runtime snapshot, then the node's own events |
+| `HttpTunnel` | `Forward`: one REST request as a bidirectional stream |
+| `Console` | `Open`: bidirectional VNC and serial byte stream |
+| `DataPlane` | `Open`: register a data-plane session and return its ID |
 
 ### Rolling upgrades
 
 - Proto changes are additive only and never reuse field numbers.
-- Each node advertises `{version, feature_level}`. The cluster uses the minimum and raises it explicitly, so new `Command` variants appear only once every node supports them.
-- Join blobs follow the same rule. New CBOR keys are additive within a major version, and a major bump changes the prefix (`prism-invite2.`).
-- Join is refused across more than one minor version. Upgrade learners and spokes first, then voters, then the hub or leader.
+- Each node advertises `{version, feature_level}`. The cluster level is the minimum all members support and rises by itself once every node runs the new binary. Commands added at a level (`feature_enabled(cluster_level, required)`) are accepted only after that. This release supports level 3: level 2 added networks, level 3 the replicated archive timers.
+- Join and accept are refused when the levels differ by more than one (`version_skew`). `GET /cluster` reports `supported_feature_level` beside the cluster's level.
+- Upgrade learners and spokes first, then voters, then the hub or leader.
 
 ## VM lifecycle and memory ballooning
 
-Prism stores a typed, versioned `VmSpec` as the source of truth and renders libvirt domain XML from it; users never edit XML. Ballooning is on by default, and an optional Auto mode returns idle guest memory to the host based on kernel pressure signals.
+Prism stores a typed `VmSpec` as the source of truth and renders libvirt domain XML from it; users never edit XML. Ballooning has three modes (`off`, `manual`, `auto`), and Auto returns idle guest memory to the host based on kernel pressure signals.
 
 ### VmSpec
 
-- **Identity:** UUID, name, `generation` counter, owning node and `owner_epoch`.
-- **CPU:** current and max vCPUs. The model is `HostModel` or `ClusterBaseline`, computed via `CONNECT_BASELINE_HYPERVISOR_CPU` across nodes so migration works on mixed hardware.
-- **Memory:** `max_mib` (boot size), `min_mib` (balloon floor), `initial_mib`, balloon mode `Off | Manual | Auto`, `headroom_pct`.
-- **Machine:** type pinned at creation (for example `pc-q35-8.2`, never the `q35` alias); BIOS or UEFI.
-- **Disks:** virtio-blk or virtio-scsi; qcow2 or raw; `cache=none`, `io=native`, `discard=unmap`. Always in a pool on the owning node.
-- **NICs:** switch, MAC, optional VLAN and egress override (see [Networking](#networking)).
-- **Devices:** VNC on a UNIX socket, serial console, qemu-guest-agent channel, virtio-rng, `usb-tablet` for absolute pointer.
-- **CD-ROM:** an archive file reference; the ISO is cached locally before attach (see [Storage](#storage)).
-- **Cloud-init:** a NoCloud seed ISO built by Prism's own small ISO9660 writer. User-data is held as `secrecy::SecretString`, SSE `vm.config` carries only its hash, and the seed ISO is written 0600. User-data is visible to every member.
+- The identity is a UUID, a name (`[A-Za-z0-9._-]`, at most 64 characters), a description and a `generation` counter that rises on every change. The owner is `node` plus `owner_epoch`.
+- CPU is a vCPU count (1 to 512) and a model: `host_model` (the default, migratable between similar hosts) or `host_passthrough`.
+- Memory is `max_mib` (boot size, at least 64), `min_mib` (balloon floor), `target_mib` and the balloon mode.
+- Firmware is BIOS or UEFI. The machine type is pinned at creation when libvirt expands the alias.
+- Disks are virtio disks or SATA CD-ROMs in a pool on the owning node. Disks use `cache=none`, `io=native` and `discard=unmap` where the file system supports `O_DIRECT`, and `cache=writeback` where it does not. A disk records its read-only backing layers (snapshot history).
+- NICs attach to a Prism network (with optional IPAM lease, egress node, VLAN, trunk and port forwards), to an existing host bridge, or to user-mode networking (`passt`).
+- The fixed devices are VNC on a UNIX socket, a PTY serial console, a qemu-guest-agent channel, virtio-rng, a virtio video device and a USB tablet.
+- Cloud-init is a NoCloud seed ISO built by `prism-iso`. The API returns a `blake3:` hash in place of the user-data. User-data is in replicated state and visible to every member.
+- `autostart` is Prism's own setting: Prism starts the VM after libvirt connects at boot.
 
 ### Rendering and reconciling
 
-`render(VmSpec) -> DomainXml` is a pure function over serde structs serialised with quick-xml, tested against golden files. The XML carries `<metadata><prism:vm generation="…" xmlns:prism="urn:prism:1"/></metadata>`.
+`render(VmSpec)` is a pure function that writes the domain XML, tested against a golden file (`crates/prism/tests/golden/basic.xml`) and unit tests. The XML carries a `<prism:vm>` metadata element in the `urn:prism:1` namespace.
 
-A per-host reconciler compares desired and actual state on every change and libvirt event:
+When Prism connects to libvirt it defines every VM the node owns, refreshes runtime state, and applies the ownership rules from [Clustering](#a-vm-never-runs-on-two-nodes). Domain events (lifecycle, balloon change, guest agent) update runtime state and are published as SSE events.
 
-- **Hot-applied:** balloon target, current vCPUs, NIC and disk hotplug (`ATTACH_DEVICE_FLAGS` / `DETACH_DEVICE_FLAGS`), CD-ROM media changes.
-- **Restart required:** everything else is flagged `pending_restart` and shown in the UI.
+- Hot-applied: balloon target and mode, NIC and disk hotplug (`ATTACH_DEVICE_FLAGS` and `DETACH_DEVICE_FLAGS`), CD-ROM media changes, disk growth, NIC VLAN and forward changes.
+- Applied at the next power cycle: vCPUs, memory size, CPU model, firmware and other spec changes. The VM is flagged `pending_restart` and the UI shows a banner. A start redefines the domain from the stored spec.
 
 ### Lifecycle states
 
-Each transition comes from a libvirt lifecycle event and is published as an SSE `vm.state` event; nothing polls.
+The runtime state comes from libvirt's domain state: `stopped`, `running`, `paused`, `shutting_down`, `crashed`, `suspended`, plus `missing` (not defined in libvirt yet) and `unknown`. A migration and a quarantine are not states: a migration is a task and an intent on the spec, and a quarantined domain is stopped and undefined.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Defined: create
-    Defined --> Starting: start
-    Stopped --> Starting: start
-    Crashed --> Starting: start
-    Starting --> Running
+    [*] --> Missing: create
+    Missing --> Stopped: defined
+    Stopped --> Running: start
+    Crashed --> Running: start
     Running --> Paused: pause
     Paused --> Running: resume
     Running --> ShuttingDown: shutdown
     ShuttingDown --> Stopped
     Running --> Stopped: stop
-    Running --> Migrating: migrate
-    Migrating --> Running: completed or aborted
     Running --> Crashed: guest or QEMU failure
     Stopped --> [*]: delete
-    Defined --> [*]: delete
 ```
 
-A domain the reconciler finds on a node that does not own it moves to `Quarantined` from any state (see [Clustering](#a-vm-never-runs-on-two-nodes)).
+The actions are `start`, `shutdown`, `stop`, `reboot`, `reset`, `pause` and `resume`, all through `POST /vms/{id}/actions/{action}`. Each transition comes from a libvirt event and is published as an SSE `vm.state` event.
 
 ### Balloon device
 
@@ -828,126 +706,112 @@ A domain the reconciler finds on a node that does not own it moves to `Quarantin
 </memballoon>
 ```
 
+With `balloon = off` the XML has `<memballoon model='none'/>`.
+
 - `autodeflate` deflates the balloon when the guest is close to OOM.
-- `freePageReporting` (libvirt ≥ 6.9, QEMU ≥ 5.1) returns freed guest pages to the host automatically.
-- Stats for all VMs come from one batched `CONNECT_GET_ALL_DOMAIN_STATS(BALLOON)` call every 5 s.
-- Free page reporting and Auto mode are disabled for VMs with VFIO passthrough, locked memory or hugepages.
+- `freePageReporting` (libvirt 6.9 or later, QEMU 5.1 or later) returns freed guest pages to the host automatically.
+- The stats period is 5 seconds.
 
 ### Auto-balloon policy
 
-A per-host loop runs every 10 s. It reads host PSI (`/proc/pressure/memory` `some` and `full` avg10), `MemAvailable` and per-VM cgroup `memory.pressure`. From each guest it reads `usable`, `available`, `disk_caches`, and deltas of `major_fault` and `swap_in`.
+A per-host loop runs every 10 seconds over the VMs in `auto` mode. It reads host PSI (`/proc/pressure/memory`, `some` and `full` avg10) and `MemAvailable`, and from each guest the balloon stats, including the delta of major faults.
 
 | Host state | Trigger | Action |
 | --- | --- | --- |
-| Green | `some` < 1% and MemAvailable > 15% | Only grow VMs under guest pressure, by 10% |
-| Yellow | `some` 1–10%, or MemAvailable 5–15% | Reclaim from VMs above their target |
-| Red | `full` > 2%, `some` > 10%, or MemAvailable < 5% | Reclaim toward `min_mib`; refuse new starts and inbound migrations; alert |
+| Green | `some` < 1% and MemAvailable at least 15% | Grow VMs that are under guest pressure |
+| Yellow | `some` 1 to 10%, or MemAvailable 5 to 15% | Reclaim from VMs above their target |
+| Red | `full` > 2%, `some` > 10%, or MemAvailable < 5% | Reclaim toward `min_mib`; refuse `start` (`host memory pressure is critical`) |
 
-- **Per-VM target:** clamp(`min_mib`, in-use × (1 + headroom), `max_mib`), where in-use = available − usable.
-- **Guardrails:** at most 256 MiB or 5% per VM per tick; 30 s hysteresis; skip VMs whose stats are more than 3 periods old; stop reclaiming from a VM whose major-fault rate spikes.
-- **Untrusted guest data:** growth requires guest stats to agree with the VM's own cgroup memory pressure. A VM that misses its balloon target for 6 ticks is marked `balloon_unresponsive` and alerted. Guest-agent data is display-only and never feeds IPAM, FDB, firewall or placement.
-- **Apply:** `DOMAIN_SET_MEMORY_FLAGS(AFFECT_LIVE)`. The change appears as a `BALLOON_CHANGE` event, then an SSE update.
-- **No PSI:** some kernels need `psi=1`. Without `/proc/pressure`, the loop falls back to MemAvailable only.
+- The per-VM target is clamp(`min_mib`, in-use x 1.2, `max_mib`), where in-use is available minus usable.
+- Each step is at most 256 MiB or 5% of `max_mib`. A VM does not reverse direction within 30 seconds. Reclaim from a VM stops when its major-fault count jumps by more than 200 in a tick.
+- A VM that misses its target for 6 ticks is flagged `balloon_unresponsive`.
+- Without `/proc/pressure`, the loop classifies host pressure from `MemAvailable` alone.
+- The change goes through `DOMAIN_SET_MEMORY_FLAGS(AFFECT_LIVE)` and appears as a `BALLOON_CHANGE` event, then an SSE update.
 
-Manual mode exposes a target slider in the UI and `PATCH /api/v1/vms/{id}` with `memory.target_mib`.
+Manual mode exposes a target slider in the UI and `PATCH /api/v1/vms/{id}` with a memory target. The default floor is a quarter of the memory size, at least 128 MiB. Prism does not special-case VMs with hugepages or locked memory, because the spec cannot express them.
 
 ## Storage
 
-Prism has two storage kinds. **Local pools** hold live VM disks and are always on the VM's host. **Archive pools** hold everything else (ISOs, backups, templates, exports) and are load-balanced at the file level across directories on any nodes.
+Prism has two storage kinds. Local pools hold live VM disks and are always on the VM's host. Archive pools hold everything else (ISOs, backups) and spread whole files across directories on any nodes.
 
 ### Local VM disk pools
 
-| Pool type | Formats | Provisioning | v1 |
-| --- | --- | --- | --- |
-| `dir` | qcow2 (default), raw | Sparse files | Yes |
-| `lvm` | raw | Thin LV when a thin pool exists, else thick | Yes |
-| ZFS dataset / zvol | raw | Thin | Deferred |
+A local pool is a directory (`type = "dir"`) with a disk format, `qcow2` (the default) or `raw`. Pools come from `[pools.<name>]` in `prism.toml`, which only a config edit removes, or from the API under a directory listed in `storage.pool_roots`. Each file in a pool is a volume: a disk image, an ISO or a cloud image.
 
-- Prism manages volumes itself with `qemu-img` and rustix, not through libvirt's storage driver. That removes any virtstoraged dependency and lets the same code run on modular and monolithic libvirt.
-- Operations: create, resize (online via `BLOCK_RESIZE`), clone, import from an archive file, upload, download, delete.
-- **Online move between local pools:** `blockcopy` to the new pool, wait for the READY event, then pivot. The guest keeps running.
-- A disk can only belong to a VM owned by the same node; the API rejects anything else.
-- Each local pool has a `reserve`. When a pool reaches it, affected VMs pause with an ENOSPC alert instead of filling the host. Thick-LV delete issues `BLKZEROOUT`.
+- Prism manages volumes with `qemu-img` and rustix, not through libvirt's storage driver. That removes any virtstoraged dependency and lets the same code run on modular and monolithic libvirt.
+- Operations are create, upload (a streamed `PUT` of the raw file), download from an `http` or `https` URL with an optional SHA-256, grow a disk, clone and delete. A volume that a VM uses cannot be deleted.
+- A disk belongs to a VM owned by the same node, and the API rejects anything else.
+- LVM and ZFS pools, disk moves between pools while running, and a pool `reserve` for local pools were not built. A cold move picks the destination pool.
 
 ### File confinement
 
 Prism runs as root, so every file it touches on behalf of the API is confined.
 
-- Every file operation under a pool, archive member or ISO cache uses `openat2` with `RESOLVE_BENEATH`, `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_MAGICLINKS` and `RESOLVE_NO_XDEV` from a root directory fd opened at startup. Commits use `renameat2(RENAME_NOREPLACE)`.
-- API paths are relative UTF-8 with no NUL, `.` or `..` components and no `.prism-partial` prefix. Volume and LV names match `[A-Za-z0-9._-]{1,128}` with no leading `-` or `.`. Pools created through the API live under base directories allowlisted in `prism.toml`.
-- Pool and VM directories are root-owned and not writable by the qemu uid; libvirt relabels only image files. `qemu-img` receives inputs as fds through `json:{"driver":"file","filename":"/dev/fd/N"}`.
-- Image metadata is untrusted. Prism always passes `-f` and `-F` and never probes. Each disk chain is recorded in state, unexpected backing-file or data-file references are rejected, imports are flattened, and `qemu-img` runs under rlimits.
-- Children get an argv list, never a shell, with `--` before positional arguments.
+- File operations under a pool or archive member use `openat2` with `RESOLVE_BENEATH` and related flags from a directory fd, and commits use `renameat2(RENAME_NOREPLACE)`.
+- Pool, volume and archive path components are letters, digits, dot, dash and underscore, with no leading dash or dot. Archive paths are at most 16 levels deep and may not start with `.prism-partial`.
+- Image metadata is untrusted. Prism passes `-f` and `-F` to `qemu-img` and never probes. It refuses a backing file outside the pool, a chain that is too deep and an image with a backing file where a flat one is needed.
+- Children get an argv list, never a shell.
 
 ### Archive pools
 
-An archive pool is a cluster-wide namespace, `archive://<pool>/<path>`, over member directories declared in each node's `prism.toml`. In standalone mode it is simply one or more local directories.
+An archive pool is a cluster-wide namespace of files, such as `isos/debian-12.iso`, over member directories declared in each node's `prism.toml` (`[archive_members.<name>]` with `pool`, `path`, `weight` and `reserve`). In standalone mode it is one or more local directories.
 
-**Replicated index:**
+The replicated state holds the pool (name and replica count, 1 to 3), its members (node, path, weight, reserve, state `active`, `disabled` or `draining`) and the files (path, size, BLAKE3, kind, replica list). Free space per member is runtime state.
 
-- `files(id, pool, path, size, blake3, kind, created)`
-- `replicas(file_id, member_id, state: pending | ok | missing | corrupt)`
-- `members(id, node, path, weight, reserve, state: active | draining | disabled)`
+Placement stores each file whole on one member. Prism picks two active members at random, weighted by `weight x (free - reserve)`, and takes the better one ("power of two choices"). Members that would drop below their `reserve` are excluded. Extra replicas go on other nodes.
 
-Free space per member is runtime state, reported by each node.
+Writing a file:
 
-**Placement.** Each file is stored whole on one member. Prism picks two members at random, weighted by `weight × free`, and takes the better one ("power of two choices"); members below their `reserve` are excluded. Optional replicas (default 1 copy) go on distinct nodes. Users can pin a file to a member or tag.
-
-**Writing a file:**
-
-1. Stream into `<member>/.prism-partial/<upload-id>` while hashing with BLAKE3.
+1. Stream into `<member>/.prism-partial/` while hashing with BLAKE3.
 2. fsync, then rename into place.
-3. Commit `AddFile` to the index.
-4. Fill extra replicas in the background over the data plane.
+3. Commit the file record to the replicated index.
+4. Fill extra replicas in the background (an `archive.repair` task).
 
-**Lifecycle and health:**
+Health runs every 5 minutes:
 
-- **Member offline:** its files return 503 `replica_unavailable`. After a 24 h grace period, under-replicated files are copied elsewhere.
-- **Draining:** a mover task copies files off, commits each replica swap, then deletes the source.
-- **Rebalancing:** an optional task moves files from members above the pool's mean fill toward lighter ones.
-- **Scrub:** weekly BLAKE3 re-hash; corrupt replicas are marked and repaired from a good copy.
-- **Quotas:** optional per-pool byte limit; capacity is reported per member and per pool.
+- A node that has been offline for 24 hours no longer counts toward a file's replicas, and repair copies the file elsewhere. Until then a download from an offline replica answers 502 or 503 `replica_unavailable`.
+- Drain copies files off a member, deletes the source copies and then disables the member.
+- Rebalance runs daily and moves up to 20 files per pass from members more than 10 percentage points above the pool's mean fill.
+- Scrub re-hashes every replica on every node once a week and repairs bad or missing copies from a good one. The schedule is replicated (feature level 3) so it survives restarts and leader changes.
 
 ### Moving files between nodes
 
-- **Uploads through any node:** tus-compatible resumable `POST /api/v1/uploads`, `PATCH` with `Upload-Offset`, `HEAD` for the current offset. `Upload-Length` is required and its space is reserved at `POST`; idle partial uploads are deleted after 24 h. The receiving node streams chunks to the chosen member's node over the data plane.
-- **Downloads:** `GET` with `Range`, proxied from a healthy replica, served as an attachment (see [Threat model](#threat-model-and-security), S10).
-- **Integrity:** the BLAKE3 in the replicated index is the trust anchor. Prism verifies it before restore, import or attach.
-- **Move or copy** between pools or members runs as a task with resumable offsets and end-to-end BLAKE3.
+- Uploads go through any node as one streamed `PUT`. The receiving node forwards the stream to the chosen member's node. There is no resumable upload protocol.
+- Downloads are `GET` with `Range`, served by a node that holds a replica, as an attachment (see [Threat model](#threat-model-and-security), S10).
+- The BLAKE3 in the replicated index is the trust anchor, checked by scrub and before an archive ISO is attached or a backup is restored.
 
 ### ISOs used by a VM on another node
 
-The attach task fetches the ISO into the host's content-addressed cache, `cache/blake3/<hash>`, verifies it, then attaches it. The cache is refcounted by attached VMs and evicted LRU. If a replica already sits on the host, it is attached in place. Streaming over remote NBD was rejected: guest I/O would then depend on another node staying up.
+Attaching an archive ISO fetches it once into a hidden cache volume `archive-<hash>.iso` in the VM's pool, verifies the hash, and attaches the local copy, so guest I/O never depends on another node. Each pool keeps at most 32 GiB of cached ISOs. An hourly sweep removes the least recently used ones that no VM uses and that were not touched in the last 10 minutes. Streaming over remote NBD was rejected for the same dependency reason.
 
 ### Backups
 
-Backups are written locally by libvirt (see [Live operations](#backups-1)), then streamed into any archive pool chosen by the user. A backup directory can therefore hold any node's VMs. Each backup set records the VM spec, its chain (full + incrementals) and checksums, so it can be restored on any node. Data from any VM may rest on any node with an archive member, so use LUKS on such nodes.
+Backups are written to staging in the pool of the VM's first disk by libvirt, then streamed into the archive pool the caller chooses, so a backup directory can hold any node's VMs. Each backup records the VM spec, its parent and the BLAKE3 of every disk file, so it can be restored on any node as a new VM. Data from any VM may rest on any node with an archive member, so use LUKS on such nodes.
 
 ## Live operations
 
-Migration, snapshots and backups all run while the VM keeps running. The only pause is QEMU's final switchover, capped at 300 ms for migration. Each operation is a task with SSE progress and cancellation.
+Migration, snapshots and backups run while the VM keeps running. Each operation is a task with progress and cancellation. Migration sets QEMU's maximum downtime to 300 ms.
 
 | Operation | Guest pause | Mechanism |
 | --- | --- | --- |
-| Live migration (local disks) | Typically 50–300 ms switchover | Managed V3 migration, NBD disk mirror, data-plane tunnel |
-| Disk-only snapshot | Effectively none (ms with fsfreeze) | Atomic `blockdev-snapshot` transaction |
-| Snapshot with memory | About 0.1–1 s, scales with dirty rate | External memory file written live, then a final pause |
-| Snapshot delete | Milliseconds at pivot | `SNAPSHOT_DELETE` or block commit + pivot |
-| Backup (full or incremental) | None; optional fsfreeze < 1 s | `BACKUP_BEGIN` push mode + checkpoints |
-| Cold move | VM is off | Sparse extent copy |
+| Live migration (local disks) | Up to 300 ms switchover | Managed V3 migration, NBD disk mirror, data-plane splice |
+| Snapshot | Effectively none for disks only; longer with memory | `SNAPSHOT_CREATE_XML` external snapshot, `QUIESCE` when the agent is up |
+| Snapshot revert and delete | Metadata and overlay merge | libvirt's native external snapshot support (libvirt 9.9 or later) |
+| Backup (full or incremental) | None | `BACKUP_BEGIN` push mode with checkpoints |
+| Cold move | VM is off | Sparse extent copy over the data plane |
 
 ### Live migration with local disks
 
-Prism does not use libvirt peer-to-peer migration, which would need libvirt-to-libvirt connectivity. Instead it re-implements libvirt's client-side V3 managed migration, holding one local libvirt connection on each node and coordinating over gRPC.
+Prism does not use libvirt peer-to-peer migration, which would need libvirt-to-libvirt connectivity. It re-implements libvirt's client-side V3 managed migration, holding one local libvirt connection on each node and coordinating over the mesh.
 
-1. **Pre-flight:** check the CPU baseline and machine type, destination memory (above the balloon floor) and disk space. Refuse VMs with VFIO devices. Commit the `Migrating{src, dst}` intent. Save the snapshot and checkpoint XML, then delete that metadata on the source with `SNAPSHOT_DELETE_METADATA_ONLY` / `CHECKPOINT_DELETE_METADATA_ONLY`, because `Begin3` refuses a domain with snapshots. An abort redefines it on the source.
-2. **Prepare disks:** copy the read-only backing chain recorded in state to the destination, then pre-create the top images with `qemu-img create` at the same virtual size.
-3. **Begin:** `src.Begin3Params` returns a cookie and the domain XML.
-4. **Prepare:** `dst.Prepare3Params` starts the destination QEMU listening on `/run/prism/mig/<id>/mem.sock`, and libvirt's NBD server on `nbd.sock`.
-5. **Tunnel:** the source Prism listens on the **same paths** locally and splices each connection over the WireGuard data plane to the real sockets. This is the contract libvirt documents for `disks_uri`.
-6. **Perform:** `src.Perform3Params` with `LIVE | PERSIST_DEST | UNDEFINE_SOURCE | NON_SHARED_INC | AUTO_CONVERGE | ABORT_ON_ERROR`, `migrate_uri=unix://…/mem.sock`, `disks_uri=unix://…/nbd.sock` and `migrate_disks`. `MIGRATE_SET_MAX_DOWNTIME` is 300 ms.
-7. **Finish and confirm:** `dst.Finish3Params`, then `src.Confirm3Params`, replicating libvirt's success and failure matrix exactly.
-8. **Commit:** redefine snapshot and checkpoint metadata on the destination with `REDEFINE`, using the snapshot and checkpoint XML Prism saved before `Begin3Params`, since libvirt does not migrate it. Commit `owner_epoch + 1` for the destination and clear the intent, push FDB updates, then send QMP `announce-self`.
+1. Pre-flight: the VM must be running, in a cluster, with no CD-ROM media inserted and no other task running. Prism commits the `migrating {src, dst}` intent. It exports the snapshot and checkpoint XML and deletes that metadata on the source, because `Begin3` refuses a domain with snapshots. An abort redefines it on the source.
+2. Prepare disks: Prism sends the read-only backing layers and any saved memory images over the data plane, and the destination pre-creates the top images with `qemu-img create` at the same virtual size.
+3. Begin: `src.Begin3Params` returns a cookie and the domain XML.
+4. Prepare: `dst.Prepare3Params` starts the destination QEMU listening on `/run/prism/mig/<id>/mem.sock`, and libvirt's NBD server on `nbd.sock`.
+5. Tunnel: the source Prism listens on the same paths locally and splices each connection over the WireGuard data plane to the real sockets. This is the contract libvirt documents for `disks_uri`.
+6. Perform: `src.Perform3Params` with `LIVE | PERSIST_DEST | UNDEFINE_SOURCE | NON_SHARED_INC | AUTO_CONVERGE | ABORT_ON_ERROR | CHANGE_PROTECTION`, plus `POSTCOPY` when the request asks for it, and `migrate_disks` naming the disks. Max downtime is 300 ms.
+7. Finish and confirm: `dst.Finish3Params`, then `src.Confirm3Params`.
+8. Commit: Prism redefines the snapshot metadata on the destination, commits `owner_epoch + 1` for the destination, and clears the intent.
 
 ```mermaid
 sequenceDiagram
@@ -956,8 +820,8 @@ sequenceDiagram
     participant SL as Source libvirt
     participant DP as Destination Prism
     participant DL as Destination libvirt
-    SP->>DP: Pre-flight checks, commit Migrating intent
-    SP->>DP: Copy the recorded backing chain over the data plane
+    SP->>DP: Pre-flight checks, commit migrating intent
+    SP->>DP: Copy backing layers over the data plane
     DP->>DP: qemu-img create top images
     SP->>SL: Begin3Params
     SL-->>SP: Cookie and domain XML
@@ -967,97 +831,93 @@ sequenceDiagram
     SP->>SP: Listen on the same paths, splice to data plane port 7444
     SP->>SL: Perform3Params
     Note over SL,DL: RAM and disk mirror stream through the WireGuard data plane
-    SL-->>SP: Job stats and MIGRATION_ITERATION events
     SP->>DP: Finish
     DP->>DL: Finish3Params, guest resumes on destination
     SP->>SL: Confirm3Params
-    DP->>DP: Redefine snapshot and checkpoint metadata
+    DP->>DP: Redefine snapshot metadata
     SP->>DP: Commit owner_epoch + 1, clear intent
-    DP->>DP: Push FDB, announce-self
 ```
 
-Details:
+Postcopy is opt-in per request (`postcopy: true`). When it is set and pre-copy does not converge, libvirt switches to postcopy, and from then on the destination always wins. If a migration fails and the source cannot resume, the task reports it, and the source is never resumed once the destination may run the guest. A failed pre-flight or abort removes the destination images and domain and clears the intent.
 
-- **Progress:** `GET_JOB_STATS` every second plus `MIGRATION_ITERATION` events give remaining RAM, dirty rate and a downtime estimate.
-- **Postcopy:** opt-in per task. Prism calls `MIGRATE_START_POST_COPY` if the dirty rate outpaces bandwidth, and uses `POSTCOPY_RESUME` (libvirt ≥ 8.5) after a network failure. Once postcopy starts, the guest runs on the destination before `Finish3` while the source still holds part of its RAM. From then on, recovery and the reconciler never resume the source or kill either side; Prism only retries `POSTCOPY_RESUME`, and the intent stays until it succeeds.
-- **Multifd:** for 25 GbE and faster, `parallel.connections` opens one data-plane stream per channel.
-- **Crash safety:** the migration phase is persisted. A restarted Prism asks the peer whether `Finish3` completed. If the destination domain is running, Prism kills the source; otherwise it kills the destination and resumes the source. While the peer is unreachable, the source stays paused, because resuming it could run the guest twice. After a postcopy switchover the destination always wins (see Postcopy).
-- **Splice sockets:** they live in a 0700 root directory under `/run/prism/mig`, labelled `svirt_socket_t`. Each accept checks `SO_PEERCRED` against the domain's QEMU PID, accepts 1 + multifd connections, then unlinks the socket. If labelling fails, the migration fails with a remediation message; there is no loopback-TCP fallback.
-- **Pre-flight failure leaves nothing behind:** destination images and domains are removed and the intent is cleared on abort.
+The splice sockets sit under `/run/prism/mig/<id>/` with mode 0777 so that QEMU's user can use them; see S18 in the threat table.
 
 ### Cold move
 
-The VM is shut off. Prism copies the whole disk chain using `SEEK_DATA` / `SEEK_HOLE` sparse extents, lz4 framing and per-extent BLAKE3, over the data plane. A per-extent manifest in `node.db` makes the copy resumable. It then commits the ownership change, defines the VM on the destination and deletes the source.
+The VM is shut off. Prism copies every disk and snapshot file to a pool on the destination over the data plane, as sparse extents (holes skipped) with a BLAKE3 over the data. It then commits the ownership change with `owner_epoch + 1`, defines the VM on the destination, and deletes the source files.
 
 ### Snapshots
 
-- Created with `SNAPSHOT_CREATE_XML` and `LIVE`, as external snapshots: disk overlays, plus an external memory file when memory is included.
-- `QUIESCE` (guest-agent fsfreeze) is used for disk-only snapshots when the agent is up.
-- Guest-agent calls use `DOMAIN_AGENT_SET_RESPONSE_TIMEOUT`, and `FSTHAW` always runs in a finally path, so an unresponsive guest cannot stay frozen.
-- **Delete:** native `SNAPSHOT_DELETE` on libvirt ≥ 9.0. On older libvirt: `BLOCK_COMMIT(ACTIVE)`, wait for `BLOCK_JOB_2` READY, `BLOCK_JOB_ABORT(PIVOT)`, then delete the metadata only.
-- **Revert** of a running VM asks for typed confirmation in the UI.
-- Snapshots form a tree, and the chain is shown as one in the UI.
-- **Known issue, memory-snapshot revert after a move.** Two libvirtd segfaults were seen on a testbed node when reverting a memory snapshot after a cold move. Re-testing with a real Ubuntu cloud-image guest (memory snapshots taken before and after moves, round trips between both nodes, revert of each) did not reproduce it. If it recurs, capture `coredumpctl` output; the mitigation to apply is to refuse reverting a memory snapshot on a moved VM unless the caller confirms discarding its memory state. No guard is in place today. Separately, live migration of a VM that has snapshots fails when the cloud-init seed image is missing from the destination pool.
+- Created with `SNAPSHOT_CREATE_XML` as external snapshots: disk overlays, plus an external memory file when memory is included. When the guest agent is up, Prism asks for `QUIESCE` and retries without it if the agent fails.
+- After every create, revert or delete, Prism re-reads each disk's active layer and backing chain, so the next domain definition never points at a stale layer.
+- Revert and delete use libvirt's native external snapshot support and need libvirt 9.9 or later. Older versions answer an error; there is no block-commit fallback.
+- Reverting to a memory snapshot of a VM that has moved between nodes needs `confirm_memory=true`. Without it the API answers 409 and the UI asks for confirmation. libvirtd crashed twice on a testbed node on such a revert. A later re-test with a real Ubuntu cloud-image guest did not reproduce it, and the guard stays.
+- Live migration of a VM with snapshots fails when the cloud-init seed image is missing from the destination pool.
 
 ### Backups
 
-1. Optional `FSFREEZE` through the guest agent.
-2. `BACKUP_BEGIN` in push mode to local staging, with a new checkpoint (a persistent dirty bitmap). Incremental backups reference the previous checkpoint (libvirt ≥ 7.6, QEMU ≥ 6.1).
-3. `FSTHAW` as soon as the call returns, in a finally path that also runs on error or timeout.
-4. On `JOB_COMPLETED`, stream the result into the chosen archive pool on any node, then clear staging.
+1. A running VM gets a `BACKUP_BEGIN` in push mode to local staging, with a new checkpoint (a persistent dirty bitmap). Incremental backups reference the newest earlier backup whose checkpoint still exists (libvirt 7.6 or later, QEMU 6.1 or later). A stopped VM has its disk chains flattened into a full backup.
+2. When the job completes, Prism streams each image into the chosen archive pool as `backups/<vm>/<backup id>/<device>.qcow2`, then clears staging.
+3. Restore always creates a new VM. For an incremental backup it fetches the whole chain, verifies each hash and flattens the layers into the target pool.
 
-After a migration, the next backup is a full one, because checkpoint bitmaps are not guaranteed to survive non-shared-disk migration. Restore creates a new VM on any node, or replaces the VM in place.
+Backups cover disks only. There is no schedule or retention policy, and the UI has no backup page; backups are an API feature.
 
 ### Tasks
 
-- Every long operation is a task with a UUIDv7 ID, stored in the executing node's `node.db`.
-- States: `Pending → Running → Succeeded | Failed`, with `Cancelling` in between.
-- Progress fields: phase, bytes done and total, rate, and for migrations dirty rate and downtime estimate. Published as SSE `task.progress`.
-- Cancel maps to `ABORT_JOB` or `BLOCK_JOB_ABORT`. On restart, Prism recovers running tasks by inspecting libvirt's job state.
+- Every long operation is a task with a UUIDv7 ID, stored in the executing node's `node.db` and kept for 7 days.
+- States are `running`, `succeeded`, `failed` and `cancelled`. A task has a progress fraction, a message, an error and a result.
+- Tasks are published as SSE `task.progress`. `POST /tasks/{id}/cancel` stops a running task; cancellation aborts the libvirt job where there is one.
+- Only one task runs per VM or per archive pool at a time.
+
+### AppArmor handling
+
+On hosts where libvirt confines QEMU with AppArmor (Ubuntu does), `prism serve` writes two rules at start and logs a warning when it cannot.
+
+- `/etc/apparmor.d/abstractions/libvirt-qemu.d/prism` holds `/run/prism/mig/** rw,` so QEMU can use the migration sockets. Prism writes it only when the `libvirt-qemu` abstraction exists.
+- A block between `# BEGIN prism pools` and `# END prism pools` in `/etc/apparmor.d/local/usr.lib.libvirt.virt-aa-helper` lets libvirt's profile generator read each pool directory, which a VM with a backing file or snapshot layer needs. Prism rewrites only its own block, reloads the profile with `apparmor_parser -r` and updates the block when pools change.
 
 ## Networking
 
-Every VM network is a Prism **switch**: a cluster-wide L2 segment built from a Linux bridge on each node, joined by a VXLAN overlay that runs inside the WireGuard mesh. A switch's egress node is chosen per switch and can be overridden per NIC, so a VM on host-a can send all its traffic out host-b's network.
+Every VM network is a Prism network: a cluster-wide L2 segment built from a Linux bridge on each node, joined by a VXLAN overlay that runs inside the WireGuard mesh. A network's egress node can be set per network and overridden per NIC, so a VM on host-a can send all its traffic out host-b's uplink. A fresh node creates a network named `default`.
 
-### Switch types
+### Network types
 
 | Type | Use | Egress |
 | --- | --- | --- |
-| `isolated` | Internal VM-to-VM traffic only | None |
-| `nat` | Host (NAT) networking | Masquerade out of the egress node's uplink |
-| `bridged` | VMs directly on a physical LAN | The uplink node's physical NIC or host bridge |
+| `nat` | Internet access | Masquerade out of the egress node's uplink |
+| `isolated` | VM-to-VM traffic only | None |
 
-A **physical network** is a node-local uplink (an existing bridge, NIC or VLAN sub-interface) that a `bridged` or `nat` switch uses on its egress node. Standalone nodes use the same model without VXLAN.
+A NIC can instead join an existing host bridge (a plain QEMU attachment that Prism does not manage) or use user-mode networking through `passt`. Bridged switches, a host-bridge creation wizard and hidden per-NIC child switches from the original design were not built. `GET /nodes/{node}/bridges` lists the host bridges a NIC can use.
 
 ### Data plane on each node
 
-For every switch, each node creates:
+For every network, each node creates:
 
-- a bridge `ps<id>` with `vlan_filtering=1`, STP off and multicast snooping off;
-- a VXLAN device `vx<id>` with the switch's VNI, `dstport 4789`, `nolearning`, and local address = the node's IPv6 mesh address.
+- a bridge `ps<vni>` with VLAN filtering on, STP off and multicast snooping off;
+- a VXLAN device `vx<vni>` with the network's VNI, UDP port 4789, no learning and the node's IPv6 mesh address as the local address.
 
-Forwarding uses unicast FDB entries, no multicast: one all-zeros entry per remote node for broadcast replication, and one entry per remote VM MAC, each with `dst` = that node's IPv6 mesh address. Prism reconciles them from replicated state over rtnetlink. Devices are created on every node in advance, so live migration never waits for setup. Prism's own devices are not persisted; it rebuilds them at boot.
+Forwarding uses unicast FDB entries, no multicast: one all-zeros entry per remote node for broadcast replication, and one entry per remote VM MAC pointing at that node's mesh address. Prism reconciles them from replicated state over rtnetlink.
 
-- **VNIs:** allocated by the leader from 100000–999999, with a 24 h cooldown before reuse.
-- **MTU:** switch MTU = min(1500, W − 70), where W is the cluster's `wg-prism` MTU (default 1420): 1350 by default, 1500 with jumbo frames (see [MTU](#mtu)). It is pushed through the XML `<mtu>` element and DHCP option 26.
+- VNIs are allocated from 100000 to 999999. A deleted network's VNI is not reused for 24 hours.
+- The network MTU is min(1500, W - 70) with W the `wg-prism` MTU (1350 by default), 4 B less with VLANs. It reaches guests through the XML `<mtu>` element and DHCP option 26.
 
-### Egress per switch and per NIC
+### Egress per network and per NIC
 
-On a `nat` switch, each egress node in use holds a gateway VIP on `ps<id>` and masquerades through nftables, only out of its uplink (`oifname <uplink>`). The DHCP reply for a NIC names the VIP of that NIC's effective egress node as its router.
+Each node holds one gateway address on every network's bridge. The DHCP reply for a NIC names as its router the gateway of its effective egress node: the NIC's `egress`, else the network's `egress`, else the node the VM runs on. The egress node masquerades through nftables, only out of its uplink (the interface of its default route).
 
-VM1 on host-a with egress override host-b therefore sends its traffic over the overlay to host-b's VIP, and host-b NATs it out. Return traffic comes back over L2 to VM1. VM1 stays L2-adjacent to everything else on the switch, and no `ip rule` is needed.
+VM1 on host-a with egress override host-b sends its traffic over the overlay to host-b's gateway address, and host-b NATs it out. Return traffic comes back over L2. VM1 stays L2-adjacent to everything else on the network, and no `ip rule` is needed.
 
 ```mermaid
 flowchart TB
     subgraph HA["host-a"]
         vm1["VM1<br/>egress override: host-b"]
-        vm2["VM2<br/>egress: switch default"]
-        bra["bridge ps1a2b + vx1a2b<br/>VIP 10.20.0.1, default gateway"]
+        vm2["VM2<br/>egress: network default"]
+        bra["bridge ps100001 + vx100001<br/>gateway 10.88.0.1"]
         nata["nftables masquerade"]
     end
     subgraph HB["host-b"]
-        vm3["VM3<br/>egress: switch default"]
-        brb["bridge ps1a2b + vx1a2b<br/>VIP 10.20.0.2, host-b gateway"]
+        vm3["VM3<br/>egress: network default"]
+        brb["bridge ps100001 + vx100001<br/>gateway 10.88.0.2"]
         natb["nftables masquerade"]
     end
     upa(["Network at host-a"])
@@ -1073,54 +933,49 @@ flowchart TB
     linkStyle 0,4,6,7 stroke-width:4px
 ```
 
-Thick edges are VM1's outbound path. Replies are un-NATed on host-b and return over the same overlay, while VM2 and VM3 keep using host-a's gateway (`10.20.0.0/24` is an example guest subnet on the switch).
+Thick edges are VM1's outbound path. VM2 and VM3 keep using their own node's gateway (`10.88.0.0/24` is an example subnet). Static-IP guests must set the matching gateway themselves; cloud-init does this automatically.
 
-- **Bridged switches:** exactly one node may bridge a VNI to a given physical LAN, or the LAN gets an L2 loop. A per-NIC override on a bridged switch becomes a hidden child switch with its own VNI, and the UI warns that the NIC leaves the parent's L2 segment. A bridged switch on the management LAN puts guests on the trusted network: the wizard warns, and it refuses without `--i-know` to enslave the interface that carries the HTTP listen address or the `wg-prism` underlay route.
-- **Static-IP guests** must set the matching gateway themselves; cloud-init does this automatically.
-- **Failover:** the egress role is a lease with a 10 s TTL in replicated state. A holder that loses quorum for 5 s withdraws its VIP and detaches its uplink (self-fencing). The next node in the switch's ordered backup list takes the VIP, then sends gratuitous ARP, unsolicited NA and RARP for every VM MAC. NAT connections reset.
+There is no egress failover. If the egress node of a network is down, guests that use it lose outbound traffic until someone changes `egress`.
 
-### Internal switches and VLANs
+### Isolated networks and VLANs
 
-- An `isolated` switch has no VIP or uplink; it spans every node through the overlay.
-- An optional `private` flag sets the bridge-port `isolated` flag so VMs reach only the gateway.
-- **VLANs:** a switch carries 802.1Q tags inside its VNI. Each NIC is an access port (one VID) or a trunk (a list). The tag adds 4 B inside the VNI, so a switch with VLANs gets an MTU 4 B lower: 1346 at the default W. libvirt's `<vlan>` element does not work on plain Linux bridges, so Prism programs bridge VLANs over netlink when the tap appears. A NIC is an access port (`vlan`) or a trunk (`trunk` = tagged VIDs, `vlan` = native). `PUT /vms/{id}/nics/{nic}/vlans` edits both on a running VM; the reconciler reprograms the port. A VLAN without a subnet has no gateway or DHCP, so its guests use static addresses.
-- **VLAN subnets:** a network can give a VLAN its own subnet (`vlan_subnets`, keyed by VID, in the replicated network document). Each node then creates a VLAN interface `ps<vni>.<vid>` on the bridge, which the kernel adds to the bridge's own VLAN table. The interface holds that node's gateway address (the lowest free address of the subnet, one per member, allocated like the network's own gateways) and runs a DHCP and DNS server bound to it. The reconciler adds a masquerade rule, an input rule and a forward policy for the interface, the same as for the bridge. Forwarding between a VLAN and any other segment is dropped, so VLANs stay separate. IPAM is per VLAN: a NIC leases from the subnet of its access (or native) VLAN, and a NIC that changes VLAN gets a new address. A new VLAN subnet moves the NICs already on that VLAN into it. A subnet cannot change or disappear while a NIC is on the VLAN. Subnets cannot overlap each other, another network or a host route. IPv6 stays on the default segment. `POST /networks/{id}/vlans` adds a subnet (a free `/24` when the request names none), `DELETE /networks/{id}/vlans/{vlan}` removes it and `GET /networks/{id}/vlan-suggestion` returns the subnet the next VLAN would get.
-- **MACs and IPs:** MACs come from a Prism prefix, assigned centrally. IPAM gives each NIC a static lease on DHCP-managed switches.
+- An `isolated` network has no gateway or uplink and spans every node through the overlay.
+- A network carries 802.1Q tags (2 to 4094) inside its VNI. Each NIC is an access port (`vlan`), a trunk (`trunk` lists tagged VIDs, `vlan` is the native VLAN) or on the untagged default segment. The tag adds 4 B inside the VNI. libvirt's `<vlan>` element does not work on plain Linux bridges, so Prism programs bridge VLANs over netlink when the tap appears. `PUT /vms/{id}/nics/{nic}/vlans` edits both on a running VM, and the reconciler reprograms the port.
+- A VLAN without a subnet has no gateway or DHCP, so its guests use static addresses.
+- A VLAN subnet gives a VLAN its own address range (`vlan_subnets`, keyed by VID, in the network document). Each node creates a VLAN interface `ps<vni>.<vid>` on the bridge that holds that node's gateway address in the subnet and runs DHCP and DNS bound to it. The agent adds a masquerade rule, an input rule and a forward policy for the interface, as for the bridge. Forwarding between a VLAN and any other segment is dropped. IPAM is per VLAN: a NIC leases from the subnet of its access (or native) VLAN, and a NIC that changes VLAN gets a new address. A subnet cannot change or disappear while a NIC is on the VLAN, and subnets cannot overlap each other, another network or a host route. IPv6 stays on the default segment.
+- MACs are random in the `52:54:00` range when a NIC is created. IPAM gives each NIC a static lease on DHCP networks.
 
 ### DHCP, DNS and NAT are embedded
 
-libvirt networks are host-local and need the dnsmasq binary, which breaks the cluster-wide IPAM and the static-binary goal. Prism embeds:
+libvirt networks are host-local and need dnsmasq, which breaks cluster-wide IPAM and the static-binary goal. Prism embeds:
 
-- **DHCP** (dhcproto): each node answers only for MACs of VMs running on it, from IPAM leases. Sockets are bound per VIP with `SO_BINDTODEVICE` on `ps<id>`. There are no duplicate offers over the overlay and no lease handover on migration. Options 1, 3, 6, 15, 26 and 121.
-- **DNS** (hickory-proto): authoritative for `<vm>.<switch>.prism`, with records only from VM names, forwarding everything else to the host's resolvers. `.ts.net`, management search domains and `100.100.100.100` are never forwarded by default.
-- **NAT and filtering:** a minimal in-house nftables layer over netlink owns only the tables `inet prism` (prerouting, input, forward, output), `ip prism-nat` and `bridge prism`. It is validated in CI against `nft -j list ruleset`. `prism doctor` flags Docker or firewalld rules that drop forwarded traffic.
+- DHCP (dhcproto): each node answers only for the MACs of VMs running on it, from IPAM leases, so there are no duplicate offers over the overlay and no lease handover on migration. It sets the router, DNS server, domain, MTU (option 26) and classless routes (option 121).
+- DNS (hickory-proto): authoritative for `<vm>.<network>.prism` with A and AAAA records, forwarding everything else to the host's resolvers. `ts.net` names are never forwarded. The sockets are bound to the bridge with `SO_BINDTODEVICE`.
+- NAT and filtering: an in-house nftables layer over netlink owns only the tables `inet prism` (prerouting, input, forward, output), `ip prism-nat`, `ip6 prism-nat` and `bridge prism`. `prism leave` removes them.
 
-### IPv6 on switches
+### IPv6 on networks
 
-A switch can carry IPv6 next to IPv4. The network document holds `subnet6`, a ULA /64, and `nat66`. Both are absent on switches stored before IPv6 existed, so those stay IPv4-only until someone turns IPv6 on. New switches get IPv6 on by default.
+A network carries IPv6 next to IPv4 by default. The network document holds `subnet6`, a ULA /64, and `nat66`. Both are absent on networks stored before IPv6 existed, so those stay IPv4-only until someone turns IPv6 on with `PATCH /networks/{id}`.
 
-- **Prefix:** the node that creates the switch picks `fd` plus 40 random bits and a random 16-bit subnet ID, and retries when the result overlaps another switch, the mesh /48 or a prefix the host already routes. The state machine rejects an overlap again when it applies the command, and checks that the prefix is a /64 inside `fc00::/7`.
-- **Addresses:** guests autoconfigure from router advertisements (SLAAC). Prism takes the modified EUI-64 address of each NIC's MAC as the guest's address, which is what Linux forms by default. Each node also holds one address in the /64, built from the low 64 bits of its node ID, plus a link-local address derived the same way. The node's /64 address is the guest's DNS server and the source of forwarded connections.
-- **Router advertisements:** `prism_net::ra` sends from a raw ICMPv6 socket bound to the bridge's link-local address. Each advertisement carries the prefix (on-link, autonomous), the MTU, the node's address as RDNSS, the switch domain as DNSSL and the bridge's MAC. It repeats every 120 seconds and answers router solicitations at most once every 3 seconds. The router lifetime is 1800 seconds on a node that routes the switch and zero on the others, which still advertise the prefix. A node routes a NAT switch when NAT66 is on, the host has an IPv6 default route and the node is the switch's egress node or the switch has none.
-- **DNS:** the zone gets an AAAA record for every guest with an address, and the same zone is served on the node's /64 address as well as the IPv4 VIP.
-- **NAT66:** `ip6 prism-nat` masquerades traffic from the /64 that leaves through the IPv6 default-route interface. The table is replaced on every pass, so turning NAT66 off removes the rule. Enabling IPv6 forwarding makes the kernel ignore router advertisements, so Prism first sets `accept_ra=2` on that interface to keep the host's own default route.
-- **Filtering:** the `inet prism` forward chain drops traffic from `ps*` to anything but the uplinks, to `fd7a:115c:a1e0::/48` and to members' IPv6 endpoints, as it does for IPv4. Isolated switches forward nothing. In `bridge prism`, a tap on an IPv6 switch may send only from its own address, a link-local address or `::`. Neighbour advertisements may not claim another address of the /64, and redirects are dropped. Guests that pick another interface identifier, such as stable-privacy addresses from NetworkManager, lose IPv6 until they use EUI-64. `allow_prefixes` stays IPv4-only.
-- **Port forwards:** a forward without a `host_addr`, or with an IPv4 one, targets the NIC's lease. With an IPv6 `host_addr` it targets the guest's SLAAC address, so nobody enters a guest address by hand. The `ipv6` field on a NIC is an override that is honoured only on a switch without IPv6.
+- The node that creates the network picks `fd` plus 40 random bits and a random 16-bit subnet ID, and retries when the result overlaps another network, the mesh /48 or a prefix the host routes. The state machine rejects an overlap again on apply.
+- Guests autoconfigure from router advertisements (SLAAC). Prism takes the modified EUI-64 address of each NIC's MAC as the guest's address, which Linux forms by default (`nic_ipv6` in the VM view). Each node holds one address in the /64, built from its node ID, and the DNS server listens on it.
+- `prism_net::ra` sends advertisements from a raw ICMPv6 socket bound to the bridge's link-local address every 120 seconds and answers router solicitations at most once every 3 seconds. Each carries the prefix, the MTU, the node's address as RDNSS and the network domain as DNSSL. The router lifetime is 1800 seconds on a node that routes the network and zero on the others. A node routes a NAT network when NAT66 is on, the host has an IPv6 default route and the node is the egress node or the network has none.
+- NAT66 masquerades traffic from the /64 that leaves through the IPv6 default-route interface. Enabling IPv6 forwarding makes the kernel ignore router advertisements, so Prism first sets `accept_ra=2` on that interface. On `ps*` bridges with IPv6 it sets `accept_ra=0` and `autoconf=0`.
+- Filtering matches IPv4: the forward chain drops traffic from `ps*` to anything but the uplinks, to `fd7a:115c:a1e0::/48` and to members' IPv6 endpoints. In `bridge prism`, a tap on an IPv6 network may send only from its own SLAAC address, a link-local address or `::`, and neighbour advertisements may not claim another address of the /64. Guests that pick another interface identifier, such as stable-privacy addresses from NetworkManager, lose IPv6 until they use EUI-64. `allow_prefixes` is IPv4-only.
 
 ### Guest isolation rules
 
 Guests are untrusted (see [Threat model](#threat-model-and-security)), so Prism generates these rules from IPAM and membership:
 
-- **Input:** from `ps*`, accept only UDP 67, UDP/TCP 53 to the VIP, ICMP echo, ICMPv6 neighbour discovery and established traffic, with a per-tap `limit rate`, then drop. Guests can never reach the API, gRPC or the data plane on any host address.
-- **Forward:** drop `ps*` traffic to `wg-prism`, `tailscale0`, the mesh /48, `100.64.0.0/10`, `fd7a:115c:a1e0::/48` and `@node_addrs` (every member's `advertise` and HTTP addresses). A per-switch `allow_prefixes` opts back in.
-- **Bridge (`bridge prism`):** on `pn*` ports, require the NIC's MAC as ether source and its lease as ARP/IP source (`0.0.0.0` allowed for DHCPDISCOVER). Drop UDP source port 67 and ICMPv6 type 134 (rogue DHCP and router advertisements). On a switch with IPv6, also require the NIC's SLAAC address, a link-local address or `::` as IPv6 source, and drop neighbour advertisements that claim another address of the /64. Drop 802.1Q/802.1ad ingress on access ports and 802.1ad on trunks. Learning is off and the FDB is static. A per-NIC `trusted = true` opts out for router and appliance VMs.
-
+- Input: from `ps*`, accept only UDP 67, UDP and TCP 53 to the gateway address, ICMP echo, ICMPv6 neighbour discovery and established traffic, then drop. Guests cannot reach the API, gRPC or the data plane on any host address.
+- Forward: drop `ps*` traffic to `wg-prism`, the mesh /48, `100.64.0.0/10`, `fd7a:115c:a1e0::/48` and the members' advertised and HTTP addresses. A per-network `allow_prefixes` (at most 16 IPv4 prefixes) opts back in.
+- Bridge (`bridge prism`): on each guest tap, require the NIC's MAC as ether source and its lease as ARP and IP source (`0.0.0.0` allowed for DHCPDISCOVER). Drop UDP source port 67 and ICMPv6 type 134 (rogue DHCP and router advertisements). On an IPv6 network, also require the NIC's SLAAC address, a link-local address or `::` as IPv6 source. Drop 802.1Q and 802.1ad ingress on access ports. There is no opt-out for router or appliance VMs.
 
 ### VM attachment
 
 ```xml
 <interface type='bridge'>
-  <source bridge='ps1a2b'/>
+  <source bridge='ps100001'/>
   <target dev='pn<nicid>'/>
   <mac address='52:54:00:…'/>
   <model type='virtio'/>
@@ -1129,137 +984,91 @@ Guests are untrusted (see [Threat model](#threat-model-and-security)), so Prism 
 </interface>
 ```
 
-The deterministic tap name lets Prism match each tap to its NIC for VLAN programming.
+The deterministic tap name lets Prism match each tap to its NIC for VLAN programming and the `bridge prism` rules.
 
 ### Through live migration
 
-Once the destination's ownership commits, every node reconciles its `MAC → destination node` FDB entries from replicated state. Prism then issues QMP `announce-self` so physical switches and bridges learn the new location. Gateway VIP MACs do not move, so guest ARP caches stay valid.
+Once the destination's ownership commits, every node reconciles its MAC-to-node FDB entries from replicated state. The destination's gateway addresses already exist, and the guest keeps its lease because the lease belongs to the NIC, not the node. Prism does not send `announce-self`; the guest's next ARP or the FDB update teaches the network the new location.
 
-### Safe host bridge creation
+### Port forwards
 
-Moving a host IP from a NIC onto a bridge is the dangerous step, so it is always reversible.
+Downloads from a URL are done in-process (`crates/prism/src/fetch`): HTTP/1.1 over `rustls` (ring provider, bundled webpki roots, no OpenSSL), with redirects, progress, cancellation and optional SHA-256 verification.
 
-- **NetworkManager hosts:** Prism uses an NM checkpoint with a rollback timeout over D-Bus (zbus), as Cockpit does.
-- **systemd-networkd hosts:** Prism writes `.netdev` / `.network` files and keeps the previous ones.
-- **Other hosts:** netlink changes plus a rollback snapshot persisted to disk.
-- **Commit rule:** the browser must reconnect and confirm, and a peer must reach the node, within 60 s. Otherwise the change rolls back.
-- Hosts that use ifupdown or netplan-only setups get manual instructions instead.
+Port forwards on a NIC attached to a Prism network are nftables DNAT, not passt. Forwards to an IPv6 guest use `ip6 prism-nat` and the guest's SLAAC address. The plan for each node turns every forward of a VM that runs (or is migrating) there into a rule in `ip prism-nat` `prerouting` (`tcp` or `udp dport`, an optional `ip daddr`, and `dnat to <lease>:<guest port>`) targeting the NIC's IPAM lease, and turns IPv4 forwarding on. The network agent reconciles them like any other rule, so they apply at once to a running guest, disappear when the VM leaves the node and appear on the destination during a migration. A forward without `host_addr` listens on every host address. A `local` flag (on by default) adds an `output` rule so connections that start on the node work, and loopback when no address is set. A `hairpin` flag lets other guests on the same network use the host address. A host port can serve one guest per node (409 otherwise).
 
-Prism installs an NM drop-in that marks `ps*`, `vx*`, `pn*` and `wg-prism` devices unmanaged.
+passt is an explicit opt-in for user-mode NICs, which have no Prism network behind them. It needs the `passt` package and a libvirt AppArmor profile that does not break it. `GET /api/v1/nodes/{node}/prereqs` and `prism doctor` report whether it is usable, the API refuses user-mode forwards without it (pointing at network forwards as the alternative), and the UI explains the fix. libvirt cannot change a passt forward under a running guest, so those changes apply at the next start and the UI says so.
+
+Known issue, passt under AppArmor (Ubuntu 26.04, passt 0.0~git20260120): libvirt starts passt in a `libvirt-<uuid>//passt` sub-profile. Without `m` on `/usr/bin/passt` passt dies with SIGSEGV; with it, passt starts but `accept()` on QEMU's socket fails with `EACCES` (the denial is not audited), so the guest NIC never comes up. The sub-profile cannot be extended from a `libvirt-qemu.d` drop-in (redefining `profile passt` makes the profile fail to load) and the distribution's `abstractions/passt` is a conffile, so Prism patches neither. `prereqs::passt()` therefore reports port forwarding as unavailable on hosts where libvirt's abstraction defines the passt sub-profile and AppArmor is enabled. Set `PRISM_ALLOW_PASST_APPARMOR=1` for Prism once the distribution fixes its profile.
 
 ### Kernel and privileges
 
-- **Modules:** bridge, vxlan, tun, vhost_net, wireguard, nf_tables, nft_nat, nft_masq, nft_ct, 8021q (VLAN sub-interfaces only).
-- **Capabilities:** `CAP_NET_ADMIN`, `CAP_NET_BIND_SERVICE` (ports 53 and 67), `CAP_NET_RAW` (ARP/RARP announcements).
-- **sysctls:** `ip_forward=1`; `rp_filter=2` on Prism bridges (loose mode, not anti-spoofing; the nftables rules do that); `disable_ipv6=1` on `vx*` and `pn*` ports, and on `ps*` unless the switch has an IPv6 gateway, so they get no link-local addresses or router advertisements; `accept_ra=0` and `autoconf=0` on `ps*` bridges with IPv6, so other nodes' advertisements add no addresses to the host; `accept_ra=2` on the IPv6 uplink once forwarding is on; IPv6 stays enabled on `wg-prism`; `br_netfilter` not loaded. Prism records original values for `prism uninstall`.
+- Modules: bridge, vxlan, tun, vhost_net, wireguard, nf_tables, nft_nat, nft_masq, nft_ct, and 8021q for VLAN sub-interfaces.
+- Prism runs as root and does not drop capabilities.
+- sysctls Prism sets: `net.ipv4.ip_forward=1`, `route_localnet=1` on a bridge that has a loopback forward, `net.ipv6.conf.all.forwarding=1` with `accept_ra=2` on the IPv6 uplink when IPv6 forwards or NAT66 need it, and `accept_ra=0` and `autoconf=0` on `ps*` bridges with IPv6. Prism does not restore them.
 
 ## HTTP API and SSE event stream
 
-The API is JSON over REST under `/api/v1`, served identically by every node, with one SSE stream that delivers a snapshot and then live changes, so clients never poll. The UI uses only this public API.
+The API is JSON over REST under `/api/v1`, served identically by every node, with one SSE stream that delivers a snapshot and then live changes. [API.md](API.md) lists every route, the error format and the event types. This section records the design decisions.
 
-### Conventions
+- The OpenAPI 3.1 document is built at request time from a hand-maintained operation table (`crates/prism/src/api/openapi.rs`), not generated from handler types. A unit test checks that every router path is in the table. The document has summaries and path parameters but no body schemas.
+- Errors are RFC 9457 `application/problem+json` with a stable `code`, `retryable` and `degraded`. 409 is a state conflict, 502 is an unreachable owner node, and 503 is a missing libvirt connection or a degraded cluster. There is no `request_id`.
+- VM writes do not use `ETag` or `If-Match`; the VM `generation` is the concurrency check. There is no `Idempotency-Key`, and lists are not paginated.
+- Long operations return 202 with the task and a `Location` header.
+- Trust: there is no auth. `X-Forwarded-Host` replaces `Host` in the allowlist check. The request-hygiene middleware (Host allowlist, Origin and `Sec-Fetch-Site`, write content types) covers every route, including SSE and WebSockets. It is not authentication; it stops websites and DNS rebinding from driving the API through an operator's browser. CORS headers are never sent, so a cross-origin page cannot read responses.
+- Any node serves any path. Forwarded requests carry an internal marker that limits forwarding to one hop. Prism sets no `X-Prism-Served-By` or `X-Prism-Forwarded-By` header.
 
-- **OpenAPI** 3.1 generated by utoipa, served at `/api/v1/openapi.json`.
-- **Errors:** RFC 9457 `application/problem+json` with a stable `code`, `retryable`, `degraded` and `request_id`. 409 = ownership or revision conflict, 412 = `If-Match` failed, 502 = owner node unreachable, 503 = degraded.
-- **Concurrency:** resources carry a revision as `ETag`; writes accept `If-Match`.
-- **Idempotency:** `POST`s accept an `Idempotency-Key`, remembered for 24 h.
-- **Lists:** cursor pagination (`?cursor=&limit=`), field filters and `?node=`.
-- **Long operations** return `202 Accepted` and `Location: /api/v1/tasks/{id}`.
-- **Trust:** no auth. `X-Forwarded-For` and `-Proto` are honoured for logs. `X-Forwarded-Host` must pass the Host allowlist. `Location` headers are relative.
-- **Request hygiene:** one tower middleware covers every route, including SSE and WebSockets. It is not authentication; it stops websites and DNS rebinding from driving the API through an operator's browser.
-    1. A `Host` outside `allowed_hosts` gets 421. IP literals, `localhost` and the node's hostname are always allowed.
-    2. `GET`, `HEAD` and `OPTIONS` pass.
-    3. Otherwise, `Sec-Fetch-Site: same-origin` or `none` passes.
-    4. Otherwise, `Origin` must match `Host` or `allowed_origins`.
-    5. Requests with neither header (CLI, curl) pass.
-    6. Writes require `application/json` or tus content types (415 otherwise). WebSocket upgrades require a matching `Origin` when one is present.
-- **CORS:** only `allowed_origins`, never `*` and never credentials. Responses carry `Cross-Origin-Resource-Policy: same-origin`.
-- **Cross-node:** any node serves any path. Responses include `X-Prism-Served-By`; a forwarded call adds `X-Prism-Forwarded-By`.
+### Event stream
 
-### Resources
+`GET /api/v1/events?snapshot=1` sends a `snapshot` event with nodes, VMs, pools and a cursor, then deltas. Event IDs are `<node id>.<boot_epoch>.<seq>`. Every event has `type`, `origin_node`, `resource`, `ts`, `op` (`upsert` or `delete`) and `payload`. The types are `snapshot`, `reset`, `vm.state`, `vm.stats`, `vm.config`, `pool`, `volume`, `network`, `backup`, `cluster`, `archive.pool`, `archive.file`, `task.progress` and `node.status`.
 
-| Path | Methods |
-| --- | --- |
-| `/cluster`, `/cluster/members`, `/cluster/invites` | GET, POST, DELETE |
-| `/cluster/invites/{id}/accept` | POST (blob B) |
-| `/nodes`, `/nodes/{id}` | GET |
-| `/nodes/{id}/pools`, `/nodes/{id}/pools/{p}/volumes` | CRUD |
-| `/nodes/{id}/physical-networks`, `/nodes/{id}/bridge-wizard` | GET, POST |
-| `/vms`, `/vms/{id}` | CRUD |
-| `/vms/{id}/actions/{start,shutdown,stop,reboot,reset,pause,resume}` | POST |
-| `/vms/{id}/migrate`, `/vms/{id}/move` | POST → task |
-| `/vms/{id}/snapshots`, `/vms/{id}/snapshots/{s}/revert` | CRUD, POST |
-| `/vms/{id}/backups`, `/backups/{b}/restore` | GET, POST → task |
-| `/vms/{id}/disks`, `/vms/{id}/nics` | CRUD (hotplug where possible) |
-| `/vms/{id}/console`, `/vms/{id}/serial` | WebSocket |
-| `/archive/pools`, `/archive/pools/{p}/members` | CRUD |
-| `/archive/pools/{p}/files`, `/archive/pools/{p}/files/{path}` | GET (Range, as an attachment with `nosniff` and `Content-Security-Policy: sandbox`), HEAD, DELETE, POST (move/copy) |
-| `/uploads`, `/uploads/{id}` | POST, PATCH, HEAD, DELETE (tus-compatible) |
-| `/switches`, `/switches/{id}/leases` | CRUD, GET |
-| `/tasks`, `/tasks/{id}`, `/tasks/{id}/cancel` | GET, POST |
-| `/events` | SSE |
-
-### SSE stream
-
-`GET /api/v1/events?topics=vms,tasks,nodes&snapshot=1` sends one `snapshot` event with the current state and cursor, then deltas.
-
-```text
-id: 7f3c…a1.3.18842
-event: vm.state
-data: {"type":"vm.state","origin_node":"7f3c…a1","resource":"/vms/9b2e…","rev":412,"ts":"2026-10-14T22:41:07Z","op":"upsert","payload":{"state":"running","node":"kvm-b"}}
-```
-
-- **IDs:** `<node>.<boot_epoch>.<seq>`, monotonic per serving node.
-- **Types:** `snapshot`, `vm.state`, `vm.config`, `vm.stats`, `task.progress`, `node.status`, `archive.file`, `switch.*`, `cluster.membership`, `member.added`, `resync`, `reset`.
-- **Ops:** `upsert`, `delete`, `invalidate`. The UI patches its cache on `upsert` and `delete`, and refetches on `invalidate`.
-- **Replay:** each node keeps a ring of 10k events or 10 minutes, mirrored in `node.db`. A `Last-Event-ID` inside the ring replays. An ID from another node or boot, or older than the ring, gets `event: reset` and the client re-snapshots. This is acceptable because HTTP load balancing is the user's concern.
-- **Liveness:** a `: ping` comment every 15 s and `retry: 3000`.
-- **Backpressure:** each subscriber has a bounded queue. A slow client that overflows gets `reset` instead of unbounded memory growth. SSE subscribers (default 256), WebSockets per VM and total connections are capped.
-- **Rate shaping:** `vm.stats` is sent at most every 5 s per VM, and only when subscribed.
+- Replay: each node keeps a ring of 10,000 events or 10 minutes in memory. A `Last-Event-ID` inside the ring replays. An ID from another node or boot, or older than the ring, gets `reset` and the client re-snapshots.
+- Liveness: a `ping` comment every 15 seconds and `retry: 3000`.
+- Backpressure: each subscriber reads from a bounded broadcast channel and a 256-event queue. A slow client that falls behind gets `reset` instead of unbounded memory growth. SSE subscribers and WebSockets are not capped.
+- Rate shaping: runtime stats are sampled every 5 seconds, and `vm.stats` is published only when a value changed.
 
 ### WebSockets
 
-- `/api/v1/vms/{id}/console` carries binary RFB to and from QEMU's VNC UNIX socket, proxied over gRPC `Console` when the VM is on another node.
-- `/api/v1/vms/{id}/serial` carries the serial console stream from `DOMAIN_OPEN_CONSOLE`.
+- `/api/v1/vms/{id}/console` carries binary RFB to and from QEMU's VNC UNIX socket, proxied over the gRPC `Console` stream when the VM is on another node.
+- `/api/v1/vms/{id}/serial` carries the serial console stream.
 
 ### Versioning
 
-The `/api/v1` contract changes additively. A breaking change ships as `/api/v2` beside v1 for at least one minor release.
+The `/api/v1` contract changes additively. A breaking change would ship as `/api/v2` beside v1.
 
 ## Web UI
 
-The UI is a React + TypeScript + Tailwind SPA built with Vite, installable as a PWA and embedded in the binary. Its VM console decodes VNC in a Rust→WASM worker and draws with WebGL2 on an OffscreenCanvas, so rendering is GPU-accelerated and off the main thread.
+The UI is a React 19 and TypeScript single-page app built with Vite and Tailwind 4, embedded in the binary by the `prism-web` crate. Its VM console decodes VNC in a Rust to WASM worker and draws with WebGL2 on an OffscreenCanvas, so rendering is GPU-accelerated and off the main thread.
 
 ### Stack and data flow
 
-- **Routing and data:** TanStack Router and TanStack Query. `@xyflow/react` draws the network topology.
-- **Live updates:** one SSE connection per tab. `upsert` and `delete` events patch the query cache with `setQueryData`; `invalidate`, `resync` and `reset` trigger a refetch. There are no polling intervals anywhere.
-- **PWA:** vite-plugin-pwa precaches only the app shell. API, SSE and WebSocket traffic is never cached. Install and the Clipboard API need a secure context, which `tailscale serve` HTTPS or the user's TLS-terminating proxy provides.
-- **Theme:** light and dark follow the OS, with a manual toggle. Keyboard navigation and ARIA labels throughout.
+- Routing and data: TanStack Router and TanStack Query. The serial console is xterm.js with its fit addon.
+- Live updates: one SSE connection per tab. `snapshot` seeds the query cache, `vm.state`, `vm.stats` and `vm.config` patch it with `setQueryData`, and `reset` invalidates every query. A few pages also poll because their data is not on the stream: the Cluster page (4 s status, 5 s mesh and removals), the Archive page (8 s) and a VM's guest network (10 s).
+- Manifest: `manifest.webmanifest` and an icon are served. There is no service worker, so the UI is not cached for offline use.
+- Theme: light and dark follow the OS. The command palette (`Ctrl+K`) and keyboard shortcuts (`?` lists them) work on every page.
 
 ### Screens
 
 | Screen | Contents |
 | --- | --- |
-| Dashboard | Cluster health, degraded banner, capacity bars, running tasks, alerts |
-| Nodes | List; detail with hardware, load, memory pressure, pools, physical networks, host-bridge wizard, drain |
-| VMs | Filterable table, bulk power actions, create wizard (template, ISO, cloud-init) |
-| VM detail | Summary, Console, Hardware, Disks, NICs, Snapshots tree, Backups, Events |
-| Local pools | Per node: volumes, usage, upload, import, move disk |
-| Archive pools | Members with fill bars, file browser, resumable upload, download, drain, rebalance, restore |
-| Switches | List and editor (type, VLANs, egress and backups), topology with egress VIPs highlighted, IPAM leases |
-| Tasks | Live list with progress, per-task log, cancel |
-| Cluster | Mode and members; invites (create, copy, revoke); a reply paste box that shows name, endpoint and key fingerprint before confirming; WireGuard peers with handshake age and `direct` / `fragmented` / `unhealthy` flags; removal status; a banner on `member.added` |
+| Overview | A first-run prompt on an empty node, then running VMs, memory and storage meters, host memory pressure and running tasks |
+| Machines | The VM list for the whole cluster, with power actions |
+| New machine | Guided form: name, CPU, memory, storage and ISO or image, network, cloud-init |
+| VM page | Tabs: Overview, Console, Serial, Hardware (disks, NICs, VLANs, forwards, boot order), Snapshots, Settings |
+| Storage | Local pools per node: volumes, upload, URL download, new disk |
+| Archive | Archive pools and members: replica count, repair, scrub, rebalance, pause, drain. Files are handled through the API |
+| Networks | Networks with subnet, IPv6, egress, allowed destinations, VLAN subnets |
+| Tasks | Live list with progress and cancel; a task tray shows the running ones |
+| Cluster | Create or join; members with Make voter, Demote and Remove; invites with a reply paste box that shows name, endpoint and key fingerprint before admitting; mesh status; removal status; the Leave card |
+
+Backups, migration and cold move have no screen, and the Networks page draws no topology graph.
 
 ### Operation flows
 
-- **Migrate:** the target picker ranks nodes by fit (CPU compatibility, free memory after balloon floor, disk space, switch presence). It shows live progress: remaining RAM, dirty rate, downtime estimate, with postcopy and bandwidth cap as advanced options.
-- **Move file:** drag a file between archive members, or pick a destination pool.
-- **Snapshot:** toggles for memory and quiesce; revert of a running VM asks for typed confirmation.
-- **Backup:** run now or on a schedule to any archive pool, with retention and an incremental marker; restore as a new VM or in place.
-- **NIC egress:** a dropdown on each NIC lists nodes with an uplink on that switch.
+- Live migration and cold move are API only. The UI has no dialog for them, and the Machines page shows a VM on any node.
+- Snapshots offer a memory toggle, and a revert that needs `confirm_memory` asks first.
+- A NIC's egress node, VLAN and port forwards are edited from the Hardware tab. The forward form starts with an unused host port from 2222 and an "Add SSH" shortcut.
 
-Every long action returns a task and shows a toast linking to it.
+Every long action returns a task, and a toast links to it.
 
 ### Hardware-accelerated console
 
@@ -1277,73 +1086,46 @@ flowchart LR
     end
 ```
 
-- **Decoder:** `prism-rfb-wasm`, written in Rust, satisfies the all-Rust rule for non-UI code. It is written from the RFB spec, not copied from noVNC (MPL-2.0). Streaming zlib uses `miniz_oxide`.
-  - It is a sans-IO state machine: bytes in, actions out (send, dirty rectangle, resize, cursor, image to decode, bell). JPEG and PNG rectangles pause input until the worker hands back decoded pixels, so later CopyRects see them.
-  - It exports a small hand-written ABI (`#[unsafe(no_mangle)]` functions, no `unsafe` blocks), so the worker needs no generated glue. `web/build.rs` builds it with a nested cargo into its own target directory.
-- **Encodings, in preference order:** Tight (JPEG via `createImageBitmap` in the worker), TightPNG, ZRLE, Hextile, Raw.
-- **Pseudo-encodings:** ExtendedDesktopSize, Cursor, QEMU ExtendedKeyEvent, LED state. Quality and compression levels adapt to measured bandwidth.
-- **Rendering:**
-  - The framebuffer lives in WASM memory.
-  - Dirty rectangles upload with `texSubImage2D`, then one full-screen quad draws per animation frame.
-  - The cursor is its own quad, so pointer motion is instant.
-  - Scaling (fit, 1:1, remote resize) happens in the shader.
-- **Fallbacks:** the worker feature-detects. Without OffscreenCanvas WebGL2 (some Safari builds) it renders WebGL2 on the main thread, then Canvas2D.
-- **Untrusted server data:** the framebuffer is capped at 8192x8192, the cursor at 256x256, and decompressed bytes per rectangle are bounded. Guest clipboard text is written only on a user gesture.
-- **Not used:** WebGPU (texture upload is the bottleneck, not compute), H.264 (QEMU's VNC server cannot send it) and SPICE (spice-html5 is barely maintained).
-- **Input:** `KeyboardEvent.code` maps to XT scancodes over QEMU ExtendedKeyEvent, so the guest's keyboard layout applies. Fullscreen uses `navigator.keyboard.lock()` where available. The toolbar has Ctrl-Alt-Del and "type clipboard".
-- **Clipboard:** a `qemu-vdagent` channel with spice-vdagent in the guest; "type clipboard as keystrokes" always works.
-- **Serial console:** xterm.js with its WebGL addon, as a tab beside VNC and the default for headless VMs. No ClipboardAddon (OSC 52); the link handler allows only http and https and asks first; terminal titles never reach `document.title`.
+- Decoder: `prism-rfb-wasm`, written in Rust from the RFB spec, not copied from noVNC (MPL-2.0). Streaming zlib uses `miniz_oxide`. It is a sans-IO state machine: bytes in, actions out (send, dirty rectangle, resize, cursor, image to decode, bell). JPEG and PNG rectangles pause input until the worker hands back decoded pixels, so later CopyRects see them. It exports a small hand-written ABI (`#[unsafe(no_mangle)]` functions, no `unsafe` blocks), so the worker needs no generated glue. `web/build.rs` builds it with a nested cargo into its own target directory.
+- Rendering: the framebuffer lives in WASM memory. Dirty rectangles upload with `texSubImage2D`, then one full-screen quad draws per animation frame. The cursor is its own quad, and scaling happens in the shader.
+- The decoder caps the framebuffer at 8192x8192.
+- Not used: WebGPU (texture upload is the bottleneck, not compute), H.264 (QEMU's VNC server cannot send it) and SPICE.
+- Input: `KeyboardEvent.code` maps to XT scancodes over QEMU's extended key event, so the guest's keyboard layout applies. The toolbar has Ctrl-Alt-Del, and the clipboard button types the clipboard text as keystrokes with a US layout.
+- Serial console: xterm.js as its own tab. The terminal loads no clipboard addon.
 
 ### Embedding and caching
 
-- Vite emits `assets/[name]-[hash].*`. The build pre-compresses them with brotli and gzip, and rust-embed bakes them into the binary.
-- Hashed assets: `Cache-Control: public, max-age=31536000, immutable`. `index.html`, `sw.js` and the manifest: `no-cache` with an ETag.
-- Unknown non-API paths serve `index.html`. The decoder is served as `application/wasm`.
-- CSP: `default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`, plus `X-Frame-Options: DENY`.
-- ESLint bans `dangerouslySetInnerHTML`; links are built only from IDs; guest-supplied strings are length-capped and stripped of control characters.
+- Vite emits `assets/[name]-[hash].*`, and rust-embed bakes the build into the binary.
+- Hashed assets get `Cache-Control: public, max-age=31536000, immutable`. Everything else is `no-cache`.
+- Unknown non-API paths serve `index.html`; unknown paths under `api/` or `assets/` are 404. The decoder is served as `application/wasm`.
+- `index.html` carries `Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'; object-src 'none'` and `X-Frame-Options: DENY`.
 
-## Build, packaging, testing and quality
+## Build, testing and quality
 
-CI blocks any merge that has a clippy warning, a banned dependency, a dynamically linked binary or a failing test. The end-to-end suite runs real VMs in nested KVM across the supported distributions.
+There is no CI configuration in the repository. The checks below run by hand.
 
 ### Quality gates
 
 - `cargo fmt --check`.
-- `cargo clippy --workspace --all-targets -- -D warnings`, with `[workspace.lints]` enabling a curated `clippy::pedantic` subset. Generated XDR and protobuf code sit in their own modules with a scoped `#[allow]`, so handwritten code gets the full rules.
-- `#![forbid(unsafe_code)]` everywhere except `prism-libvirt`'s fd-passing and the allocator, each documented.
-- `cargo deny check` for licences, advisories and banned crates.
-- A static-ELF check: `readelf -d` shows no `NEEDED` entries.
-- Frontend: `tsc --noEmit`, ESLint and Prettier.
-- Docs: mermaid blocks in `docs/` are rendered with mermaid-cli in CI so a broken diagram fails the build.
+- `cargo clippy --workspace --all-targets -- -D warnings`, with `[workspace.lints]` enabling clippy `all` and `pedantic`.
+- `unsafe_code = "forbid"` for the workspace. `prism-rfb-wasm` uses `deny` for its export module.
+- Frontend: `bun run typecheck` (`tsc`) and `bun test`.
+- Static ELF: `readelf -d` on the musl build shows no `NEEDED` entries (see the README).
 
 ### Tests
 
 | Level | What | Where |
 | --- | --- | --- |
-| Unit | Domain XML golden files, balloon policy, placement, IPAM, FDB diffing, XDR round-trips | `cargo test` |
-| Protocol | Mock libvirt RPC server replaying captured traffic, including keepalive and event edge cases | `cargo test` |
-| Cluster | 3- and 5-node in-process clusters with fault injection: partitions, hub kill, forced promote | `cargo test` (simulated network) |
-| End-to-end | Real libvirt and QEMU in nested KVM: Ubuntu 22.04/24.04 (AppArmor), Debian 12, RHEL 9 (SELinux) | Nightly CI |
-| UI | Playwright against a mock API and against the e2e cluster, including console rendering | CI |
-
-End-to-end scenarios cover:
-
-- live migration under memory load (downtime measured), backup and restore across nodes, cross-node egress, hub loss with degraded spokes, and rolling upgrade;
-- copy-paste join, removal, `leave --force` and re-join; leader killed in consensus mode re-elects;
-- a mesh alongside a running Tailscale, and a mesh over Tailscale with fragmented outer packets;
-- boundary rules: a spoofed mesh source through a node with IPv6 forwarding is dropped; VXLAN from a guest, the LAN and an unprivileged local user is dropped; a guest cannot reach any node's API; the qemu uid cannot connect to the API or the mesh.
-
-Unit tests also cover blob encode/decode, checksums and whitespace stripping, and a CI test checks that marker secrets in a `VmSpec` never reach tracing output.
-
-### Release
-
-- Static `prism-x86_64` and `prism-aarch64` binaries with SHA-256 checksums and GitHub artifact attestations.
-- A systemd unit and an NM unmanaged-devices drop-in, installed by `prism install`.
-- `prism doctor` runs at startup and on demand.
+| Unit | Domain XML golden file, balloon policy, archive placement, IPAM, FDB diffing, nftables rule building, blob encoding, config validation, error mapping | `cargo test` |
+| Protocol | libvirt client against a mock RPC server: framing, serial dispatch, keepalive, events | `cargo test -p prism-libvirt` |
+| State and cluster | The state machine and its commands; the cluster crate's log store and state machine | `cargo test` |
+| Kernel | Bridges, VXLAN, VLANs, nftables rules, DHCP, DNS and the WireGuard mesh inside network namespaces; needs root | `cargo test -p prism-net` (netns tests) |
+| UI | Pure model modules such as the new-machine form and boot order | `bun test` in `web/` |
+| End to end | Prism nodes in nested VMs on the local libvirt: `cargo xtask testbed up`, `status`, `ssh` | Manual |
 
 ## Implementation milestones
 
-Prism ships in nine milestones, each ending at a testable gate; a standalone node is useful after M3, and clustering builds on it. Every milestone keeps the clippy, cargo-deny and static-ELF gates green.
+The plan had nine milestones. All nine are implemented, with the deviations in the last column. A standalone node is useful after M3, and clustering builds on it.
 
 ```mermaid
 flowchart LR
@@ -1363,65 +1145,34 @@ flowchart LR
     class M0 risk
 ```
 
-Arrows are hard dependencies; milestones without one between them can proceed in parallel. M0 is outlined heavily because every later milestone depends on the native libvirt client. M4 starts with spikes that confirm: kernel WireGuard sends outer IPv4 without DF; `tailscaled` passes non-initial fragments; `meta skuid` does not match kernel VXLAN packets; `netlink-packet-wireguard` can set a device with peers.
+Arrows are hard dependencies; milestones without one between them can proceed in parallel. M0 is outlined heavily because every later milestone depends on the native libvirt client.
 
-| # | Milestone | Scope | Gate |
+| # | Milestone | Scope as built | Deviations from the plan |
 | --- | --- | --- | --- |
-| M0 | Foundations | Workspace, CI gates, static build, xdrgen, libvirt RPC client and events | Lists domains and streams lifecycle events on 3 distributions |
-| M1 | Standalone node | VmSpec and renderer, lifecycle, dir and LVM pools, REST + SSE, tasks, request-hygiene middleware, openat2 confinement | A VM is created and booted via the API, with state seen over SSE |
-| M2 | UI and console | App shell, WASM VNC console on WebGL2, serial console | A guest OS is installed from an ISO entirely in the browser |
-| M3 | Memory and data protection | Ballooning, live snapshots, backups to a local archive pool | Auto-balloon reclaims under induced pressure; an incremental backup restores |
-| M4 | Hub-spoke cluster | Copy-paste join, IPv6 WireGuard mesh, nftables boundary rules, raft learners, forwarding, event fan-in, degraded mode | Any node serves any VM; killing the hub leaves spokes read-only; a join completes with no open port except UDP 51820 |
-| M5 | Consensus | 3- and 5-voter raft, promote and recover with generation fencing | Survives losing 1 of 3 voters; a forced promotion is fenced |
-| M6 | Networking | Switches, VXLAN, DHCP/DNS/NAT, per-NIC egress, VLANs, bridge wizard, guest isolation rules | A VM on node A egresses via node B; isolated VM-to-VM traffic works |
-| M7 | Mobility and archive | Live migration, cold move, archive pools with placement, replicas and ISO cache | Live migration under load pauses under 300 ms; an archive member drains |
-| M8 | Hardening | Removal status and tombstones, rolling upgrades, full e2e matrix, UI polish | The full matrix is green; a rolling upgrade crosses a minor version |
+| M0 | Foundations | Workspace, libvirt RPC client and events, static build instructions | XDR types are hand-written, with only the procedure constants generated. No `prism-xdrgen` crate and no CI |
+| M1 | Standalone node | VM spec and renderer, lifecycle, directory pools, REST and SSE, tasks, request-hygiene middleware, `openat2` confinement | No LVM pools; the `prism-state`, `prism-node`, `prism-storage` and `prism-api` crates are modules of `prism` |
+| M2 | UI and console | App shell, WASM VNC console on WebGL2, serial console | No service worker, no topology graph, no screens for backups, migration or cold move |
+| M3 | Memory and data protection | Ballooning with an auto loop, live snapshots, backups to an archive pool | Backups have no schedule, retention or UI |
+| M4 | Hub-spoke cluster | Copy-paste join, IPv6 WireGuard mesh, nftables boundary rules, raft learners, forwarding, event fan-in, degraded mode | No MTU probe or peer flags, no `backup-config` or `install` command |
+| M5 | Consensus | 3 and 5 voters, voter promote and demote, hub handover | No forced promotion, quorum recovery or generation fencing |
+| M6 | Networking | Networks, VXLAN, DHCP, DNS, NAT, per-network and per-NIC egress, VLANs and VLAN subnets, IPv6, port forwards, guest isolation rules | No bridged switches, no bridge wizard, no egress failover |
+| M7 | Mobility and archive | Live migration, cold move, archive pools with placement, replicas, repair, scrub, rebalance, drain and an ISO cache | No tus uploads; migration sockets are not peer-checked |
+| M8 | Hardening | Removal status and tombstones, rolling upgrades through feature levels | No automated end-to-end matrix |
 
-## Risks and open questions
+## Known limitations
 
-The largest risk is the native libvirt RPC client, since every feature sits on it, so it is built and proven first (M0). Each open question below has a recommended default; approving the doc accepts the defaults unless you mark otherwise.
+These limits were checked against the code.
 
-### Risks
-
-| Risk | Impact | Mitigation |
-| --- | --- | --- |
-| libvirt's RPC protocol is formally private | A libvirt upgrade breaks Prism | Procedures are append-only in practice; pin libvirt ≥ 8.0, feature-detect, CI version matrix |
-| XDR codegen has quirks (`%` passthrough, typed params) | M0 slips | Allowlisted generation; golden round-trips against captured traffic |
-| AppArmor/SELinux block Prism-owned migration sockets | Live migration fails on some distributions | `svirt_socket_t` labelling, a remediation message, spike early in M7 |
-| openraft is pre-1.0 | API churn, subtle bugs | Pin 0.9.x behind a `ConsensusLog` trait; fault-injection tests |
-| Pure-Rust nftables support is immature | NAT bugs | Minimal in-house netlink layer validated against `nft -j` |
-| Docker or firewalld drop forwarded traffic | VMs lose connectivity silently | `prism doctor` detects and explains |
-| WireGuard + VXLAN over IPv6 cost MTU | Guests get 1350 at the default W = 1420 | Push MTU via XML and DHCP; jumbo underlays use `prism init --mtu` |
-| Guests reaching the unauthenticated API | Cluster takeover from any VM | nftables input and forward rules, loopback HTTP default, `prism doctor` check |
-| Dropping TLS relies on nftables rules | Mesh spoofing if the rules are missing | Rules ship with the TLS removal; doctor and CI verify them |
-| Member offline during a removal | Still trusts the removed key until it catches up | Removal status lists lagging members; catch them up or isolate them first |
-| Fragments over Tailscale | Slow or failing mesh on tailnet-only underlays | e2e scenario; prefer direct endpoints; `unhealthy` flag |
-| Hosts with IPv6 disabled at boot | Node cannot join a cluster | `prism doctor` and `prism join` detect it and print the fix |
-| Forced hub promotion can lose recent writes | Config changes lost | Explicit `--force`, generation fencing, lost entries exported |
-| Postcopy split-brain on network loss | VM state spread across hosts | Postcopy opt-in; `POSTCOPY_RESUME` |
-| Full-mesh event and status fan-in | Overhead past ~32 nodes | Document 32 nodes as the supported maximum |
-
-### Open questions (recommended default first)
-
-1. **Minimum versions.** *Default:* libvirt ≥ 8.0, QEMU ≥ 6.2 (Ubuntu 22.04, Debian 12, RHEL 9 and newer). Kernel ≥ 5.6 everywhere (openat2; WireGuard when clustered).
-2. **Mesh prefix.** *Default:* a random IPv6 ULA /48 per cluster, generated at `prism init` and fixed thereafter; operators may supply their own ULA prefix instead.
-3. **Per-NIC egress on bridged switches.** *Default:* allowed as a hidden child switch with a UI warning, since it cannot stay L2-adjacent.
-4. **Static-IP guests and egress overrides.** *Default:* document that the gateway must match; add policy routing only if requested.
-5. **NAT egress failover drops open connections.** *Default:* accept and document; conntrack sync would need C tooling.
-6. **Archive replica count.** *Default:* 1 copy, configurable per pool.
-7. **Backups during degraded mode.** *Default:* skipped and recorded as failed in v1; a local journal with replay later.
-8. **ZFS pools.** *Default:* deferred until after v1.
-9. **HTTP listen default.** *Default:* `127.0.0.1:8080`. Remote access uses `tailscale serve` (which also gives the PWA HTTPS) or an explicit management address, so a LAN-only install needs one config line.
-10. **Host and Origin checks despite trusting every request.** *Default:* on. They block browser-borne requests, not operators; curl and the CLI are unaffected.
-11. **Guest egress to the tailnet and management networks.** *Default:* denied for `100.64.0.0/10`, `fd7a:115c:a1e0::/48`, the mesh and all member addresses, with per-switch `allow_prefixes`.
-12. **Clustering over a Tailscale-only underlay.** *Default:* allowed with W = 1420 and outer IPv4 fragmentation, flagged `fragmented` with a UI warning, pending the M4 spike.
-13. **WireGuard key rotation.** *Default:* none in place in v1; a suspected compromise is handled by remove, `prism leave --force` and re-invite.
-14. **Removal window.** *Default:* a member offline during a removal trusts the removed key until it catches up; the removal status lists such members.
-
-### Host programs
-
-Downloads from a URL are done in-process (`crates/prism/src/fetch`): HTTP/1.1 over `rustls` (ring provider, bundled webpki roots, no OpenSSL), with redirects, progress, cancellation and optional SHA-256 verification. Port forwards on a NIC attached to a Prism network are nftables DNAT, not passt. Forwards to an IPv6 guest use `ip6 prism-nat` and the guest's SLAAC address. The plan for each node turns every forward of a VM that runs (or is migrating) there into a rule in `ip prism-nat` `prerouting` (`tcp|udp dport` and optional `ip daddr`, `dnat to <lease>:<guest port>`), targeting the NIC's IPAM lease, and turns IPv4 forwarding on. The network agent reconciles them like any other rule, so they apply at once to a running guest, disappear when the VM leaves the node and appear on the destination during a migration. The node needs a gateway on the network to route into it; with no `host_addr` the forward listens on every host address. Locally originated traffic and loopback are not translated. The inet forward chain stays policy accept for the inbound direction, and replies return through conntrack. A host port can serve one guest per node (`409` otherwise).
-
-passt stays only as an explicit opt-in for user-mode ("Private NAT") NICs, which have no Prism network behind them. It needs the `passt` package and a libvirt AppArmor profile that does not break it; `GET /api/v1/nodes/{node}/prereqs` and `prism doctor` report whether it is usable, the API refuses user-mode forwards without it (pointing at network forwards as the alternative), and the UI explains the fix. libvirt cannot change a passt forward under a running guest, so those changes apply at the next start and the UI says so.
-
-**Known issue, passt under AppArmor (Ubuntu 26.04, passt 0.0~git20260120).** libvirt starts passt in a `libvirt-<uuid>//passt` sub-profile. Without `m` on `/usr/bin/passt` passt dies with SIGSEGV; with it, passt starts but `accept()` on QEMU's socket fails with `EACCES` (the denial is not audited), so the guest NIC never comes up. The sub-profile cannot be extended from a `libvirt-qemu.d` drop-in (redefining `profile passt` makes the profile fail to load) and the distribution's `abstractions/passt` is a conffile, so Prism does not patch either. `prereqs::passt()` therefore reports port forwarding as unavailable on hosts where libvirt's abstraction defines the passt sub-profile and AppArmor is enabled; the API refuses forwards with that explanation and the UI shows the hint. Set `PRISM_ALLOW_PASST_APPARMOR=1` for Prism once the distribution fixes its profile. libvirt cannot use `<portForward>` with any backend but passt.
+- A hub-spoke cluster whose hub is gone for good cannot be recovered: there is no forced promotion or quorum recovery. `prism leave --force` wipes each node and the cluster is rebuilt.
+- A network has no egress failover. Guests that use a failed egress node lose outbound traffic until `egress` is changed.
+- The live-migration socket directory and sockets are mode 0777 so QEMU's user can reach them, and Prism does not check the peer's credentials (S18).
+- Live migration refuses a VM with CD-ROM media inserted, and fails for a VM with snapshots when the cloud-init seed image is missing from the destination pool.
+- Snapshot revert and delete need libvirt 9.9 or later.
+- Local pools are directories only.
+- Backups are API-only, with no schedule or retention. Restores create a new VM and omit CD-ROMs.
+- Archive and volume uploads are single streamed requests that cannot resume, and SSE and WebSocket connections are not capped.
+- The mesh MTU is 1420 and cannot be set. Prism does not probe the path.
+- Guests on an IPv6 network that do not use their EUI-64 address cannot send IPv6.
+- A passt user-mode port forward is unavailable on hosts where libvirt's AppArmor passt profile is broken, and passt forwards change only at the next VM start.
+- The UI has no screens for backups, live migration or cold move, polls on a few pages, and the Archive page does not handle files.
+- Prism does not check `qemu.conf`, directory ownership or `wg.key` permissions, and the repository has no CI.

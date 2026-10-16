@@ -23,6 +23,18 @@ use crate::storage::valid_name;
 /// The `owner_epoch` of a VM that has never moved between nodes.
 pub const FIRST_OWNER_EPOCH: u64 = 1;
 
+fn first_owner_epoch() -> u64 {
+    FIRST_OWNER_EPOCH
+}
+
+/// Documents written before clustering carry epoch 0 or none at all. Both
+/// load as [`FIRST_OWNER_EPOCH`], and the next write of the spec stores it.
+/// Older nodes accept the stored 1 because they only compare epochs for
+/// equality with their own.
+fn owner_epoch_from_doc<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    Ok(u64::deserialize(d)?.max(FIRST_OWNER_EPOCH))
+}
+
 /// The desired state of one VM. Stored in the cluster database; the domain XML is rendered from it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmSpec {
@@ -43,7 +55,10 @@ pub struct VmSpec {
     pub node: Uuid,
     /// Starts at [`FIRST_OWNER_EPOCH`] and grows by one whenever ownership
     /// moves; a node only runs VMs it owns.
-    #[serde(default)]
+    #[serde(
+        default = "first_owner_epoch",
+        deserialize_with = "owner_epoch_from_doc"
+    )]
     pub owner_epoch: u64,
     /// Start the VM when its node starts (managed by Prism, not libvirt).
     #[serde(default)]
@@ -292,6 +307,18 @@ pub mod tests {
         assert_eq!(v.disks[0].volume.as_deref(), Some("x.qcow2"));
         assert_eq!(v.disks[0].target, "vda");
         assert!(v.node.is_nil());
+        assert_eq!(v.owner_epoch, FIRST_OWNER_EPOCH);
+    }
+
+    #[test]
+    fn epoch_zero_loads_as_first_epoch() {
+        let mut v = serde_json::to_value(sample_spec("e")).unwrap();
+        v["owner_epoch"] = 0.into();
+        let back: VmSpec = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(back.owner_epoch, FIRST_OWNER_EPOCH);
+        v["owner_epoch"] = 7.into();
+        let back: VmSpec = serde_json::from_value(v).unwrap();
+        assert_eq!(back.owner_epoch, 7);
     }
 
     #[test]

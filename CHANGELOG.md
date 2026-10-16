@@ -36,3 +36,5 @@ First release.
 - `prism serve` starts VMs with autostart only after it reads a boot ID that differs from the stored one. If `/proc/sys/kernel/random/boot_id` cannot be read, autostart is skipped and a message is logged.
 - `prism serve` fails to start when an archive member directory cannot be prepared, and the raft log store fails to open when SQLite does not enter WAL mode.
 - A cluster write that reaches a node without raft answers 503 `cluster_degraded` instead of 500.
+- Clones and restores start without port forwards, a fixed IPv6 address or an IPv4 lease, because those belong to the original VM.
+- Reverting a snapshot taken without memory restarts a running VM from the saved disks. A stopped VM stays stopped.

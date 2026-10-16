@@ -211,11 +211,21 @@ fn base_reply(cfg: &DhcpConfig, req: &Message, kind: MessageType) -> Message {
     m
 }
 
-fn destination(cfg: &DhcpConfig, req: &Message, broadcast_only: bool) -> SocketAddrV4 {
+/// How a reply may be addressed when the request carries no relay address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Delivery {
+    /// Unicast to the client's `ciaddr` when it has one (renewals, INFORM).
+    Unicast,
+    /// Always broadcast; used for NAK, which must not be sent to an address the client
+    /// is not entitled to.
+    Broadcast,
+}
+
+fn destination(cfg: &DhcpConfig, req: &Message, delivery: Delivery) -> SocketAddrV4 {
     if !req.giaddr().is_unspecified() {
         return SocketAddrV4::new(req.giaddr(), cfg.port);
     }
-    if !broadcast_only && !req.ciaddr().is_unspecified() {
+    if delivery == Delivery::Unicast && !req.ciaddr().is_unspecified() {
         return SocketAddrV4::new(req.ciaddr(), cfg.client_port);
     }
     // Without the client's address in our ARP table we cannot unicast to yiaddr, so replies
@@ -266,7 +276,7 @@ fn reply(cfg: &DhcpConfig, req: &Message, lease: &Lease, kind: MessageType) -> R
         opts.insert(DhcpOption::ClasslessStaticRoute(routes));
     }
     Reply {
-        to: destination(cfg, req, false),
+        to: destination(cfg, req, Delivery::Unicast),
         message: m,
     }
 }
@@ -275,7 +285,7 @@ fn nak(cfg: &DhcpConfig, req: &Message) -> Reply {
     let mut m = base_reply(cfg, req, MessageType::Nak);
     m.set_flags(Flags::default().set_broadcast());
     Reply {
-        to: destination(cfg, req, true),
+        to: destination(cfg, req, Delivery::Broadcast),
         message: m,
     }
 }
@@ -344,6 +354,24 @@ mod tests {
         r.message.encode(&mut Encoder::new(&mut buf)).unwrap();
         let back = Message::decode(&mut Decoder::new(&buf)).unwrap();
         assert_eq!(back.yiaddr(), Ipv4Addr::new(10, 20, 0, 5));
+    }
+
+    #[test]
+    fn destination_by_delivery() {
+        let mut req = request(MAC, MessageType::Request, &[]);
+        let client = SocketAddrV4::new(Ipv4Addr::BROADCAST, CLIENT_PORT);
+        assert_eq!(destination(&cfg(), &req, Delivery::Unicast), client);
+        req.set_ciaddr(Ipv4Addr::new(10, 20, 0, 5));
+        assert_eq!(
+            destination(&cfg(), &req, Delivery::Unicast),
+            SocketAddrV4::new(Ipv4Addr::new(10, 20, 0, 5), CLIENT_PORT)
+        );
+        assert_eq!(destination(&cfg(), &req, Delivery::Broadcast), client);
+        req.set_giaddr(Ipv4Addr::new(10, 20, 0, 254));
+        assert_eq!(
+            destination(&cfg(), &req, Delivery::Broadcast),
+            SocketAddrV4::new(Ipv4Addr::new(10, 20, 0, 254), SERVER_PORT)
+        );
     }
 
     #[test]

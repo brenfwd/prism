@@ -128,25 +128,38 @@ pub fn is_router_solicitation(packet: &[u8]) -> bool {
     packet.first() == Some(&ICMPV6_ROUTER_SOLICITATION) && packet.len() >= 8
 }
 
-fn ifindex(interface: &str) -> io::Result<u32> {
-    std::fs::read_to_string(format!("/sys/class/net/{interface}/ifindex"))?
-        .trim()
+/// The kernel's interface index, read from sysfs.
+async fn ifindex(interface: &str) -> io::Result<u32> {
+    let path = format!("/sys/class/net/{interface}/ifindex");
+    let text = tokio::fs::read_to_string(&path).await?;
+    text.trim()
         .parse()
-        .map_err(io::Error::other)
+        .map_err(|e| io::Error::other(format!("{path}: {e}")))
 }
 
-fn bridge_mac(interface: &str) -> Option<MacAddr> {
-    std::fs::read_to_string(format!("/sys/class/net/{interface}/address"))
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+/// The bridge's MAC address, or `None` (logged) when sysfs has no usable value. The
+/// advertisement then goes out without a source link-layer option.
+async fn bridge_mac(interface: &str) -> Option<MacAddr> {
+    let path = format!("/sys/class/net/{interface}/address");
+    let text = match tokio::fs::read_to_string(&path).await {
+        Ok(text) => text,
+        Err(e) => {
+            tracing::warn!(error = %e, %path, "ra: cannot read bridge MAC");
+            return None;
+        }
+    };
+    match text.trim().parse() {
+        Ok(mac) => Some(mac),
+        Err(e) => {
+            tracing::warn!(error = %e, %path, "ra: unparsable bridge MAC");
+            None
+        }
+    }
 }
 
 /// An `ICMPv6` raw socket. Tokio's datagram wrapper drives it: raw sockets use the same
 /// `recvfrom` and `sendto` calls.
-fn open(cfg: &RaConfig) -> io::Result<UdpSocket> {
-    let index = ifindex(&cfg.interface)?;
+fn open(cfg: &RaConfig, index: u32) -> io::Result<UdpSocket> {
     let s = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))?;
     s.bind_device(Some(cfg.interface.as_bytes()))?;
     s.set_unicast_hops_v6(ND_HOP_LIMIT)?;
@@ -159,18 +172,24 @@ fn open(cfg: &RaConfig) -> io::Result<UdpSocket> {
 }
 
 async fn bind(shared: &SharedRa) -> Result<UdpSocket> {
-    let mut last = None;
-    for _ in 0..BIND_ATTEMPTS {
+    let mut attempt = 1;
+    loop {
         let cfg = read(shared);
-        match open(&cfg) {
+        let opened = match ifindex(&cfg.interface).await {
+            Ok(index) => open(&cfg, index),
+            Err(e) => Err(e),
+        };
+        match opened {
             Ok(s) => return Ok(s),
+            Err(e) if attempt >= BIND_ATTEMPTS => {
+                return Err(Error::io(format!("ra on {}: bind", cfg.interface), e));
+            }
             // The link-local address is tentative until duplicate address detection ends.
-            Err(e) => last = Some((cfg.interface, e)),
+            Err(_) => {}
         }
+        attempt += 1;
         tokio::time::sleep(BIND_RETRY).await;
     }
-    let (interface, e) = last.expect("at least one attempt");
-    Err(Error::io(format!("ra on {interface}: bind"), e))
 }
 
 fn read(shared: &SharedRa) -> RaConfig {
@@ -182,21 +201,19 @@ fn read(shared: &SharedRa) -> RaConfig {
 
 async fn send(sock: &UdpSocket, shared: &SharedRa) -> io::Result<()> {
     let cfg = read(shared);
-    let packet = build_advert(&cfg, bridge_mac(&cfg.interface));
-    let to = SocketAddrV6::new(ALL_NODES, 0, 0, ifindex(&cfg.interface)?);
+    let packet = build_advert(&cfg, bridge_mac(&cfg.interface).await);
+    let to = SocketAddrV6::new(ALL_NODES, 0, 0, ifindex(&cfg.interface).await?);
     sock.send_to(&packet, to).await.map(drop)
 }
 
-/// Advertises on the bridge every [`INTERVAL`] and whenever a guest solicits, until a socket
-/// call fails. Must be called inside a tokio runtime; the socket belongs to the calling
-/// thread's network namespace.
+/// Advertises on the bridge every [`INTERVAL`] and whenever a guest solicits. It returns an
+/// error only when the socket cannot be bound within about 20 seconds; later send and receive
+/// errors (the bridge going down, its address changing) are logged and retried. Must be
+/// called inside a tokio runtime; the socket belongs to the calling thread's network
+/// namespace.
 pub async fn run(shared: SharedRa) -> Result<()> {
     let sock = bind(&shared).await?;
     let interface = read(&shared).interface;
-    let fail = |what: &str| {
-        let what = format!("ra on {interface}: {what}");
-        move |e| Error::io(what, e)
-    };
     let mut ticker = tokio::time::interval(INTERVAL);
     let mut last: Option<Instant> = None;
     let mut buf = [0u8; 1500];
@@ -204,13 +221,21 @@ pub async fn run(shared: SharedRa) -> Result<()> {
         let due = tokio::select! {
             _ = ticker.tick() => true,
             r = sock.recv_from(&mut buf) => {
-                let (n, _) = r.map_err(fail("recv"))?;
-                is_router_solicitation(&buf[..n])
+                match r {
+                    Ok((n, _)) => is_router_solicitation(&buf[..n]),
+                    Err(e) => {
+                        tracing::warn!(error = %e, %interface, "ra: receive failed");
+                        tokio::time::sleep(BIND_RETRY).await;
+                        false
+                    }
+                }
             }
         };
         let paced = last.is_none_or(|t| t.elapsed() >= MIN_GAP);
         if due && paced {
-            send(&sock, &shared).await.map_err(fail("send"))?;
+            if let Err(e) = send(&sock, &shared).await {
+                tracing::warn!(error = %e, %interface, "ra: send failed");
+            }
             last = Some(Instant::now());
         }
     }
@@ -275,5 +300,12 @@ mod tests {
         assert_eq!(domain_wire("a.prism").unwrap().len() % 8, 0);
         assert!(domain_wire("").is_none());
         assert!(domain_wire(&"x".repeat(64)).is_none());
+    }
+
+    #[test]
+    fn domain_label_limits() {
+        assert!(domain_wire(&"x".repeat(63)).is_some());
+        assert!(domain_wire("a..b").is_none());
+        assert_eq!(domain_wire("a.b."), domain_wire("a.b"));
     }
 }

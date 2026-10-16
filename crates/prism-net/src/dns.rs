@@ -13,9 +13,30 @@ use hickory_proto::rr::{Name, RData, Record, RecordType};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use crate::{Error, Result};
+
+/// Queries answered at the same time over UDP; datagrams beyond this are dropped.
+const MAX_UDP_INFLIGHT: usize = 512;
+/// TCP connections served at the same time; connections beyond this are closed on accept.
+const MAX_TCP_CONNS: usize = 128;
+/// Queries answered on one TCP connection before the server closes it.
+const MAX_TCP_QUERIES: usize = 64;
+/// How long a TCP client may take to send the length prefix or the body of a query.
+const TCP_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Receive buffer for upstream UDP answers; matches the largest EDNS payload we advertise.
+const UPSTREAM_BUF: usize = 4096;
+
+/// Transport a query arrived on. It decides how large a response may be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Transport {
+    /// Responses are truncated to the client's EDNS payload size, or 512 bytes without EDNS.
+    Udp,
+    /// Responses may be up to 65535 bytes.
+    Tcp,
+}
 
 /// The authoritative data: the zone apex and the address records under it.
 #[derive(Clone, Debug, Default)]
@@ -142,6 +163,8 @@ pub struct DnsServer {
     zone: RwLock<Zone>,
     udp: UdpSocket,
     tcp: TcpListener,
+    udp_slots: Arc<Semaphore>,
+    tcp_slots: Arc<Semaphore>,
 }
 
 fn bind_socket(cfg: &DnsConfig, ty: Type, proto: Protocol) -> Result<Socket> {
@@ -178,6 +201,8 @@ impl DnsServer {
             udp: UdpSocket::from_std(udp.into()).map_err(reg)?,
             tcp: TcpListener::from_std(tcp.into()).map_err(reg)?,
             zone: RwLock::new(zone),
+            udp_slots: Arc::new(Semaphore::new(MAX_UDP_INFLIGHT)),
+            tcp_slots: Arc::new(Semaphore::new(MAX_TCP_CONNS)),
             cfg,
         }))
     }
@@ -214,10 +239,15 @@ impl DnsServer {
                 .recv_from(&mut buf)
                 .await
                 .map_err(|e| Error::io("dns: udp recv", e))?;
+            let Ok(permit) = Arc::clone(&self.udp_slots).try_acquire_owned() else {
+                tracing::debug!(%from, "dns: too many udp queries in flight, dropping");
+                continue;
+            };
             let query = buf[..n].to_vec();
             let me = Arc::clone(self);
             tokio::spawn(async move {
-                if let Some(resp) = me.handle(&query, true).await
+                let _permit = permit;
+                if let Some(resp) = me.handle(&query, Transport::Udp).await
                     && let Err(e) = me.udp.send_to(&resp, from).await
                 {
                     tracing::debug!(error = %e, %from, "dns: udp send");
@@ -233,8 +263,13 @@ impl DnsServer {
                 .accept()
                 .await
                 .map_err(|e| Error::io("dns: tcp accept", e))?;
+            let Ok(permit) = Arc::clone(&self.tcp_slots).try_acquire_owned() else {
+                tracing::debug!(%from, "dns: too many tcp connections, closing");
+                continue;
+            };
             let me = Arc::clone(self);
             tokio::spawn(async move {
+                let _permit = permit;
                 if let Err(e) = me.serve_tcp_conn(stream).await {
                     tracing::debug!(error = %e, %from, "dns: tcp connection");
                 }
@@ -243,13 +278,18 @@ impl DnsServer {
     }
 
     async fn serve_tcp_conn(&self, mut stream: TcpStream) -> std::io::Result<()> {
-        loop {
-            let Ok(Ok(len)) = timeout(Duration::from_secs(10), stream.read_u16()).await else {
+        for _ in 0..MAX_TCP_QUERIES {
+            let Ok(Ok(len)) = timeout(TCP_READ_TIMEOUT, stream.read_u16()).await else {
                 return Ok(());
             };
             let mut query = vec![0u8; usize::from(len)];
-            stream.read_exact(&mut query).await?;
-            if let Some(resp) = self.handle(&query, false).await {
+            match timeout(TCP_READ_TIMEOUT, stream.read_exact(&mut query)).await {
+                Ok(read) => {
+                    read?;
+                }
+                Err(_) => return Ok(()),
+            }
+            if let Some(resp) = self.handle(&query, Transport::Tcp).await {
                 let Ok(len) = u16::try_from(resp.len()) else {
                     return Ok(());
                 };
@@ -258,10 +298,11 @@ impl DnsServer {
                 stream.write_all(&out).await?;
             }
         }
+        Ok(())
     }
 
     /// Answers one wire-format query. `None` drops it.
-    async fn handle(&self, query: &[u8], udp: bool) -> Option<Vec<u8>> {
+    async fn handle(&self, query: &[u8], transport: Transport) -> Option<Vec<u8>> {
         let Ok(req) = Message::from_vec(query) else {
             if query.len() < 12 {
                 return None;
@@ -284,10 +325,9 @@ impl DnsServer {
                 .to_vec()
                 .ok();
         }
-        let limit = if udp {
-            req.edns.as_ref().map_or(512, |e| e.max_payload().max(512))
-        } else {
-            u16::MAX
+        let limit = match transport {
+            Transport::Udp => req.edns.as_ref().map_or(512, |e| e.max_payload().max(512)),
+            Transport::Tcp => u16::MAX,
         };
         let local = self
             .zone
@@ -319,10 +359,21 @@ impl DnsServer {
     }
 
     /// Forwards a query to the upstreams in order; the reply keeps the client's ID.
+    /// `query` must hold at least the 12-byte DNS header, which `handle` guarantees by
+    /// parsing it first. Returns `None` when every upstream fails.
     async fn forward(&self, query: &[u8]) -> Option<Vec<u8>> {
+        if query.len() < 12 {
+            return None;
+        }
         let id = [query[0], query[1]];
         for upstream in &self.cfg.upstreams {
-            let new_id = rand_id();
+            let new_id = match rand_id() {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!(error = %e, "dns: no random source for transaction IDs, not forwarding");
+                    return None;
+                }
+            };
             let mut q = query.to_vec();
             q[..2].copy_from_slice(&new_id.to_be_bytes());
             let t = self.cfg.upstream_timeout;
@@ -353,15 +404,12 @@ impl DnsServer {
     }
 }
 
-fn rand_id() -> u16 {
+/// A random upstream transaction ID. Fails instead of falling back to a guessable value,
+/// because the ID is what stops an off-path attacker from forging an upstream answer.
+fn rand_id() -> std::io::Result<u16> {
     let mut b = [0u8; 2];
-    if getrandom::fill(&mut b).is_err() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos());
-        return nanos as u16;
-    }
-    u16::from_ne_bytes(b)
+    getrandom::fill(&mut b).map_err(std::io::Error::other)?;
+    Ok(u16::from_ne_bytes(b))
 }
 
 async fn forward_udp(upstream: SocketAddr, query: &[u8], id: u16) -> std::io::Result<Vec<u8>> {
@@ -373,7 +421,7 @@ async fn forward_udp(upstream: SocketAddr, query: &[u8], id: u16) -> std::io::Re
     let sock = UdpSocket::bind(bind).await?;
     sock.connect(upstream).await?;
     sock.send(query).await?;
-    let mut buf = vec![0u8; 65535];
+    let mut buf = vec![0u8; UPSTREAM_BUF];
     loop {
         let n = sock.recv(&mut buf).await?;
         if n >= 12 && u16::from_be_bytes([buf[0], buf[1]]) == id {
@@ -442,5 +490,22 @@ mod tests {
         let r = z.answer(&query("host.foo.ts.net.", RecordType::A)).unwrap();
         assert_eq!(r.metadata.response_code, ResponseCode::NXDomain);
         assert!(z.answer(&query("example.com.", RecordType::A)).is_none());
+    }
+
+    #[test]
+    fn rand_id_succeeds() {
+        assert!(rand_id().is_ok());
+    }
+
+    #[tokio::test]
+    async fn forward_rejects_short_query() {
+        let cfg = DnsConfig {
+            listen: "127.0.0.1:0".parse().unwrap(),
+            interface: None,
+            upstreams: vec!["127.0.0.1:9".parse().unwrap()],
+            upstream_timeout: Duration::from_millis(50),
+        };
+        let server = DnsServer::bind(cfg, zone()).unwrap();
+        assert!(server.forward(&[1]).await.is_none());
     }
 }

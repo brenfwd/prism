@@ -23,11 +23,11 @@
 //!
 //! | sector | contents |
 //! |---|---|
-//! | 0–15 | system area (zeros) |
+//! | 0 to 15 | system area (zeros) |
 //! | 16 | primary volume descriptor |
 //! | 17 | Joliet supplementary volume descriptor |
 //! | 18 | volume descriptor set terminator |
-//! | 19–22 | path tables: primary L, primary M, Joliet L, Joliet M |
+//! | 19 to 22 | path tables: primary L, primary M, Joliet L, Joliet M |
 //! | 23… | primary root directory, Joliet root directory, file data |
 
 #![warn(missing_docs)]

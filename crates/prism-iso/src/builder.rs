@@ -23,7 +23,7 @@ pub struct IsoBuilder {
 impl IsoBuilder {
     /// Starts an image with the given volume identifier (label).
     ///
-    /// The label must be 1–16 characters from `A-Z`, `0-9` and `_`, so the
+    /// The label must be 1 to 16 characters from `A-Z`, `0-9` and `_`, so the
     /// same string fits both the primary (d-characters, 32 bytes) and the
     /// Joliet (UCS-2, 16 characters) descriptors. [`IsoBuilder::build`] and
     /// [`IsoBuilder::write`] return [`Error::VolumeId`] for any other label.
@@ -48,8 +48,8 @@ impl IsoBuilder {
 
     /// Sets the timestamp recorded for the volume and every file.
     /// Defaults to the time [`IsoBuilder::new`] was called. Times before
-    /// 1970 are recorded as 1970, and years are clamped to 1900–2155 in
-    /// directory records and 0–9999 in descriptors.
+    /// 1970 are recorded as 1970, and years are clamped to 1900 to 2155 in
+    /// directory records and 0 to 9999 in descriptors.
     #[must_use]
     pub fn timestamp(mut self, t: SystemTime) -> Self {
         self.timestamp = t;

@@ -178,7 +178,7 @@ pub fn switch_mtu(wg_mtu: Option<u16>) -> u32 {
     })
 }
 
-/// Network names are DNS labels: 1–32 of `[a-z0-9-]`, no leading or
+/// Network names are DNS labels: 1 to 32 of `[a-z0-9-]`, no leading or
 /// trailing hyphen.
 pub fn valid_network_name(name: &str) -> bool {
     (1..=32).contains(&name.len())

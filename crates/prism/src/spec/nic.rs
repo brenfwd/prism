@@ -214,7 +214,7 @@ pub fn random_mac() -> String {
     format!("52:54:00:{:02x}:{:02x}:{:02x}", b[0], b[1], b[2])
 }
 
-/// Linux interface names: 1–15 bytes, no `/`, whitespace or `:`.
+/// Linux interface names: 1 to 15 bytes, no `/`, whitespace or `:`.
 pub fn valid_ifname(name: &str) -> bool {
     (1..=15).contains(&name.len())
         && name

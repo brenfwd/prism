@@ -39,7 +39,7 @@ pub struct Task {
     pub resource: String,
     pub node: Uuid,
     pub state: TaskState,
-    /// 0.0–1.0 when known.
+    /// 0.0 to 1.0 when known.
     pub progress: Option<f64>,
     pub message: String,
     pub error: Option<String>,
@@ -262,7 +262,7 @@ impl TaskCtx {
         self.snapshot().id
     }
 
-    /// Reports progress (0.0–1.0) and a status message; rate-limited.
+    /// Reports progress (0.0 to 1.0) and a status message; rate-limited.
     pub fn progress(&self, fraction: Option<f64>, message: impl Into<String>) {
         let mut guard = self
             .task

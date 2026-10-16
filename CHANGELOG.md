@@ -28,3 +28,11 @@ First release.
 ### Changed
 
 - Crate metadata is filled in. `prism-libvirt`, `prism-iso` and `prism-net` can be published; the other crates have `publish = false`. The minimum Rust version is 1.89.
+
+### Behaviour notes
+
+- Calls to libvirt time out after 600 seconds, except the transfer step of a live migration, which waits until the migration ends.
+- A port forward on a host port that Prism listens on (the `http.listen` ports, the WireGuard port, and cluster ports 7443 and 7444) is refused. URL downloads are capped at 256 GiB and refuse redirects from https to http.
+- `prism serve` starts VMs with autostart only after it reads a boot ID that differs from the stored one. If `/proc/sys/kernel/random/boot_id` cannot be read, autostart is skipped and a message is logged.
+- `prism serve` fails to start when an archive member directory cannot be prepared, and the raft log store fails to open when SQLite does not enter WAL mode.
+- A cluster write that reaches a node without raft answers 503 `cluster_degraded` instead of 500.

@@ -21,6 +21,10 @@ const KEEPALIVE: u16 = 25;
 pub struct NetlinkMesh {
     key_path: PathBuf,
     nl: Mutex<Option<Netlink>>,
+    /// The mesh prefix whose boundary table this process installed. The network agent owns
+    /// the table from then on: it adds the guest chains, so installing the boundary alone
+    /// again would wipe them until its next pass.
+    boundary: Mutex<Option<ipnet::Ipv6Net>>,
 }
 
 /// The mesh implementation for this node; `dir` is the config directory.
@@ -28,6 +32,7 @@ pub fn mesh(dir: &Path) -> Arc<dyn Mesh> {
     Arc::new(NetlinkMesh {
         key_path: dir.join("wg/wg.key"),
         nl: Mutex::new(None),
+        boundary: Mutex::new(None),
     })
 }
 
@@ -91,14 +96,18 @@ impl NetlinkMesh {
         // The mesh /48 is reachable only through wg-prism.
         let s = addr.segments();
         let prefix = ipnet::Ipv6Net::new(Ipv6Addr::new(s[0], s[1], s[2], 0, 0, 0, 0, 0), 48)?;
-        let table = boundary_ruleset(&BoundaryConfig {
-            mesh_prefix: prefix,
-            wg_interface: INTERFACE.into(),
-            qemu_uid: qemu_uid(),
-        });
-        let nft = Nft::new()?;
-        let (_, res) = nft.replace_tables_async(vec![table]).await;
-        res?;
+        let mut installed = self.boundary.lock().await;
+        if *installed != Some(prefix) {
+            let table = boundary_ruleset(&BoundaryConfig {
+                mesh_prefix: prefix,
+                wg_interface: INTERFACE.into(),
+                qemu_uid: qemu_uid(),
+            });
+            let nft = Nft::new()?;
+            let (_, res) = nft.replace_tables_async(vec![table]).await;
+            res?;
+            *installed = Some(prefix);
+        }
         Ok(public)
     }
 

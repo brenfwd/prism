@@ -1177,4 +1177,4 @@ These limits were checked against the code.
 - Learned IPv6 addresses are per node. A guest on another node that uses a non-EUI-64 address resolves to its EUI-64 address on nodes that have not exchanged traffic with it. A new address is dropped until the next reconcile pass (up to 15 seconds). Tagged-frame checks on trunks do not follow IPv6 extension headers.
 - A passt user-mode port forward is unavailable on hosts where libvirt's AppArmor passt profile is broken, and passt forwards change only at the next VM start.
 - The UI has no screens for backups, live migration or cold move, polls on a few pages, and the Archive page does not handle files.
-- Prism does not check `qemu.conf`, directory ownership or `wg.key` permissions, and the repository has no CI.
+- Prism does not check `qemu.conf`, directory ownership or `wg.key` permissions.

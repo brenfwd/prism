@@ -12,7 +12,7 @@ describe("boot order", () => {
   test("moving a disabled item above an enabled one enables it", () => {
     const next = moveBootItem([item("a", true), item("b", false)], 1, 0)!;
     expect(ids(next)).toBe("ba");
-    expect(next.every((x) => x.enabled)).toBe(false);
+    expect(next.every((x) => x.enabled)).toBe(true);
     expect(bootIds(next)).toEqual(["b", "a"]);
   });
 

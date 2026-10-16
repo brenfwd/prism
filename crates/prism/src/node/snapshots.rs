@@ -363,7 +363,7 @@ impl Node {
                 let after = chain_files(&node.local_spec(spec.id)?);
                 for (pool, file) in before.iter().filter(|f| !after.contains(f)) {
                     if let Ok(p) = node.storage.get(pool) {
-                        let _ = p.delete_volume(file);
+                        p.delete_volume_best_effort(file);
                     }
                 }
                 if let Some(mem) = memory_file(&xml) {
@@ -371,7 +371,7 @@ impl Node {
                         if let Ok(rest) = mem.strip_prefix(&pool.path)
                             && let Some(f) = rest.to_str()
                         {
-                            let _ = pool.delete_volume(f);
+                            pool.delete_volume_best_effort(f);
                         }
                     }
                 }

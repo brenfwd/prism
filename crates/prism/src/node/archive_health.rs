@@ -259,6 +259,7 @@ impl Node {
                     total.repaired += r.repaired;
                     total.unrecoverable += r.unrecoverable;
                     total.unreachable += r.unreachable;
+                    total.delete_failed += r.delete_failed;
                 }
                 Err(e) => {
                     tracing::warn!("scrubbing {pool} on {peer}: {e:#}");
@@ -306,7 +307,9 @@ impl Node {
                     tracing::warn!("replicating archive scrub time: {e:#}");
                 }
             } else {
-                let _ = self.state.db().set_meta(SCRUB_META, &now.to_string());
+                if let Err(e) = self.state.db().set_meta(SCRUB_META, &now.to_string()) {
+                    tracing::warn!("recording archive scrub time: {e:#}");
+                }
             }
         }
         due

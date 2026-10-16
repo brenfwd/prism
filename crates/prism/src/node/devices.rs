@@ -151,7 +151,9 @@ impl Node {
         let pool = self.storage.get(pool)?;
         let name = format!("archive-{}.iso", &file.blake3[..16.min(file.blake3.len())]);
         if pool.volume(&name).is_ok() {
-            let _ = pool.touch_volume(&name);
+            if let Err(e) = pool.touch_volume(&name) {
+                tracing::debug!(volume = %name, "could not refresh ISO cache timestamp: {e}");
+            }
             return Ok(name);
         }
         self.iso_cache_make_room(&pool, file.size);
@@ -232,7 +234,7 @@ impl Node {
             && created
             && let Some(v) = volume
         {
-            let _ = pool.delete_volume(&v);
+            pool.delete_volume_best_effort(&v);
         }
         res
     }

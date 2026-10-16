@@ -413,13 +413,13 @@ impl Node {
         for disk in spec.disks.iter().filter(|d| d.device == DiskDevice::Disk) {
             if let Ok(pool) = self.storage.get(&disk.pool) {
                 for f in disk.backing.iter().chain(disk.volume.iter()) {
-                    let _ = pool.delete_volume(f);
+                    pool.delete_volume_best_effort(f);
                 }
             }
         }
         for (mpool, mem) in &memory {
             if let Ok(pool) = self.storage.get(mpool) {
-                let _ = pool.delete_volume(mem);
+                pool.delete_volume_best_effort(mem);
             }
         }
         self.remove_seed_iso(spec);
@@ -473,7 +473,7 @@ impl Node {
                 Ok(_) => created.push(img.name.clone()),
                 Err(e) => {
                     for n in &created {
-                        let _ = pool.delete_volume(n);
+                        pool.delete_volume_best_effort(n);
                     }
                     return Err(e.into());
                 }
@@ -524,7 +524,7 @@ impl Node {
             Ok(r) => r,
             Err(e) => {
                 for n in &created {
-                    let _ = pool.delete_volume(n);
+                    pool.delete_volume_best_effort(n);
                 }
                 return Err(e.into());
             }
@@ -558,7 +558,7 @@ impl Node {
             other => {
                 if let Ok(pool) = self.storage.get(&req.pool) {
                     for n in &req.images {
-                        let _ = pool.delete_volume(n);
+                        pool.delete_volume_best_effort(n);
                     }
                 }
                 Ok(FinishResp {

@@ -33,6 +33,10 @@ pub struct ScrubReport {
     /// Nodes that could not be scrubbed because they were unreachable.
     #[serde(default)]
     pub unreachable: usize,
+    /// Bad replicas whose bytes could not be deleted after repair; they stay
+    /// on disk until the next scrub.
+    #[serde(default)]
+    pub delete_failed: usize,
 }
 
 /// What a repair or drain pass did.
@@ -172,7 +176,7 @@ impl Node {
                 .ok_or_else(|| anyhow::anyhow!("member {} is not open here", target.name))?;
             let (_, hash) = member.write(&file.path, stream).await?;
             if hash != file.blake3 {
-                let _ = member.delete(&file.path);
+                member.delete_best_effort(&file.path);
                 anyhow::bail!("copy of {} failed its BLAKE3 check", file.path);
             }
             self.state
@@ -217,7 +221,7 @@ impl Node {
             .ok_or_else(|| anyhow::anyhow!("no member {member_name} of {pool} on this node"))?;
         let (_, hash) = member.write(path, body.into_data_stream()).await?;
         if hash != file.blake3 {
-            let _ = member.delete(path);
+            member.delete_best_effort(path);
             anyhow::bail!("received copy of {path} failed its BLAKE3 check");
         }
         self.state
@@ -233,13 +237,14 @@ impl Node {
         Ok(())
     }
 
-    /// Deletes one replica's bytes, here or on its node.
-    pub(super) async fn archive_delete_bytes(&self, file: &ArchiveFileDoc, r: &Replica) {
+    /// Deletes one replica's bytes, here or on its node. Returns whether the
+    /// bytes are gone; failures are logged.
+    pub(super) async fn archive_delete_bytes(&self, file: &ArchiveFileDoc, r: &Replica) -> bool {
         if r.node == self.id {
-            if let Some(m) = self.archive.member(&r.member) {
-                let _ = m.delete(&file.path);
-            }
-            return;
+            return self
+                .archive
+                .member(&r.member)
+                .is_none_or(|m| m.delete_best_effort(&file.path));
         }
         let req = Request::builder()
             .method("DELETE")
@@ -248,10 +253,13 @@ impl Node {
                 file.pool, file.path, r.member
             ))
             .body(Body::empty());
-        if let Ok(req) = req
-            && let Err(e) = self.archive_peer(r.node, req).await
-        {
-            tracing::warn!("removing {} from {}: {e:#}", file.path, r.node);
+        let Ok(req) = req else { return false };
+        match self.archive_peer(r.node, req).await {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!("removing {} from {}: {e:#}", file.path, r.node);
+                false
+            }
         }
     }
 
@@ -402,7 +410,9 @@ impl Node {
                 })
                 .await
             {
-                Ok(()) => self.archive_delete_bytes(file, &here).await,
+                Ok(()) => {
+                    self.archive_delete_bytes(file, &here).await;
+                }
                 Err(e) => {
                     tracing::warn!("draining {}: {e}", file.path);
                     report.failed += 1;
@@ -470,11 +480,15 @@ impl Node {
                 tracing::error!("{}/{} has no good replica", file.pool, file.path);
                 continue;
             }
-            self.archive_delete_bytes(&file, &r).await;
+            if !self.archive_delete_bytes(&file, &r).await {
+                report.delete_failed += 1;
+            }
             report.repaired += 1;
         }
         if report.repaired > 0 {
-            let _ = self.archive_repair_pool(pool).await;
+            if let Err(e) = self.archive_repair_pool(pool).await {
+                tracing::warn!("re-replicating {pool} after scrub: {e:#}");
+            }
         }
         Ok(report)
     }

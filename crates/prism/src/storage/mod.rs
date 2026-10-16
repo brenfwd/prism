@@ -18,6 +18,9 @@ use tokio::process::Command;
 
 use image::qcow2_virtual_size;
 
+/// Name prefix of in-progress files (uploads, downloads, seed builds). The
+/// creator renames a partial file into place on success or unlinks it on
+/// failure; `Pool::clean_partials` removes any left behind by a crash.
 pub const PARTIAL_PREFIX: &str = ".prism-partial-";
 
 /// `[A-Za-z0-9._-]{1,128}` with no leading `-` or `.`.
@@ -309,6 +312,14 @@ impl Pool {
             rustix::io::Errno::NOENT => StorageError::NoVolume(name.into()),
             e => e.into(),
         })
+    }
+
+    /// Deletes a volume and logs a warning if that fails. Used on rollback
+    /// and cleanup paths, where the original error is the one to report.
+    pub fn delete_volume_best_effort(&self, name: &str) {
+        if let Err(e) = self.delete_volume(name) {
+            tracing::warn!(pool = %self.name, volume = name, "cleanup could not delete volume: {e}");
+        }
     }
 }
 

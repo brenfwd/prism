@@ -127,7 +127,8 @@ impl Node {
 
     pub(super) async fn on_domain_event(&self, ev: DomainEvent) {
         let id = Uuid::from_bytes(ev.domain().uuid);
-        let _ = self.domain_events.send(ev.clone());
+        // `send` fails only when nothing is subscribed, which is normal.
+        self.domain_events.send(ev.clone()).ok();
         match ev {
             DomainEvent::Lifecycle { event, .. } => {
                 tracing::debug!(vm = %ev.domain().name, ?event, "lifecycle");

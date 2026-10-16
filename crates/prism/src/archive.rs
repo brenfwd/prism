@@ -336,6 +336,19 @@ impl LocalMember {
         .map_err(|e| StorageError::Invalid(e.to_string()))?
     }
 
+    /// Deletes `path`, logging a warning on failure. Returns whether the
+    /// file is gone. Used where a failed delete must not mask the error that
+    /// led to it.
+    pub fn delete_best_effort(&self, path: &str) -> bool {
+        match self.delete(path) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(member = %self.name, pool = %self.pool, path, "could not delete archive file: {e}");
+                false
+            }
+        }
+    }
+
     pub fn delete(&self, path: &str) -> Result<(), StorageError> {
         Self::check(path)?;
         rustix::fs::unlinkat(&self.root, path, AtFlags::empty()).map_err(|e| match e {

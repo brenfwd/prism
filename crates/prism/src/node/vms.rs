@@ -122,9 +122,11 @@ impl Node {
         }
         .await;
         if let Err(e) = res {
-            let _ = c.undefine(&domain_ref(&spec), undefine_flags()).await;
+            if let Err(undefine_err) = c.undefine(&domain_ref(&spec), undefine_flags()).await {
+                tracing::warn!(vm = %spec.name, "rollback could not undefine domain: {undefine_err}");
+            }
             if let Some(v) = created_volume {
-                let _ = pool.delete_volume(&v);
+                pool.delete_volume_best_effort(&v);
             }
             return Err(e);
         }

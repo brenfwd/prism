@@ -240,7 +240,7 @@ impl Node {
             poll.abort();
             if let Err(e) = done {
                 for d in &disks {
-                    let _ = staging_pool.delete_volume(&staged(&d.target));
+                    staging_pool.delete_volume_best_effort(&staged(&d.target));
                 }
                 if let Some(cp) = &checkpoint
                     && let Ok(cp) = c.checkpoint_lookup(&dom, cp).await
@@ -276,7 +276,7 @@ impl Node {
             );
             let file = staging_pool.open_read(&name)?;
             let stored = self.archive_store_file(&req.pool, &path, file).await;
-            let _ = staging_pool.delete_volume(&name);
+            staging_pool.delete_volume_best_effort(&name);
             let stored = stored?;
             out.push(BackupDisk {
                 target: d.target.clone(),

@@ -66,7 +66,7 @@ impl Node {
                 })
                 .await
             {
-                let _ = member.delete(path);
+                member.delete_best_effort(path);
                 anyhow::bail!("{e}");
             }
             return Ok(doc);

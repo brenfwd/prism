@@ -17,6 +17,7 @@ mod iso_cache;
 mod job_watch;
 mod libvirt;
 mod migrate;
+mod migrate_chain;
 mod migrate_dest;
 mod migrate_peer;
 mod migrate_perform;

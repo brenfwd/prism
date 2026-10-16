@@ -82,6 +82,7 @@ impl Node {
             .map_err(anyhow::Error::from)?;
 
         let mut xml = rewrite_pool_paths(&req.begin_xml, req.src_pools.values(), &pool.path);
+        xml = super::migrate_chain::expand_chains(&xml, &backing_chains(pool, &req.vm));
         // Revert leaves the seed CD-ROM on qcow2 overlays that never travel;
         // point it at the plain ISO just written here.
         if let Some(seed) = seed {
@@ -148,6 +149,28 @@ impl Node {
             }
         }
     }
+}
+
+/// The backing layers of each disk as they sit in the destination pool, nearest the top first.
+fn backing_chains(pool: &Pool, vm: &crate::spec::VmSpec) -> Vec<super::migrate_chain::Chain> {
+    vm.disks
+        .iter()
+        .filter(|d| d.device == DiskDevice::Disk)
+        .map(|d| super::migrate_chain::Chain {
+            target: d.target.clone(),
+            layers: d
+                .backing
+                .iter()
+                .rev()
+                .map(|b| {
+                    (
+                        pool.path.join(b).to_string_lossy().into_owned(),
+                        pool.image_format(b).unwrap_or_else(|| d.format.clone()),
+                    )
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 /// Replaces every `'<src>/` and `"<src>/` path prefix in `xml` with the

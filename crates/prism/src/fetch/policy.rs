@@ -108,9 +108,12 @@ fn blocked_message(host: &str, ip: IpAddr, why: Blocked) -> String {
     } else {
         format!(" ({host} resolves to {ip})")
     };
-    format!(
-        "downloads from {why} are blocked{via}; to allow it, set download.allow_private = true or add the range to download.allow in prism.toml"
-    )
+    let hint = if why == Blocked::Private {
+        "set download.allow_private = true or add the range to download.allow"
+    } else {
+        "add the range to download.allow"
+    };
+    format!("downloads from {why} are blocked{via}; to allow it, {hint} in prism.toml")
 }
 
 /// Maps IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) to IPv4, and strips the

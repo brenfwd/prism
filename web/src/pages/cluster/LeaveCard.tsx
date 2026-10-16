@@ -45,7 +45,7 @@ export function LeaveCard({ status }: { status: ClusterStatus }) {
     if (await confirm({ title: "Leave this cluster?", body: "The node restarts as standalone.", confirmLabel: "Leave", danger: true })) leave.mutate();
   };
   return (
-    <Card title="Leave cluster" description="Removes this node and returns it to standalone. Its machines stay on this node.">
+    <Card title="Leave cluster" description="Removes this node and returns it to standalone. Move or delete its machines first, and drain its archive disks.">
       <Button variant="danger" loading={leave.isPending} onClick={start}>Leave cluster</Button>
       {guide && (
         <Modal

@@ -32,7 +32,7 @@ export function InviteModal({ onClose }: { onClose: () => void }) {
     <Modal
       size="lg"
       title={invite ? "Send this invite to the new node" : "Invite a node"}
-      description={invite ? "Run Join on the new node's Cluster page and paste it. It expires in 24 hours." : "Creates a one-time invite. It carries no secrets."}
+      description={invite ? "Run Join on the new node's Cluster page and paste it. It expires in one hour." : "Creates a one-time invite. It carries no secrets."}
       onClose={onClose}
       footer={
         invite ? (

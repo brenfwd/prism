@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::snapshot_xml::{SnapshotDisk, snapshot_xml};
-use super::{Node, NodeError, Result, domain_ref};
+use super::{Node, NodeError, Result, VmState, domain_ref};
 use crate::render;
 use crate::spec::{DiskDevice, DiskSpec, VmSpec};
 use crate::storage::valid_name;
@@ -319,7 +319,20 @@ impl Node {
                     .snapshot_lookup(&domain_ref(&spec), &name)
                     .await
                     .map_err(NodeError::from)?;
-                c.snapshot_revert(&snap, 0).await.map_err(NodeError::from)?;
+                // A snapshot taken without memory leaves the domain shut off unless told
+                // otherwise, so ask for the state the VM was in.
+                let flags = match c
+                    .get_info(&domain_ref(&spec))
+                    .await
+                    .map(|i| VmState::from(i.state))
+                {
+                    Ok(VmState::Running) => op::SNAPSHOT_REVERT_RUNNING,
+                    Ok(VmState::Paused) => op::SNAPSHOT_REVERT_PAUSED,
+                    _ => 0,
+                };
+                c.snapshot_revert(&snap, flags)
+                    .await
+                    .map_err(NodeError::from)?;
                 node.sync_disk_chains(spec.id).await?;
                 node.refresh(&spec).await;
                 Ok(serde_json::json!({ "name": name }))

@@ -87,11 +87,29 @@ impl Node {
         let mut offline = before.clone();
         let mut expired = HashSet::new();
         let nodes = self.nodes();
-        offline.retain(|id, _| nodes.iter().any(|n| n.id == *id && !n.reachable));
-        for n in nodes.iter().filter(|n| !n.reachable) {
-            let since = *offline.entry(n.id).or_insert(now);
+        // A member never heard from since this daemon started (it was down before the restart,
+        // or this node just became the leader) counts as unreachable, so its clock carries on.
+        let unreachable: HashSet<Uuid> = self
+            .state
+            .members()
+            .unwrap_or_default()
+            .iter()
+            .filter(|m| {
+                m.state == crate::cluster::model::MemberState::Active && m.node_id != self.id
+            })
+            .map(|m| m.node_id)
+            .filter(|id| {
+                nodes
+                    .iter()
+                    .find(|n| n.id == *id)
+                    .is_none_or(|n| !n.reachable)
+            })
+            .collect();
+        offline.retain(|id, _| unreachable.contains(id));
+        for id in &unreachable {
+            let since = *offline.entry(*id).or_insert(now);
             if now.saturating_sub(since) >= OFFLINE_GRACE.as_secs() {
-                expired.insert(n.id);
+                expired.insert(*id);
             }
         }
         if offline != before {

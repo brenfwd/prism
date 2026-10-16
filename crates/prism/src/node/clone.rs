@@ -7,7 +7,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::{Node, NodeError, Result};
-use crate::spec::{DiskDevice, NicNetwork, random_mac};
+use crate::spec::{DiskDevice, random_mac};
 use crate::storage::valid_name;
 use crate::tasks::Task;
 
@@ -63,11 +63,7 @@ impl Node {
                 for nic in &mut spec.nics {
                     nic.id = Uuid::new_v4();
                     nic.mac = random_mac();
-                    nic.network.clear_lease();
-                    if let NicNetwork::User { forwards } = &mut nic.network {
-                        // Host ports belong to the original.
-                        forwards.clear();
-                    }
+                    nic.network.reset_for_copy();
                 }
                 let todo: Vec<usize> = (0..spec.disks.len())
                     .filter(|&i| spec.disks[i].device == DiskDevice::Disk)

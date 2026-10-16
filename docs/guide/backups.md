@@ -51,7 +51,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/backups/$BACKUP/restore \
 2. Give the new VM a name that is free (`a VM named <name> already exists`) and a local disk pool on the node that handles the request, which becomes the node that owns the new VM.
 3. Follow the `backup.restore` task. For each disk Prism fetches every layer from the archive, verifies the hash, links the layers and flattens them into `<name>-<device>.<format>` in the pool. The disk format is the pool's format.
 
-The new VM has a new ID and new MAC addresses, and its network leases are assigned again. Its settings are the ones recorded in the backup. It is defined but not started. A restore fails with `<path> is missing from archive pool <pool>` when an archive file is gone, which a scrub can reveal.
+The new VM has a new ID and new MAC addresses, and its network leases are assigned again. Its settings are the ones recorded in the backup, except the addresses and port forwards, which belong to the original. It is defined but not started. A restore fails with `<path> is missing from archive pool <pool>` when an archive file is gone, which a scrub can reveal.
 
 ## Delete a backup
 

@@ -28,9 +28,7 @@ pub struct VlanSubnet {
 /// Reads the `vlan_subnets` map of a [`NetworkDoc`]. JSON object keys are strings, and a command
 /// that is internally tagged (as every replicated one is) hands them over as buffered strings,
 /// which serde cannot turn into `u16` keys by itself.
-pub(super) fn deserialize_by_vlan<'de, D>(
-    de: D,
-) -> Result<BTreeMap<u16, VlanSubnet>, D::Error>
+pub(super) fn deserialize_by_vlan<'de, D>(de: D) -> Result<BTreeMap<u16, VlanSubnet>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

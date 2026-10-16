@@ -200,10 +200,15 @@ impl NicNetwork {
         }
     }
 
-    /// Forgets the IPAM lease, for copies of a NIC (restores, clones).
-    pub fn clear_lease(&mut self) {
-        if let Self::Network { ipv4, .. } = self {
+    /// Drops what belongs to the original NIC alone, for copies (restores, clones): the IPAM
+    /// lease, a fixed IPv6 address, and the port forwards, whose host ports the original keeps.
+    pub fn reset_for_copy(&mut self) {
+        if let Self::Network { ipv4, ipv6, .. } = self {
             *ipv4 = None;
+            *ipv6 = None;
+        }
+        if let Some(forwards) = self.forwards_mut() {
+            forwards.clear();
         }
     }
 }
@@ -220,4 +225,48 @@ pub fn valid_ifname(name: &str) -> bool {
         && name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_copy_keeps_neither_addresses_nor_forwards() {
+        let forward = PortForward {
+            proto: Proto::Tcp,
+            host_addr: None,
+            host_port: 2222,
+            guest_port: 22,
+            local: true,
+            hairpin: true,
+        };
+        let mut nic = NicNetwork::Network {
+            network: Uuid::nil(),
+            ipv4: Some(Ipv4Addr::new(10, 0, 0, 2)),
+            ipv6: Some(Ipv6Addr::LOCALHOST),
+            egress: None,
+            vlan: Some(10),
+            trunk: Vec::new(),
+            forwards: vec![forward.clone()],
+        };
+        nic.reset_for_copy();
+        let NicNetwork::Network {
+            ipv4,
+            ipv6,
+            vlan,
+            forwards,
+            ..
+        } = nic
+        else {
+            unreachable!()
+        };
+        assert_eq!((ipv4, ipv6, vlan), (None, None, Some(10)));
+        assert!(forwards.is_empty());
+        let mut user = NicNetwork::User {
+            forwards: vec![forward],
+        };
+        user.reset_for_copy();
+        assert!(user.forwards().is_empty());
+    }
 }

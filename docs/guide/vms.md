@@ -81,7 +81,7 @@ A snapshot records the state of the disks, and optionally the memory, so the VM 
 3. Tick Include memory on a running VM to save the RAM as well. Saving memory briefly pauses the guest, and a memory snapshot needs a disk to store it beside (`a memory snapshot needs a disk to store it beside`). When the guest agent is connected, Prism first asks it to freeze the file systems, and falls back to a crash-consistent snapshot if that fails.
 4. Press Take snapshot. The snapshot appears in the tree under its parent.
 
-To go back, choose Revert on a snapshot. A snapshot with memory resumes the running VM exactly where it was. A snapshot without memory restarts the VM from the saved disks. Reverting discards what happened since, so take a new snapshot first if you may want it. Delete merges the snapshot's overlays into their parents and removes the files libvirt no longer uses.
+To go back, choose Revert on a snapshot. A snapshot with memory resumes the running VM exactly where it was. A snapshot without memory restarts a running VM from the saved disks, and a stopped VM stays stopped. Reverting discards what happened since, so take a new snapshot first if you may want it. Delete merges the snapshot's overlays into their parents and removes the files libvirt no longer uses.
 
 Revert and delete need libvirt 9.9 or newer on the host, and fail with `reverting and deleting external snapshots needs libvirt 9.9 or newer` otherwise. Only one task runs on a VM at a time (`another task is running on this VM`). After a VM has moved between nodes, reverting to a snapshot with memory needs `confirm_memory=true`, because that path has crashed libvirtd in testing. The UI asks for confirmation. Shutting the VM down first and reverting avoids it.
 
@@ -95,7 +95,7 @@ Clone makes an independent copy of a stopped VM.
 2. Open the machine menu on the VM page and choose Clone.
 3. Give the new name and press Clone. The name must be free (`a VM named <name> already exists`).
 
-Prism copies every disk into a new qcow2 volume named `<name>-<device>.qcow2` in the disk's pool, which flattens snapshot history. The copy gets a new ID, new MAC addresses and new network leases, and it is owned by the node that ran the clone. Port forwards on user-mode NICs are not copied. API: `POST /vms/{id}/clone` with `{"name": "web2"}`.
+Prism copies every disk into a new qcow2 volume named `<name>-<device>.qcow2` in the disk's pool, which flattens snapshot history. The copy gets a new ID, new MAC addresses and new network leases, and it is owned by the node that ran the clone. Port forwards are not copied, because the original keeps its host ports. API: `POST /vms/{id}/clone` with `{"name": "web2"}`.
 
 ## Move a stopped VM to another node
 

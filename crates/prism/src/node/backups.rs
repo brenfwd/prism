@@ -395,11 +395,15 @@ impl Node {
                 spec.owner_epoch = crate::spec::FIRST_OWNER_EPOCH;
                 spec.generation = 1;
                 spec.migrating = None;
+                spec.snapshot_xml.clear();
                 for nic in &mut spec.nics {
+                    // A new ID matters: IPAM treats a NIC's own ID as free to reuse its lease.
+                    nic.id = Uuid::new_v4();
                     nic.mac = random_mac();
-                    nic.network.clear_lease();
+                    nic.network.reset_for_copy();
                 }
                 for d in &mut spec.disks {
+                    d.id = Uuid::new_v4();
                     d.pool.clone_from(&req.pool);
                     d.backing.clear();
                     if d.device == DiskDevice::Cdrom {

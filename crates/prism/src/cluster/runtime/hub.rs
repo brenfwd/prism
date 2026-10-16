@@ -10,6 +10,10 @@ use super::{Cluster, ClusterOpError};
 use crate::cluster::model::{ClusterMode, MemberDoc, MemberState};
 use crate::state::Command;
 
+/// How long to wait for the new voter to catch up with the log.
+const CATCH_UP_TIMEOUT: Duration = Duration::from_secs(15);
+/// How many log entries the new voter may trail by when the old hub steps down.
+const CATCH_UP_SLACK: u64 = 2;
 /// How long to wait for the new hub to win leadership.
 const HANDOVER_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -39,6 +43,35 @@ pub fn check_transfer(
 }
 
 impl Cluster {
+    async fn set_voter(&self, node_id: Uuid, voter: bool) -> Result<(), ClusterOpError> {
+        self.state
+            .apply(Command::SetVoter { node_id, voter })
+            .await?;
+        Ok(())
+    }
+
+    /// Waits until the leader's replication of raft member `raft_id` is within
+    /// [`CATCH_UP_SLACK`] entries of the last log index.
+    async fn wait_caught_up(&self, raft_id: u64) -> bool {
+        let deadline = tokio::time::Instant::now() + CATCH_UP_TIMEOUT;
+        while tokio::time::Instant::now() < deadline {
+            if let Some(m) = self.raft().map(|r| r.metrics()) {
+                let last = m.last_log_index.unwrap_or(0);
+                let matched = m
+                    .replication
+                    .as_ref()
+                    .and_then(|r| r.get(&raft_id))
+                    .and_then(|l| l.as_ref())
+                    .map(|l| l.index);
+                if matched.is_some_and(|i| i + CATCH_UP_SLACK >= last) {
+                    return true;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        false
+    }
+
     /// Promotes `to` and demotes this node, then waits for `to` to lead.
     pub async fn transfer_hub(&self, to: Uuid) -> Result<(), ClusterOpError> {
         let doc = self
@@ -52,20 +85,25 @@ impl Cluster {
                 "the cluster is degraded; wait until it is healthy".into(),
             ));
         }
+        let target = members
+            .iter()
+            .find(|m| m.node_id == to)
+            .map(|m| m.raft_id)
+            .ok_or_else(|| ClusterOpError::Invalid("no such member".into()))?;
         // Two committed changes, never zero voters: the reconciler first
-        // makes {old, new} voters, then {new}.
-        self.state
-            .apply(Command::SetVoter {
-                node_id: to,
-                voter: true,
-            })
-            .await?;
-        self.state
-            .apply(Command::SetVoter {
-                node_id: self.me,
-                voter: false,
-            })
-            .await?;
+        // makes {old, new} voters, then {new}. The old hub steps down only
+        // after the new voter has caught up, and a failure puts it back.
+        self.set_voter(to, true).await?;
+        if !self.wait_caught_up(target).await {
+            let _ = self.set_voter(to, false).await;
+            return Err(ClusterOpError::Conflict(
+                "the new hub is not reachable or is behind on the log; it stays a learner".into(),
+            ));
+        }
+        if let Err(e) = self.set_voter(self.me, false).await {
+            let _ = self.set_voter(to, false).await;
+            return Err(e);
+        }
         let deadline = tokio::time::Instant::now() + HANDOVER_TIMEOUT;
         while tokio::time::Instant::now() < deadline {
             if self.status()?.leader == Some(to) {

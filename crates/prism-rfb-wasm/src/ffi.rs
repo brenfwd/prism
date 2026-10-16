@@ -22,13 +22,13 @@
 //!
 //! Pointers and lengths are wasm32 addresses, so they fit in `u32`.
 
-// `#[unsafe(no_mangle)]` is required to export functions without
-// generated bindings; there are no `unsafe` blocks here.
-#![allow(unsafe_code)]
+// Each export carries its own `#[allow(unsafe_code)]`: the `no_mangle`
+// attribute is the only unsafe construct here, and a stray `unsafe` block elsewhere in
+// the file still fails the crate's `deny(unsafe_code)`.
 
 use std::cell::RefCell;
 
-use crate::{Action, Client, Error, Options};
+use crate::{Action, Client, Error, ErrorKind, Options};
 
 #[derive(Default)]
 struct Shim {
@@ -123,10 +123,28 @@ impl Shim {
     }
 
     fn client(&mut self) -> &mut Client {
-        let opts = &self.options;
-        self.client
-            .get_or_insert_with(|| Client::new(opts.clone().unwrap_or_default()))
+        client_of(&mut self.client, self.options.as_ref())
     }
+}
+
+/// The first `len` bytes of `input`, or an error when the host claims more
+/// bytes than it wrote.
+fn prefix(input: &[u8], len: u32) -> Result<&[u8], Error> {
+    input.get(..len as usize).ok_or_else(|| {
+        Error::new(
+            ErrorKind::OutOfRange,
+            format!(
+                "host passed length {len} but the input buffer holds {} bytes",
+                input.len()
+            ),
+        )
+    })
+}
+
+/// Returns the client, creating one from `options` on first use. A free
+/// function so callers can borrow the input buffer at the same time.
+fn client_of<'a>(client: &'a mut Option<Client>, options: Option<&Options>) -> &'a mut Client {
+    client.get_or_insert_with(|| Client::new(options.cloned().unwrap_or_default()))
 }
 
 fn with<R>(f: impl FnOnce(&mut Shim) -> R) -> R {
@@ -135,6 +153,7 @@ fn with<R>(f: impl FnOnce(&mut Shim) -> R) -> R {
 
 /// Starts a fresh connection. `quality` 0..=9 enables Tight JPEG; -1
 /// disables it. `compression` 0..=9, or -1 for the server default.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_create(quality: i32, compression: i32) {
     with(|s| {
@@ -146,6 +165,7 @@ pub extern "C" fn rfb_create(quality: i32, compression: i32) {
 
 /// Returns a buffer of `len` bytes for the next [`rfb_feed`],
 /// [`rfb_image_done`] or [`rfb_cut_text`] call to read.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_input(len: u32) -> u32 {
     with(|s| {
@@ -155,30 +175,38 @@ pub extern "C" fn rfb_input(len: u32) -> u32 {
     })
 }
 
-/// Feeds the first `len` bytes of the input buffer from the server.
+/// Feeds the first `len` bytes of the input buffer from the server. Returns
+/// -1 if `len` exceeds the buffer from the last [`rfb_input`].
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_feed(len: u32) -> i32 {
     with(|s| {
-        let input = std::mem::take(&mut s.input);
-        let r = s.client().feed(&input[..(len as usize).min(input.len())]);
-        s.input = input;
+        let r = prefix(&s.input, len)
+            .and_then(|input| client_of(&mut s.client, s.options.as_ref()).feed(input));
         s.encode(r)
     })
 }
 
 /// Completes an image decode: the input buffer holds `len` RGBA bytes, or
-/// `ok` is 0 if decoding failed.
+/// `ok` is 0 if decoding failed. Returns -1 if `len` exceeds the input buffer.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_image_done(ok: u32, len: u32) -> i32 {
     with(|s| {
-        let input = std::mem::take(&mut s.input);
-        let px = (ok != 0).then(|| &input[..(len as usize).min(input.len())]);
-        let r = s.client().image_decoded(px);
-        s.input = input;
+        let r = if ok == 0 {
+            Ok(None)
+        } else {
+            prefix(&s.input, len).map(Some)
+        }
+        .and_then(|px| client_of(&mut s.client, s.options.as_ref()).image_decoded(px));
         s.encode(r)
     })
 }
 
+/// Sends a key event: `down` is nonzero for press, `keysym` is an X11 keysym
+/// and `scancode` the XT scancode used when the server supports QEMU's
+/// extended key event.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_key(down: u32, keysym: u32, scancode: u32) -> i32 {
     with(|s| {
@@ -187,6 +215,9 @@ pub extern "C" fn rfb_key(down: u32, keysym: u32, scancode: u32) -> i32 {
     })
 }
 
+/// Sends a pointer event at framebuffer position (`x`, `y`), clamped to
+/// `u16::MAX`. `buttons` is the RFB button mask; only its low 8 bits are sent.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_pointer(x: u32, y: u32, buttons: u32) -> i32 {
     with(|s| {
@@ -196,18 +227,23 @@ pub extern "C" fn rfb_pointer(x: u32, y: u32, buttons: u32) -> i32 {
     })
 }
 
-/// Sends the first `len` bytes of the input buffer (UTF-8) as clipboard text.
+/// Sends the first `len` bytes of the input buffer (UTF-8) as clipboard
+/// text. Returns -1 if `len` exceeds the input buffer; invalid UTF-8 is
+/// replaced with U+FFFD.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_cut_text(len: u32) -> i32 {
     with(|s| {
-        let text =
-            String::from_utf8_lossy(&s.input[..(len as usize).min(s.input.len())]).into_owned();
-        let a = s.client().cut_text(&text);
-        s.encode(Ok(a))
+        let r = prefix(&s.input, len).map(|bytes| {
+            let text = String::from_utf8_lossy(bytes);
+            client_of(&mut s.client, s.options.as_ref()).cut_text(&text)
+        });
+        s.encode(r)
     })
 }
 
 /// Changes JPEG quality and compression level (as for [`rfb_create`]).
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_set_quality(quality: i32, compression: i32) -> i32 {
     with(|s| {
@@ -219,6 +255,7 @@ pub extern "C" fn rfb_set_quality(quality: i32, compression: i32) -> i32 {
 }
 
 /// Requests a full framebuffer refresh.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_refresh() -> i32 {
     with(|s| {
@@ -227,37 +264,53 @@ pub extern "C" fn rfb_refresh() -> i32 {
     })
 }
 
+/// Address of the action words written by the last call that returned a
+/// count. Valid until the next call that returns actions.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_actions() -> u32 {
     with(|s| addr(&s.words))
 }
 
+/// Address of the byte payloads that the action words refer to by
+/// (offset, length). Valid until the next call that returns actions.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_data() -> u32 {
     with(|s| addr(&s.data))
 }
 
 /// The RGBA framebuffer (moves when the framebuffer is resized).
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_fb() -> u32 {
     with(|s| addr(s.client().framebuffer().pixels()))
 }
 
+/// Framebuffer width in pixels.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_fb_width() -> u32 {
     with(|s| s.client().framebuffer().width().into())
 }
 
+/// Framebuffer height in pixels.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_fb_height() -> u32 {
     with(|s| s.client().framebuffer().height().into())
 }
 
+/// Address of the UTF-8 message for the last protocol error; its length is
+/// [`rfb_error_len`].
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_error() -> u32 {
     with(|s| addr(s.error.as_bytes()))
 }
 
+/// Length in bytes of the message at [`rfb_error`]. Zero before any error.
+#[allow(unsafe_code)]
 #[unsafe(no_mangle)]
 pub extern "C" fn rfb_error_len() -> u32 {
     with(|s| s.error.len() as u32)

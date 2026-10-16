@@ -5,9 +5,9 @@ use super::{
     Action, Client, CursorImage, ImageFormat, MAX_CURSOR, MAX_CUT_TEXT, RectState, State, be16,
     be32, enc, latin1,
 };
-use crate::Error;
 use crate::decode::{self, HextileColours, TightBody};
 use crate::fb::Rect;
+use crate::{Error, ErrorKind};
 
 impl Client {
     pub(super) fn message(&mut self, input: &[u8]) -> Result<Option<usize>, Error> {
@@ -39,7 +39,10 @@ impl Client {
                 };
                 let len = be32(&h[4..8]) as usize;
                 if len > MAX_CUT_TEXT {
-                    return Err(Error::new("server clipboard text too large"));
+                    return Err(Error::new(
+                        ErrorKind::OutOfRange,
+                        "server clipboard text too large",
+                    ));
                 }
                 let Some(text) = input.get(8..8 + len) else {
                     return Ok(None);
@@ -48,7 +51,10 @@ impl Client {
                 Ok(Some(8 + len))
             }
             150 => Ok(Some(1)), // EndOfContinuousUpdates
-            k => Err(Error::new(format!("unsupported server message type {k}"))),
+            k => Err(Error::new(
+                ErrorKind::Unsupported,
+                format!("unsupported server message type {k}"),
+            )),
         }
     }
 
@@ -92,9 +98,10 @@ impl Client {
             enc::RAW | enc::COPY_RECT | enc::HEXTILE | enc::ZRLE | enc::TIGHT | enc::TIGHT_PNG
                 if !self.fb.contains(rect) =>
             {
-                return Err(Error::new(format!(
-                    "rectangle {rect:?} outside the framebuffer"
-                )));
+                return Err(Error::new(
+                    ErrorKind::OutOfRange,
+                    format!("rectangle {rect:?} outside the framebuffer"),
+                ));
             }
             enc::RAW
             | enc::COPY_RECT
@@ -105,7 +112,12 @@ impl Client {
             | enc::CURSOR
             | enc::EXTENDED_DESKTOP_SIZE
             | enc::QEMU_LED_STATE => {}
-            e => return Err(Error::new(format!("server used unrequested encoding {e}"))),
+            e => {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    format!("server used unrequested encoding {e}"),
+                ));
+            }
         }
         let sub = match encoding {
             enc::RAW => RectState::Raw(0),
@@ -186,7 +198,10 @@ impl Client {
                 };
                 let (sx, sy) = (be16(&s[0..2]), be16(&s[2..4]));
                 if !self.fb.contains(Rect::new(sx, sy, rect.w, rect.h)) {
-                    return Err(Error::new("CopyRect source outside the framebuffer"));
+                    return Err(Error::new(
+                        ErrorKind::OutOfRange,
+                        "CopyRect source outside the framebuffer",
+                    ));
                 }
                 self.fb.copy_rect(sx, sy, rect);
                 self.rect_done(left, Some(rect));
@@ -310,7 +325,10 @@ impl Client {
                             if out.len() == raw_len {
                                 Ok(&out[..])
                             } else {
-                                Err(Error::new("Tight data shorter than its rectangle"))
+                                Err(Error::new(
+                                    ErrorKind::Truncated,
+                                    "Tight data shorter than its rectangle",
+                                ))
                             }
                         })
                 } else {

@@ -3,34 +3,46 @@
 mod handshake;
 mod update;
 
-use crate::Error;
 use crate::decode::HextileColours;
 use crate::fb::{Framebuffer, MAX_DIM, Rect};
 use crate::inflate::Inflater;
+use crate::{Error, ErrorKind};
 
 /// Encoding numbers (RFC 6143 section 7.7 plus registered extensions).
 pub mod encoding {
+    /// Uncompressed pixels.
     pub const RAW: i32 = 0;
+    /// Copy of another area of the framebuffer.
     pub const COPY_RECT: i32 = 1;
+    /// 16x16 tiles with background, foreground and subrectangles.
     pub const HEXTILE: i32 = 5;
+    /// Tight: palette, gradient, zlib and JPEG rectangles.
     pub const TIGHT: i32 = 7;
+    /// Zlib-compressed 64x64 tiles with run-length and palettes.
     pub const ZRLE: i32 = 16;
+    /// Tight with PNG instead of JPEG for image rectangles.
     pub const TIGHT_PNG: i32 = -260;
     /// JPEG quality 0..=9 is `JPEG_QUALITY_0 + q`.
     pub const JPEG_QUALITY_0: i32 = -32;
     /// Compression level 0..=9 is `COMPRESS_LEVEL_0 + l`.
     pub const COMPRESS_LEVEL_0: i32 = -256;
+    /// Pseudo-encoding: the desktop changed size.
     pub const DESKTOP_SIZE: i32 = -223;
+    /// Pseudo-encoding: ends an update that announced more rectangles.
     pub const LAST_RECT: i32 = -224;
+    /// Pseudo-encoding: the server sends cursor shapes.
     pub const CURSOR: i32 = -239;
+    /// Pseudo-encoding: the server accepts QEMU extended key events.
     pub const QEMU_EXTENDED_KEY_EVENT: i32 = -258;
+    /// Pseudo-encoding: the server reports keyboard LED state.
     pub const QEMU_LED_STATE: i32 = -261;
+    /// Pseudo-encoding: the desktop size with its screen layout.
     pub const EXTENDED_DESKTOP_SIZE: i32 = -308;
 }
 
 use encoding as enc;
 
-/// Largest cursor image accepted (larger ones are ignored).
+/// Largest cursor image side accepted, in pixels (larger ones are ignored).
 pub const MAX_CURSOR: u16 = 256;
 /// Largest server clipboard text accepted.
 const MAX_CUT_TEXT: usize = 1 << 20;
@@ -95,17 +107,24 @@ impl Default for Options {
 /// Image formats the embedder decodes (the browser does it natively).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageFormat {
+    /// JPEG data.
     Jpeg = 1,
+    /// PNG data.
     Png = 2,
 }
 
 /// A cursor image, RGBA with alpha from the server's bitmask.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CursorImage {
+    /// Hotspot column in pixels.
     pub hotspot_x: u16,
+    /// Hotspot row in pixels.
     pub hotspot_y: u16,
+    /// Width in pixels.
     pub width: u16,
+    /// Height in pixels.
     pub height: u16,
+    /// `width * height * 4` bytes.
     pub rgba: Vec<u8>,
 }
 
@@ -118,7 +137,9 @@ pub enum Action {
     Connected(String),
     /// The framebuffer was reallocated at a new size (and cleared).
     Resize {
+        /// New width in pixels.
         width: u16,
+        /// New height in pixels.
         height: u16,
     },
     /// This area of the framebuffer changed.
@@ -128,10 +149,14 @@ pub enum Action {
     /// Decode this image to `rect.w * rect.h` RGBA pixels and hand them to
     /// [`Client::image_decoded`]. Input processing pauses until then.
     DecodeImage {
+        /// Where the decoded pixels go.
         rect: Rect,
+        /// Encoding of `data`.
         format: ImageFormat,
+        /// The encoded image.
         data: Vec<u8>,
     },
+    /// Ring the bell.
     Bell,
     /// Server clipboard text.
     Clipboard(String),
@@ -188,7 +213,7 @@ pub struct Client {
     tile: Vec<u8>,
     ext_key: bool,
     need_full: bool,
-    error: Option<String>,
+    error: Option<Error>,
 }
 
 fn be16(b: &[u8]) -> u16 {
@@ -204,6 +229,7 @@ fn latin1(b: &[u8]) -> String {
 }
 
 impl Client {
+    /// Creates a client waiting for the server's protocol version.
     pub fn new(opts: Options) -> Self {
         Self {
             opts,
@@ -223,6 +249,7 @@ impl Client {
         }
     }
 
+    /// The framebuffer, empty until the server sends its size.
     pub fn framebuffer(&self) -> &Framebuffer {
         &self.fb
     }
@@ -247,7 +274,7 @@ impl Client {
     /// Processes bytes received from the server.
     pub fn feed(&mut self, data: &[u8]) -> Result<Vec<Action>, Error> {
         if let Some(e) = &self.error {
-            return Err(Error::new(e.clone()));
+            return Err(e.clone());
         }
         self.buf.extend_from_slice(data);
         let buf = std::mem::take(&mut self.buf);
@@ -261,7 +288,7 @@ impl Client {
             Ok(()) => Ok(std::mem::take(&mut self.actions)),
             Err(e) => {
                 self.state = State::Failed;
-                self.error = Some(e.to_string());
+                self.error = Some(e.clone());
                 Err(e)
             }
         }
@@ -278,7 +305,7 @@ impl Client {
     /// failed (the area is left as it was).
     pub fn image_decoded(&mut self, rgba: Option<&[u8]>) -> Result<Vec<Action>, Error> {
         let State::AwaitImage { left, rect } = self.state else {
-            return Err(Error::new("no image decode pending"));
+            return Err(Error::new(ErrorKind::Malformed, "no image decode pending"));
         };
         if let Some(px) = rgba.filter(|p| p.len() == rect.area() * 4) {
             self.fb.put_rgba(rect, px);
@@ -390,9 +417,10 @@ impl Client {
 
     fn resize(&mut self, w: u16, h: u16) -> Result<(), Error> {
         if w > MAX_DIM || h > MAX_DIM {
-            return Err(Error::new(format!(
-                "framebuffer {w}x{h} exceeds {MAX_DIM}x{MAX_DIM}"
-            )));
+            return Err(Error::new(
+                ErrorKind::OutOfRange,
+                format!("framebuffer {w}x{h} exceeds {MAX_DIM}x{MAX_DIM}"),
+            ));
         }
         // QEMU repeats ExtendedDesktopSize on every full update request;
         // an unchanged size must not clear the screen.

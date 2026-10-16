@@ -1,8 +1,10 @@
 //! Drives the client against a live QEMU VNC server.
 //!
-//! Skipped unless `PRISM_RFB_TEST_SOCKET` names QEMU's VNC UNIX socket, e.g.
+//! Ignored by default. Run it with `--ignored` and set `PRISM_RFB_TEST_SOCKET`
+//! to the path of QEMU's VNC UNIX socket, for example after
 //! `qemu-system-x86_64 -display none -vnc unix:/tmp/vnc.sock -cdrom some.iso`.
-//! Run with `--nocapture` to see per-encoding decode timings.
+//! Add `--nocapture` to see per-encoding decode timings, and set
+//! `PRISM_RFB_TEST_DUMP` to a directory to write each framebuffer as a PPM.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -92,11 +94,10 @@ impl Session {
 }
 
 #[test]
+#[ignore = "needs a QEMU VNC socket in PRISM_RFB_TEST_SOCKET"]
 fn qemu_vnc_end_to_end() {
-    let Ok(path) = std::env::var("PRISM_RFB_TEST_SOCKET") else {
-        eprintln!("PRISM_RFB_TEST_SOCKET not set; skipping");
-        return;
-    };
+    let path = std::env::var("PRISM_RFB_TEST_SOCKET")
+        .expect("set PRISM_RFB_TEST_SOCKET to QEMU's VNC UNIX socket path");
     let cases: [(&str, &[i32]); 5] = [
         ("Raw", &[encoding::RAW]),
         ("Hextile", &[encoding::HEXTILE]),
@@ -136,7 +137,8 @@ fn qemu_vnc_end_to_end() {
                     .iter()
                     .flat_map(|p| [p[0], p[1], p[2]]),
             );
-            std::fs::write(format!("{dir}/{name}.ppm"), ppm).unwrap();
+            std::fs::create_dir_all(&dir).expect("create the dump directory");
+            std::fs::write(format!("{dir}/{name}.ppm"), ppm).expect("write the PPM dump");
         }
         if name == "TightPNG" {
             // QEMU sends PNG rectangles, which only the browser decodes.

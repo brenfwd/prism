@@ -2,8 +2,8 @@
 //! background plus subrectangles.
 
 use super::Reader;
-use crate::Error;
 use crate::fb::{BLACK, Framebuffer, Rect};
+use crate::{Error, ErrorKind};
 
 const HEXTILE_RAW: u8 = 1;
 const HEXTILE_BG: u8 = 2;
@@ -98,7 +98,10 @@ pub fn hextile_decode(
             let (sx, sy) = (u16::from(xy >> 4), u16::from(xy & 15));
             let (sw, sh) = (u16::from(wh >> 4) + 1, u16::from(wh & 15) + 1);
             if sx + sw > tile.w || sy + sh > tile.h {
-                return Err(Error::new("hextile subrectangle outside its tile"));
+                return Err(Error::new(
+                    ErrorKind::OutOfRange,
+                    "hextile subrectangle outside its tile",
+                ));
             }
             fb.fill(Rect::new(tile.x + sx, tile.y + sy, sw, sh), px);
         }

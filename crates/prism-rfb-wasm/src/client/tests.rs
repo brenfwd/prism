@@ -204,7 +204,7 @@ fn pseudo_encodings() {
         ]))
         .unwrap();
     let Some(Action::Cursor(cur)) = a.iter().find(|a| matches!(a, Action::Cursor(_))) else {
-        panic!()
+        panic!("no cursor action in {a:?}")
     };
     assert_eq!((cur.hotspot_x, cur.width), (1, 2));
     assert_eq!(

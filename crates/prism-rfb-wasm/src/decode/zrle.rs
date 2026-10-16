@@ -2,8 +2,8 @@
 //! solid, palette or run-length encoded.
 
 use super::{Reader, unpack_indexed};
-use crate::Error;
 use crate::fb::{Framebuffer, Rect};
+use crate::{Error, ErrorKind};
 
 /// Upper bound on the decompressed size of a ZRLE rectangle.
 pub fn zrle_limit(r: Rect) -> usize {
@@ -78,22 +78,30 @@ fn zrle_tile(
             buf.clear();
             while buf.len() < n * 4 {
                 let b = rd.u8()?;
-                let px = *palette
-                    .get(usize::from(b & 127))
-                    .ok_or_else(|| Error::new("ZRLE palette index out of range"))?;
+                let px = *palette.get(usize::from(b & 127)).ok_or_else(|| {
+                    Error::new(ErrorKind::OutOfRange, "ZRLE palette index out of range")
+                })?;
                 let run = if b & 128 != 0 { run_length(rd)? } else { 1 };
                 push_run(buf, px, run, n)?;
             }
             fb.put_rgba(t, buf);
         }
-        _ => return Err(Error::new(format!("invalid ZRLE subencoding {sub}"))),
+        _ => {
+            return Err(Error::new(
+                ErrorKind::Unsupported,
+                format!("invalid ZRLE subencoding {sub}"),
+            ));
+        }
     }
     Ok(())
 }
 
 fn push_run(buf: &mut Vec<u8>, px: [u8; 4], run: usize, total: usize) -> Result<(), Error> {
     if buf.len() / 4 + run > total {
-        return Err(Error::new("ZRLE run overflows its tile"));
+        return Err(Error::new(
+            ErrorKind::OutOfRange,
+            "ZRLE run overflows its tile",
+        ));
     }
     for _ in 0..run {
         buf.extend_from_slice(&px);

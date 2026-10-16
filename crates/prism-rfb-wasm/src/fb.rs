@@ -7,13 +7,18 @@ pub const MAX_DIM: u16 = 8192;
 /// A rectangle in framebuffer coordinates.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rect {
+    /// Left edge in pixels.
     pub x: u16,
+    /// Top edge in pixels.
     pub y: u16,
+    /// Width in pixels.
     pub w: u16,
+    /// Height in pixels.
     pub h: u16,
 }
 
 impl Rect {
+    /// Creates a rectangle from its corner and size.
     pub const fn new(x: u16, y: u16, w: u16, h: u16) -> Self {
         Self { x, y, w, h }
     }
@@ -23,6 +28,7 @@ impl Rect {
         usize::from(self.w) * usize::from(self.h)
     }
 
+    /// Whether the width or the height is zero.
     pub fn is_empty(self) -> bool {
         self.w == 0 || self.h == 0
     }
@@ -33,6 +39,8 @@ pub const BLACK: [u8; 4] = [0, 0, 0, 255];
 
 /// RGBA framebuffer.
 #[derive(Debug, Default)]
+/// A framebuffer of `width * height` pixels, 4 bytes each (R, G, B, 255),
+/// row by row from the top left.
 pub struct Framebuffer {
     width: u16,
     height: u16,
@@ -40,10 +48,12 @@ pub struct Framebuffer {
 }
 
 impl Framebuffer {
+    /// Width in pixels.
     pub fn width(&self) -> u16 {
         self.width
     }
 
+    /// Height in pixels.
     pub fn height(&self) -> u16 {
         self.height
     }

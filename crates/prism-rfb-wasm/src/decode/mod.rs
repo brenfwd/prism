@@ -6,8 +6,8 @@ mod hextile;
 mod tight;
 mod zrle;
 
-use crate::Error;
 use crate::fb::Rect;
+use crate::{Error, ErrorKind};
 
 pub use hextile::{HextileColours, hextile_decode, hextile_tile, hextile_tile_len};
 pub use tight::{TightBody, tight_basic_decode, tight_parse};
@@ -26,7 +26,8 @@ impl<'a> Reader<'a> {
 
     pub fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
         let end = self.pos.checked_add(n).filter(|&e| e <= self.data.len());
-        let end = end.ok_or_else(|| Error::new("truncated rectangle data"))?;
+        let end =
+            end.ok_or_else(|| Error::new(ErrorKind::Truncated, "truncated rectangle data"))?;
         let s = &self.data[self.pos..end];
         self.pos = end;
         Ok(s)
@@ -67,7 +68,7 @@ fn unpack_indexed(
             let idx = (row[bit / 8] >> (8 - bits - bit % 8)) & mask;
             let px = palette
                 .get(usize::from(idx))
-                .ok_or_else(|| Error::new("palette index out of range"))?;
+                .ok_or_else(|| Error::new(ErrorKind::OutOfRange, "palette index out of range"))?;
             out.extend_from_slice(px);
         }
     }

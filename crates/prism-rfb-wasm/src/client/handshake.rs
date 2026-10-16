@@ -2,7 +2,7 @@
 //! (RFC 6143 sections 7.1 and 7.3).
 
 use super::{Action, Client, State, be16, be32, latin1};
-use crate::Error;
+use crate::{Error, ErrorKind};
 
 impl Client {
     pub(super) fn version(&mut self, input: &[u8]) -> Result<Option<usize>, Error> {
@@ -10,10 +10,10 @@ impl Client {
             return Ok(None);
         };
         let bad = || {
-            Error::new(format!(
-                "not an RFB server: {:?}",
-                String::from_utf8_lossy(v)
-            ))
+            Error::new(
+                ErrorKind::Malformed,
+                format!("not an RFB server: {:?}", String::from_utf8_lossy(v)),
+            )
         };
         if &v[..4] != b"RFB " || v[7] != b'.' || v[11] != b'\n' {
             return Err(bad());
@@ -58,10 +58,16 @@ impl Client {
                     Ok(Some(4))
                 }
                 0 => match Self::reason(input, 4) {
-                    Some((r, _)) => Err(Error::new(format!("server refused connection: {r}"))),
+                    Some((r, _)) => Err(Error::new(
+                        ErrorKind::Refused,
+                        format!("server refused connection: {r}"),
+                    )),
                     None => Ok(None),
                 },
-                t => Err(Error::new(format!("unsupported security type {t}"))),
+                t => Err(Error::new(
+                    ErrorKind::Unsupported,
+                    format!("unsupported security type {t}"),
+                )),
             };
         }
         let Some(&n) = input.first() else {
@@ -69,7 +75,10 @@ impl Client {
         };
         if n == 0 {
             return match Self::reason(input, 1) {
-                Some((r, _)) => Err(Error::new(format!("server refused connection: {r}"))),
+                Some((r, _)) => Err(Error::new(
+                    ErrorKind::Refused,
+                    format!("server refused connection: {r}"),
+                )),
                 None => Ok(None),
             };
         }
@@ -77,9 +86,12 @@ impl Client {
             return Ok(None);
         };
         if !types.contains(&1) {
-            return Err(Error::new(format!(
-                "server requires authentication (security types {types:?}); only None is supported"
-            )));
+            return Err(Error::new(
+                ErrorKind::Refused,
+                format!(
+                    "server requires authentication (security types {types:?}); only None is supported"
+                ),
+            ));
         }
         self.send(vec![1]);
         if self.minor >= 8 {
@@ -99,7 +111,10 @@ impl Client {
             return Ok(Some(4));
         }
         match Self::reason(input, 4) {
-            Some((r, _)) => Err(Error::new(format!("security handshake failed: {r}"))),
+            Some((r, _)) => Err(Error::new(
+                ErrorKind::Refused,
+                format!("security handshake failed: {r}"),
+            )),
             None => Ok(None),
         }
     }
@@ -115,7 +130,7 @@ impl Client {
         };
         let name_len = be32(&head[20..24]) as usize;
         if name_len > 1 << 16 {
-            return Err(Error::new("desktop name too long"));
+            return Err(Error::new(ErrorKind::Malformed, "desktop name too long"));
         }
         let Some(name) = input.get(24..24 + name_len) else {
             return Ok(None);

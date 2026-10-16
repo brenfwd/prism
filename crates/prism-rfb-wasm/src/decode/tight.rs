@@ -2,8 +2,8 @@
 //! palette or gradient filters.
 
 use super::unpack_indexed;
-use crate::Error;
 use crate::fb::{Framebuffer, Rect};
+use crate::{Error, ErrorKind};
 
 /// Data smaller than this is sent uncompressed in Tight basic rectangles.
 const TIGHT_MIN_TO_COMPRESS: usize = 12;
@@ -99,7 +99,12 @@ pub fn tight_parse(input: &[u8], rect: Rect) -> Result<Option<(TightRect<'_>, us
                         TightFilter::Palette(p)
                     }
                     2 => TightFilter::Gradient,
-                    _ => return Err(Error::new(format!("unknown Tight filter {f}"))),
+                    _ => {
+                        return Err(Error::new(
+                            ErrorKind::Unsupported,
+                            format!("unknown Tight filter {f}"),
+                        ));
+                    }
                 }
             } else {
                 TightFilter::Copy
@@ -136,9 +141,10 @@ pub fn tight_parse(input: &[u8], rect: Rect) -> Result<Option<(TightRect<'_>, us
             }
         }
         _ => {
-            return Err(Error::new(format!(
-                "invalid Tight compression control {ctl:#04x}"
-            )));
+            return Err(Error::new(
+                ErrorKind::Malformed,
+                format!("invalid Tight compression control {ctl:#04x}"),
+            ));
         }
     };
     Ok(parsed.map(|(body, n)| (TightRect { resets, body }, n)))
@@ -241,7 +247,7 @@ mod tests {
             ..
         } = t.body
         else {
-            panic!()
+            panic!("unexpected Tight body: {:?}", t.body)
         };
         assert_eq!((stream, compressed, d), (2, false, &[0b1010_0000][..]));
         let mut f = fb(8, 1);
@@ -272,7 +278,7 @@ mod tests {
             ..
         } = t.body
         else {
-            panic!()
+            panic!("unexpected Tight body: {:?}", t.body)
         };
         assert_eq!(raw_len, 12);
         let mut out = Vec::new();

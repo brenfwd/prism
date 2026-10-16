@@ -4,7 +4,7 @@
 use miniz_oxide::inflate::stream::{InflateState, inflate};
 use miniz_oxide::{DataFormat, MZError, MZFlush, MZStatus};
 
-use crate::Error;
+use crate::{Error, ErrorKind};
 
 const CHUNK: usize = 256 * 1024;
 
@@ -46,21 +46,24 @@ impl Inflater {
             out.truncate(len + r.bytes_written);
             input = &input[r.bytes_consumed..];
             if out.len() > limit {
-                return Err(Error::new("decompressed data exceeds the rectangle"));
+                return Err(Error::new(
+                    ErrorKind::Inflate,
+                    "decompressed data exceeds the rectangle",
+                ));
             }
             match r.status {
                 Ok(MZStatus::StreamEnd) => return Ok(()),
                 Ok(_) => {}
                 // No progress possible: fine once all input is consumed.
                 Err(MZError::Buf) if input.is_empty() => return Ok(()),
-                Err(e) => return Err(Error::new(format!("zlib: {e:?}"))),
+                Err(e) => return Err(Error::new(ErrorKind::Inflate, format!("zlib: {e:?}"))),
             }
             let drained = r.bytes_written < room;
             if input.is_empty() && drained {
                 return Ok(());
             }
             if r.bytes_consumed == 0 && r.bytes_written == 0 {
-                return Err(Error::new("zlib stream stalled"));
+                return Err(Error::new(ErrorKind::Inflate, "zlib stream stalled"));
             }
         }
     }

@@ -1,4 +1,7 @@
-//! Compiles `proto/prism.proto` with protox (pure Rust; no `protoc`).
+//! Compiles `proto/prism.proto` with `protox` (pure Rust, no `protoc`) and
+//! generates tonic client and server code into `OUT_DIR`. The
+//! `rerun-if-changed` line re-runs the script when anything under `proto/`
+//! changes.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo::rerun-if-changed=proto");

@@ -6,12 +6,12 @@ use std::net::Ipv4Addr;
 
 use uuid::Uuid;
 
-use super::{Outcome, VMS};
-use crate::cluster::model::{MEMBERS, MemberDoc};
+use super::{CLUSTER_ID, Outcome, VMS};
+use crate::cluster::model::{CLUSTER, ClusterDoc, MEMBERS, MemberDoc};
 use crate::db::Docs;
 use crate::network::{
     NETWORKS, NetworkDoc, RELEASED_VNIS, ReleasedVni, VNI_COOLDOWN_SECS, ipam,
-    valid_allow_prefixes, valid_network_name, valid_subnet,
+    valid_allow_prefixes, valid_network_name, valid_subnet, valid_subnet6,
 };
 use crate::spec::{NicNetwork, VmSpec};
 
@@ -84,6 +84,20 @@ pub(super) fn put_network(
     }
     if let Err(e) = valid_allow_prefixes(new.kind, &new.allow_prefixes) {
         return Ok(Outcome::Conflict(e));
+    }
+    if let Some(p6) = new.subnet6 {
+        let mut taken: Vec<_> = others.iter().filter_map(|n| n.subnet6).collect();
+        if let Some(c) = d.get::<ClusterDoc>(CLUSTER, CLUSTER_ID)? {
+            taken.push(ipnet::Ipv6Net::new(c.mesh_prefix, 48)?.trunc());
+        }
+        if let Err(e) = valid_subnet6(p6) {
+            return Ok(Outcome::Conflict(e));
+        }
+        if let Some(o) = ipam::conflicts6(p6, &taken) {
+            return Ok(Outcome::Conflict(format!(
+                "{p6} overlaps {o}, which another network or the mesh uses"
+            )));
+        }
     }
     let nodes = nodes(d, local)?;
     if let Some(e) = new.egress

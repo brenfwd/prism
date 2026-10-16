@@ -5,19 +5,26 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use prism_net::MacAddr;
 use prism_net::dhcp::Lease;
 use prism_net::link::VxlanFdb;
+use prism_net::ra::RaConfig;
 use uuid::Uuid;
 
 use super::firewall::{GuestRules, Routed};
-use super::{NetworkDoc, NetworkKind, VLAN_OVERHEAD, switch_mtu};
+use super::{NetworkDoc, NetworkKind, VLAN_OVERHEAD, ipam, switch_mtu};
 use crate::cluster::model::MemberDoc;
 use crate::spec::{NicNetwork, Proto, VmSpec};
 use prism_net::link::PortVlans;
+use prism_net::nft::Ipv6Source;
 
 const LEASE_TIME: Duration = Duration::from_secs(12 * 3600);
+/// How long guests keep a node as their default IPv6 router.
+const ROUTER_LIFETIME: Duration = Duration::from_secs(1800);
+/// The Tailscale ULA range, which guests never reach through the host.
+const TAILNET6: Ipv6Net =
+    Ipv6Net::new_assert(Ipv6Addr::new(0xfd7a, 0x115c, 0xa1e0, 0, 0, 0, 0, 0), 48);
 
 /// Everything the plan depends on.
 #[derive(Debug, Clone)]
@@ -30,6 +37,8 @@ pub struct PlanInput<'a> {
     pub wg_mtu: Option<u16>,
     /// This node's uplink (default-route interface), for masquerade.
     pub uplink: Option<String>,
+    /// This node's IPv6 default-route interface, for NAT66.
+    pub uplink6: Option<String>,
 }
 
 /// One network on this node.
@@ -51,11 +60,17 @@ pub struct SwitchPlan {
     /// Local taps on a VLAN-aware network and the VLAN membership of each
     /// (access on VLAN 1 when the NIC has none).
     pub ports: Vec<(String, PortVlans)>,
-    /// IPv6 guests here that forwards target: the host needs a route to each.
+    /// IPv6 guests without a network prefix that forwards target: the host
+    /// needs a route to each.
     pub routes6: Vec<Ipv6Addr>,
-    /// This node's link-local address on the bridge, the source of forwarded
-    /// connections to those guests; set when `routes6` is not empty.
+    /// This node's link-local address on the bridge, the source of router
+    /// advertisements; set when the network has an IPv6 prefix or `routes6`
+    /// is not empty.
     pub gateway6: Option<Ipv6Addr>,
+    /// This node's ULA address on the bridge, with the network's `/64`.
+    pub address6: Option<Ipv6Net>,
+    /// The router advertisements to send; `None` while IPv6 is off.
+    pub ra: Option<RaConfig>,
     /// The zone origin, `<network>.prism`.
     pub domain: String,
     /// Every VM on the network, by name.
@@ -133,6 +148,23 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                 macs: BTreeMap::new(),
             },
         });
+        let address6 = net
+            .subnet6
+            .map(|p| Ipv6Net::new_assert(ipam::node_addr6(p, input.node), 64));
+        let router6 = net.routes_v6(input.node) && input.uplink6.is_some();
+        let ra = net.subnet6.map(|prefix| RaConfig {
+            interface: net.bridge(),
+            source: link_local_of(input.node),
+            prefix,
+            router_lifetime: if router6 {
+                ROUTER_LIFETIME
+            } else {
+                Duration::ZERO
+            },
+            mtu: Some(mtu),
+            dns: address6.iter().map(Ipv6Net::addr).collect(),
+            domain: Some(net.domain()),
+        });
         let mut sw = SwitchPlan {
             network: net.id,
             bridge: net.bridge(),
@@ -145,6 +177,8 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
             ports: Vec::new(),
             routes6: Vec::new(),
             gateway6: None,
+            address6,
+            ra,
             domain: net.domain(),
             hosts: HashMap::new(),
         };
@@ -168,11 +202,18 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                 let Ok(mac) = nic.mac.parse::<MacAddr>() else {
                     continue;
                 };
+                let v6 = net.guest_v6(*ipv6, &nic.mac);
                 if let Some(ip) = ipv4 {
                     sw.hosts
                         .entry(vm.name.clone())
                         .or_default()
                         .push(IpAddr::V4(*ip));
+                }
+                if let Some(ip) = v6 {
+                    sw.hosts
+                        .entry(vm.name.clone())
+                        .or_default()
+                        .push(IpAddr::V6(ip));
                 }
                 if runs_on(vm, input.node) {
                     if !sw.vlans.is_empty()
@@ -184,6 +225,10 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                         tap: tap_name(nic.id),
                         mac,
                         ipv4: *ipv4,
+                        ipv6: match (net.subnet6, v6) {
+                            (Some(prefix), Some(addr)) => Ipv6Source::Only { addr, prefix },
+                            _ => Ipv6Source::Any,
+                        },
                         trunk: matches!(nic.network.port_vlans(), Some(PortVlans::Trunk { .. })),
                     });
                     // Forwards need this node to route into the network.
@@ -192,13 +237,14 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                             let guests = [
                                 ipv4.map(IpAddr::V4)
                                     .filter(|_| !matches!(f.host_addr, Some(IpAddr::V6(_)))),
-                                ipv6.map(IpAddr::V6)
+                                v6.map(IpAddr::V6)
                                     .filter(|_| !matches!(f.host_addr, Some(IpAddr::V4(_)))),
                             ];
                             for guest in guests.into_iter().flatten() {
                                 out.forwarding |= guest.is_ipv4();
                                 out.forwarding6 |= guest.is_ipv6();
                                 if let IpAddr::V6(g) = guest
+                                    && net.subnet6.is_none()
                                     && !sw.routes6.contains(&g)
                                 {
                                     sw.routes6.push(g);
@@ -217,7 +263,7 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                                     bridge: sw.bridge.clone(),
                                     local: f.local,
                                     hairpin: f.hairpin,
-                                    snat6: Some(gateway6),
+                                    snat6: Some(address6.map_or(gateway6, |a| a.addr())),
                                 });
                             }
                         }
@@ -231,37 +277,53 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                 }
             }
         }
-        if !sw.routes6.is_empty() {
+        if !sw.routes6.is_empty() || net.subnet6.is_some() {
             sw.gateway6 = Some(gateway6);
         }
         if let Some(g) = gateway {
             out.firewall.switches.push(prism_net::nft::SwitchServices {
                 bridge: sw.bridge.clone(),
                 vip: g,
+                vip6: address6.map(|a| a.addr()),
             });
         }
-        match (net.kind, &input.uplink) {
-            (NetworkKind::Nat, Some(uplink)) => {
-                out.forwarding = true;
-                out.firewall.nat.push(prism_net::nft::NatRule {
-                    source: net.subnet,
-                    egress: uplink.clone(),
-                });
-                out.firewall.routed.push(Routed {
-                    bridge: sw.bridge.clone(),
-                    out: Some(uplink.clone()),
-                    allow: net.allow_prefixes.clone(),
-                });
+        let nat = net.kind == NetworkKind::Nat;
+        let mut out_ifaces: Vec<String> = Vec::new();
+        if nat {
+            out_ifaces.extend(input.uplink.clone());
+            if let Some(u6) = &input.uplink6
+                && !out_ifaces.contains(u6)
+            {
+                out_ifaces.push(u6.clone());
             }
-            _ => out.firewall.routed.push(Routed {
-                bridge: sw.bridge.clone(),
-                out: None,
-                allow: Vec::new(),
-            }),
         }
+        if let (true, Some(uplink)) = (nat, &input.uplink) {
+            out.forwarding = true;
+            out.firewall.nat.push(prism_net::nft::NatRule {
+                source: net.subnet,
+                egress: uplink.clone(),
+            });
+        }
+        if let (true, Some(prefix), Some(uplink6)) = (router6, net.subnet6, &input.uplink6) {
+            out.forwarding6 = true;
+            out.firewall.nat6.push(prism_net::nft::Nat6Rule {
+                source: prefix,
+                egress: uplink6.clone(),
+            });
+        }
+        out.firewall.routed.push(Routed {
+            bridge: sw.bridge.clone(),
+            out: out_ifaces,
+            allow: if nat && input.uplink.is_some() {
+                net.allow_prefixes.clone()
+            } else {
+                Vec::new()
+            },
+        });
         out.switches.push(sw);
     }
     out.firewall.blocked = blocked_destinations(input.members);
+    out.firewall.blocked6 = blocked_destinations6(input.members);
     out
 }
 
@@ -320,6 +382,22 @@ fn blocked_destinations(members: &[MemberDoc]) -> Vec<Ipv4Net> {
     out
 }
 
+/// The IPv6 counterpart of [`blocked_destinations`]: the tailnet's ULA range and the members'
+/// IPv6 underlay endpoints.
+fn blocked_destinations6(members: &[MemberDoc]) -> Vec<Ipv6Net> {
+    let mut out = vec![TAILNET6];
+    for m in members {
+        for ep in &m.endpoints {
+            if let Ok(std::net::SocketAddr::V6(a)) = ep.parse()
+                && !out.iter().any(|n| n.contains(a.ip()))
+            {
+                out.push(Ipv6Net::from(*a.ip()));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +422,8 @@ mod tests {
             egress: None,
             dhcp: true,
             allow_prefixes: Vec::new(),
+            subnet6: None,
+            nat66: false,
             created: 0,
         }
     }
@@ -392,6 +472,7 @@ mod tests {
             members: &[],
             wg_mtu: None,
             uplink: Some("eth0".into()),
+            uplink6: None,
         })
     }
 
@@ -436,6 +517,7 @@ mod tests {
             members: &[],
             wg_mtu: None,
             uplink: Some("eth0".into()),
+            uplink6: None,
         });
         assert!(p.forwarding);
         let sw = &p.switches[0];
@@ -473,6 +555,7 @@ mod tests {
             members: &members,
             wg_mtu: Some(1420),
             uplink: None,
+            uplink6: None,
         });
         let sw = &p.switches[0];
         assert_eq!(sw.mtu, 1350);
@@ -512,9 +595,114 @@ mod tests {
             members: &[],
             wg_mtu: None,
             uplink: Some("eth0".into()),
+            uplink6: None,
         });
         assert_eq!(p.firewall.nat, vec![]);
         assert!(!p.forwarding);
         assert_eq!(p.switches[0].leases.values().next().unwrap().router, None);
+    }
+
+    fn v6_net() -> NetworkDoc {
+        let mut n = net();
+        n.subnet6 = Some("fd01:203:405:7::/64".parse().unwrap());
+        n.nat66 = true;
+        n
+    }
+
+    fn plan6(node: Uuid, net: &NetworkDoc, vms: &[VmSpec], uplink6: Option<&str>) -> NodePlan {
+        plan(&PlanInput {
+            node,
+            networks: std::slice::from_ref(net),
+            vms,
+            members: &[],
+            wg_mtu: None,
+            uplink: Some("eth0".into()),
+            uplink6: uplink6.map(Into::into),
+        })
+    }
+
+    #[test]
+    fn ipv6_networks_advertise_and_nat() {
+        let vms = [vm("web", A, "52:54:00:00:00:01", 3, None)];
+        let p = plan6(A, &v6_net(), &vms, Some("eth1"));
+        let sw = &p.switches[0];
+        let addr: Ipv6Addr = "fd01:203:405:7:5054:ff:fe00:1".parse().unwrap();
+        assert_eq!(sw.hosts["web"].len(), 2);
+        assert!(sw.hosts["web"].contains(&IpAddr::V6(addr)));
+        assert!(sw.routes6.is_empty(), "the /64 route covers the guest");
+        assert!(sw.gateway6.is_some());
+        let own = sw.address6.unwrap();
+        assert_eq!(own.prefix_len(), 64);
+        let ra = sw.ra.as_ref().unwrap();
+        assert_eq!(ra.router_lifetime, ROUTER_LIFETIME);
+        assert_eq!(ra.dns, vec![own.addr()]);
+        assert_eq!(ra.source, sw.gateway6.unwrap());
+        assert_eq!(p.firewall.nat6[0].egress, "eth1");
+        assert!(p.forwarding6);
+        assert_eq!(p.firewall.switches[0].vip6, Some(own.addr()));
+        assert_eq!(
+            p.firewall.ports[0].ipv6,
+            Ipv6Source::Only {
+                addr,
+                prefix: "fd01:203:405:7::/64".parse().unwrap()
+            }
+        );
+        assert_eq!(p.firewall.routed[0].out, vec!["eth0", "eth1"]);
+        assert!(p.firewall.blocked6.contains(&TAILNET6));
+    }
+
+    #[test]
+    fn ipv6_without_an_uplink_is_not_a_router() {
+        let vms = [vm("web", A, "52:54:00:00:00:01", 3, None)];
+        let p = plan6(A, &v6_net(), &vms, None);
+        assert_eq!(
+            p.switches[0].ra.as_ref().unwrap().router_lifetime,
+            Duration::ZERO
+        );
+        assert_eq!(p.firewall.nat6, vec![]);
+        assert!(!p.forwarding6);
+        // The egress node alone routes.
+        let mut n = v6_net();
+        n.egress = Some(B);
+        let p = plan6(A, &n, &vms, Some("eth1"));
+        assert_eq!(
+            p.switches[0].ra.as_ref().unwrap().router_lifetime,
+            Duration::ZERO
+        );
+        assert_eq!(p.firewall.nat6, vec![]);
+    }
+
+    #[test]
+    fn ipv6_forwards_use_the_slaac_address() {
+        let mut guest = vm("web", A, "52:54:00:00:00:01", 3, None);
+        if let NicNetwork::Network { forwards, .. } = &mut guest.nics[0].network {
+            forwards.push(crate::spec::PortForward {
+                proto: Proto::Tcp,
+                host_addr: Some("2001:db8::1".parse().unwrap()),
+                host_port: 8080,
+                guest_port: 80,
+                local: false,
+                hairpin: false,
+            });
+        }
+        let p = plan6(A, &v6_net(), &[guest], Some("eth1"));
+        let rule = &p.firewall.dnat[0];
+        assert_eq!(
+            rule.guest,
+            "fd01:203:405:7:5054:ff:fe00:1".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(rule.snat6, Some(p.switches[0].address6.unwrap().addr()));
+        assert_eq!(p.switches[0].routes6, Vec::<Ipv6Addr>::new());
+    }
+
+    #[test]
+    fn networks_without_ipv6_stay_as_they_were() {
+        let vms = [vm("web", A, "52:54:00:00:00:01", 3, None)];
+        let p = plan6(A, &net(), &vms, Some("eth1"));
+        let sw = &p.switches[0];
+        assert!(sw.ra.is_none() && sw.address6.is_none() && sw.gateway6.is_none());
+        assert_eq!(p.firewall.ports[0].ipv6, Ipv6Source::Any);
+        assert_eq!(p.firewall.nat6, vec![]);
+        assert_eq!(sw.hosts["web"].len(), 1);
     }
 }

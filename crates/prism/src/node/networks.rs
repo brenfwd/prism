@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -85,6 +85,28 @@ impl Node {
             }
         }
         Ok(out)
+    }
+
+    /// A random ULA `/64` that no network, the mesh or a host route uses.
+    fn pick_ula(&self, nets: &[NetworkDoc], skip: Option<Uuid>) -> Result<Ipv6Net> {
+        let mut taken: Vec<Ipv6Net> = nets
+            .iter()
+            .filter(|n| Some(n.id) != skip)
+            .filter_map(|n| n.subnet6)
+            .collect();
+        if let Some(c) = self.state.cluster()?
+            && let Ok(mesh) = Ipv6Net::new(c.mesh_prefix, 48)
+        {
+            taken.push(mesh.trunc());
+        }
+        taken.extend(host::foreign_subnets6(&host::routes6()));
+        let seeds = std::iter::repeat_with(|| {
+            let id = Uuid::new_v4();
+            let b = id.as_bytes();
+            [b[0], b[1], b[2], b[3], b[4], b[9], b[10]]
+        });
+        ipam::pick_subnet6(&taken, seeds)
+            .ok_or_else(|| NodeError::Conflict("no free IPv6 prefix left".into()))
     }
 
     /// Names of VMs with a NIC on network `id` that are not stopped.
@@ -183,6 +205,11 @@ impl Node {
                 .ok_or_else(|| NodeError::Conflict("no free subnet left".into()))?
         };
         valid_allow_prefixes(req.kind, &req.allow_prefixes).map_err(NodeError::Invalid)?;
+        let subnet6 = if req.ipv6.unwrap_or(true) {
+            Some(self.pick_ula(&nets, None)?)
+        } else {
+            None
+        };
         let doc = NetworkDoc {
             id: Uuid::new_v4(),
             name,
@@ -193,6 +220,8 @@ impl Node {
             egress: req.egress,
             dhcp: req.dhcp.unwrap_or(true),
             allow_prefixes: req.allow_prefixes,
+            nat66: subnet6.is_some() && req.kind == NetworkKind::Nat && req.nat66.unwrap_or(true),
+            subnet6,
             created: unix_now(),
         };
         let id = doc.id;
@@ -221,7 +250,24 @@ impl Node {
             if k == NetworkKind::Isolated {
                 doc.egress = None;
                 doc.allow_prefixes.clear();
+                doc.nat66 = false;
             }
+        }
+        match req.ipv6 {
+            Some(true) if doc.subnet6.is_none() => {
+                doc.subnet6 = Some(self.pick_ula(&self.state.networks()?, Some(doc.id))?);
+                doc.nat66 = doc.kind == NetworkKind::Nat && req.nat66.unwrap_or(true);
+            }
+            Some(false) => doc.subnet6 = None,
+            _ => {}
+        }
+        if let Some(n) = req.nat66 {
+            if n && doc.kind == NetworkKind::Isolated {
+                return Err(NodeError::Invalid(
+                    "an isolated network has no way out; NAT66 needs a NAT network".into(),
+                ));
+            }
+            doc.nat66 = n;
         }
         if let Some(p) = req.allow_prefixes {
             doc.allow_prefixes = p;

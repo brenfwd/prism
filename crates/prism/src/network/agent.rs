@@ -106,6 +106,7 @@ impl Agent {
         .await??;
         let clustered = !members.is_empty() && cluster.is_some();
         let routes = host::routes();
+        let uplink6 = host::uplink6_of(&host::routes6());
         let p = plan(&PlanInput {
             node,
             networks: &networks,
@@ -113,12 +114,13 @@ impl Agent {
             members: if clustered { &members } else { &[] },
             wg_mtu: cluster.as_ref().filter(|_| clustered).map(|c| c.wg_mtu),
             uplink: host::uplink_of(&routes),
+            uplink6: uplink6.clone(),
         });
         if p.forwarding {
             host::enable_forwarding();
         }
         if p.forwarding6 {
-            host::enable_forwarding6();
+            host::enable_forwarding6(uplink6.as_deref());
         }
         let mut errors = Vec::new();
         for sw in &p.switches {
@@ -159,10 +161,18 @@ async fn apply_switch(nl: &Netlink, sw: &SwitchPlan) -> anyhow::Result<()> {
     }
     nl.prune_v4_addresses(&sw.bridge, sw.address.map(IpNet::V4))
         .await?;
+    if sw.ra.is_some() {
+        host::lock_bridge6(&sw.bridge);
+    }
     if let Some(g) = sw.gateway6 {
         nl.ensure_address(&sw.bridge, IpNet::V6(Ipv6Net::new(g, 64)?))
             .await?;
     }
+    if let Some(a) = sw.address6 {
+        nl.ensure_address(&sw.bridge, IpNet::V6(a)).await?;
+    }
+    nl.prune_ula_addresses(&sw.bridge, sw.address6.map(|a| a.addr()))
+        .await?;
     for g in &sw.routes6 {
         nl.ensure_host_route6(&sw.bridge, *g).await?;
     }

@@ -14,9 +14,10 @@ pub mod plan;
 mod services;
 
 use std::collections::BTreeMap;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
+use prism_net::MacAddr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -76,6 +77,14 @@ pub struct NetworkDoc {
     /// that guests on this NAT network may still reach.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow_prefixes: Vec<Ipv4Net>,
+    /// The ULA `/64` guests autoconfigure from (SLAAC); `None` while IPv6 is
+    /// off, which is how networks from before IPv6 support stay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subnet6: Option<Ipv6Net>,
+    /// Masquerade IPv6 egress on a NAT network (NAT66), so ULA guests reach
+    /// the IPv6 internet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub nat66: bool,
     pub created: i64,
 }
 
@@ -111,6 +120,27 @@ impl NetworkDoc {
             .into_iter()
             .flatten()
             .find_map(|n| self.gateways.get(&n).copied())
+    }
+}
+
+impl NetworkDoc {
+    /// The address a guest with `mac` forms by SLAAC. On a network without
+    /// IPv6 it is the NIC's own `fallback`, the address an older version had
+    /// the user enter by hand.
+    pub fn guest_v6(&self, fallback: Option<Ipv6Addr>, mac: &str) -> Option<Ipv6Addr> {
+        match (self.subnet6, mac.parse::<MacAddr>()) {
+            (Some(p), Ok(mac)) => Some(ipam::slaac(p, mac)),
+            (Some(_), Err(_)) => None,
+            (None, _) => fallback,
+        }
+    }
+
+    /// Whether this node should advertise itself as the default IPv6 router.
+    pub fn routes_v6(&self, node: Uuid) -> bool {
+        self.kind == NetworkKind::Nat
+            && self.nat66
+            && self.subnet6.is_some()
+            && self.egress.is_none_or(|e| e == node)
     }
 }
 
@@ -168,6 +198,20 @@ pub fn valid_subnet(net: Ipv4Net) -> Result<(), String> {
     Ok(())
 }
 
+/// Checks a network's IPv6 prefix: a ULA `/64`.
+pub fn valid_subnet6(net: Ipv6Net) -> Result<(), String> {
+    if net.prefix_len() != 64 {
+        return Err("the IPv6 prefix must be a /64, which SLAAC needs".into());
+    }
+    if net.network() != net.addr() {
+        return Err(format!("{net} has host bits set; use {}", net.trunc()));
+    }
+    if net.network().octets()[0] & 0xfe != 0xfc {
+        return Err(format!("{net} is not in the ULA range fc00::/7"));
+    }
+    Ok(())
+}
+
 /// `POST /api/v1/networks` body; every field has a smart default.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -180,6 +224,10 @@ pub struct CreateNetwork {
     pub dhcp: Option<bool>,
     #[serde(default)]
     pub allow_prefixes: Vec<Ipv4Net>,
+    /// Give guests an IPv6 ULA prefix (default: yes).
+    pub ipv6: Option<bool>,
+    /// Masquerade IPv6 egress (default: yes on a NAT network).
+    pub nat66: Option<bool>,
 }
 
 /// `POST /api/v1/networks/check` body: what the form has so far.
@@ -208,6 +256,9 @@ pub struct UpdateNetwork {
     pub kind: Option<NetworkKind>,
     /// Replaces the list of blocked destinations guests may reach.
     pub allow_prefixes: Option<Vec<Ipv4Net>>,
+    /// Turns IPv6 on (a fresh ULA prefix) or off.
+    pub ipv6: Option<bool>,
+    pub nat66: Option<bool>,
 }
 
 /// Most `allow_prefixes` per network.
@@ -260,6 +311,8 @@ mod tests {
             egress: None,
             dhcp: true,
             allow_prefixes: Vec::new(),
+            subnet6: None,
+            nat66: false,
             created: 0,
         }
     }
@@ -310,6 +363,37 @@ mod tests {
         assert!(valid_subnet("10.0.0.0/8".parse().unwrap()).is_err());
         assert!(valid_subnet("100.64.1.0/24".parse().unwrap()).is_err());
         assert!(valid_subnet("127.0.0.0/24".parse().unwrap()).is_err());
+    }
+
+    #[test]
+    fn guest_addresses() {
+        let mut d = doc();
+        let hand: Ipv6Addr = "fd00::5".parse().unwrap();
+        assert_eq!(d.guest_v6(Some(hand), "52:54:00:00:00:01"), Some(hand));
+        assert_eq!(d.guest_v6(None, "52:54:00:00:00:01"), None);
+        d.subnet6 = Some("fd01:203:405:7::/64".parse().unwrap());
+        assert_eq!(
+            d.guest_v6(Some(hand), "52:54:00:00:00:01"),
+            Some("fd01:203:405:7:5054:ff:fe00:1".parse().unwrap())
+        );
+        assert_eq!(d.guest_v6(None, "bad"), None);
+        assert!(valid_subnet6(d.subnet6.unwrap()).is_ok());
+        assert!(valid_subnet6("fd01::/48".parse().unwrap()).is_err());
+        assert!(valid_subnet6("2001:db8::/64".parse().unwrap()).is_err());
+    }
+
+    #[test]
+    fn ipv6_routers() {
+        let mut d = doc();
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        assert!(!d.routes_v6(a));
+        d.subnet6 = Some("fd01:203:405:7::/64".parse().unwrap());
+        d.nat66 = true;
+        assert!(d.routes_v6(a) && d.routes_v6(b));
+        d.egress = Some(b);
+        assert!(!d.routes_v6(a) && d.routes_v6(b));
+        d.kind = NetworkKind::Isolated;
+        assert!(!d.routes_v6(b));
     }
 
     #[test]

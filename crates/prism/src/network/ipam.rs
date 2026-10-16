@@ -2,9 +2,11 @@
 //! Pure and deterministic, so the state machine can call it.
 
 use std::collections::BTreeSet;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
+use prism_net::MacAddr;
+use uuid::Uuid;
 
 use super::{VNI_MAX, VNI_MIN};
 
@@ -58,6 +60,50 @@ pub fn translate(old: Ipv4Net, new: Ipv4Net, ip: Ipv4Addr) -> Option<Ipv4Addr> {
     let off = u32::from(ip) - u32::from(old.network());
     let out = Ipv4Addr::from(u32::from(new.network()) + off);
     is_host(new, out).then_some(out)
+}
+
+/// The ULA `/64` of RFC 4193 built from a 40-bit global ID and a 16-bit subnet ID.
+pub fn ula64(seed: [u8; 7]) -> Ipv6Net {
+    let mut o = [0u8; 16];
+    o[0] = 0xfd;
+    o[1..8].copy_from_slice(&seed);
+    Ipv6Net::new_assert(Ipv6Addr::from(o), 64)
+}
+
+/// The first of `seeds` that gives a ULA `/64` overlapping none of `taken`. Each network gets
+/// its own random global ID, so a clash means a seed repeated or a host route is in the way.
+pub fn pick_subnet6(taken: &[Ipv6Net], seeds: impl Iterator<Item = [u8; 7]>) -> Option<Ipv6Net> {
+    seeds
+        .take(64)
+        .map(ula64)
+        .find(|c| !taken.iter().any(|t| overlaps6(*c, *t)))
+}
+
+/// Whether two IPv6 prefixes share addresses.
+pub fn overlaps6(a: Ipv6Net, b: Ipv6Net) -> bool {
+    a.contains(&b.network()) || b.contains(&a.network())
+}
+
+/// The first of `others` that overlaps `net`.
+pub fn conflicts6(net: Ipv6Net, others: &[Ipv6Net]) -> Option<Ipv6Net> {
+    others.iter().copied().find(|o| overlaps6(net, *o))
+}
+
+/// The SLAAC address a guest with `mac` forms in `prefix`: the modified EUI-64 of RFC 4291.
+pub fn slaac(prefix: Ipv6Net, mac: MacAddr) -> Ipv6Addr {
+    let m = mac.octets();
+    let iid = [m[0] ^ 0x02, m[1], m[2], 0xff, 0xfe, m[3], m[4], m[5]];
+    let mut o = prefix.network().octets();
+    o[8..].copy_from_slice(&iid);
+    Ipv6Addr::from(o)
+}
+
+/// The address `node` holds in `prefix`: its DNS server and the next hop for forwards. The
+/// host part is the low half of the node's ID.
+pub fn node_addr6(prefix: Ipv6Net, node: Uuid) -> Ipv6Addr {
+    let mut o = prefix.network().octets();
+    o[8..].copy_from_slice(&node.as_bytes()[8..]);
+    Ipv6Addr::from(o)
 }
 
 /// The lowest VNI in [`VNI_MIN`]..=[`VNI_MAX`] not in `unavailable`.
@@ -131,6 +177,45 @@ mod tests {
             None
         );
         assert_eq!(translate(a, b, Ipv4Addr::new(10, 88, 1, 7)), None);
+    }
+
+    #[test]
+    fn ula_subnets() {
+        let seed = [1, 2, 3, 4, 5, 0, 7];
+        let a = ula64(seed);
+        assert_eq!(a.to_string(), "fd01:203:405:7::/64");
+        assert_eq!(a.prefix_len(), 64);
+        // A taken prefix pushes on to the next seed; a covering /48 does too.
+        let b = [[9, 9, 9, 9, 9, 0, 1]];
+        let seeds = || [seed, b[0]].into_iter();
+        assert_eq!(pick_subnet6(&[], seeds()), Some(a));
+        assert_eq!(pick_subnet6(&[a], seeds()), Some(ula64(b[0])));
+        let wide: Ipv6Net = "fd01:203:405::/48".parse().unwrap();
+        assert_eq!(pick_subnet6(&[wide], seeds()), Some(ula64(b[0])));
+        assert_eq!(pick_subnet6(&[a, ula64(b[0])], seeds()), None);
+        assert_eq!(conflicts6(a, &[wide]), Some(wide));
+    }
+
+    #[test]
+    fn slaac_is_modified_eui64() {
+        let mac: MacAddr = "52:54:00:ab:cd:0e".parse().unwrap();
+        let p: Ipv6Net = "fd01:203:405:7::/64".parse().unwrap();
+        assert_eq!(
+            slaac(p, mac),
+            "fd01:203:405:7:5054:ff:feab:cd0e"
+                .parse::<Ipv6Addr>()
+                .unwrap()
+        );
+        let n = node_addr6(
+            p,
+            Uuid::from_u128(0x1122_3344_5566_7788_99aa_bbcc_ddee_ff00),
+        );
+        assert_eq!(
+            n,
+            "fd01:203:405:7:99aa:bbcc:ddee:ff00"
+                .parse::<Ipv6Addr>()
+                .unwrap()
+        );
     }
 
     #[test]

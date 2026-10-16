@@ -3,9 +3,9 @@
 
 use ipnet::{Ipv4Net, Ipv6Net};
 use prism_net::nft::{
-    BoundaryConfig, Chain, ChainType, CtState, DnatRule, Family, GuestPort, Hook, NatRule, Nft,
-    Rule, SwitchServices, Table, boundary_ruleset, bridge_guard_ruleset, guest_input_chain,
-    nat_ruleset, nat6_ruleset, priority,
+    BoundaryConfig, Chain, ChainType, CtState, DnatRule, Family, GuestPort, Hook, Nat6Rule,
+    NatRule, Nft, Rule, SwitchServices, Table, boundary_ruleset, bridge_guard_ruleset,
+    guest_input_chain, nat_ruleset, nat6_ruleset, priority,
 };
 
 /// What the firewall should enforce for guests on this node.
@@ -17,11 +17,15 @@ pub struct GuestRules {
     pub switches: Vec<SwitchServices>,
     /// Masquerade, one rule per NAT network.
     pub nat: Vec<NatRule>,
+    /// NAT66, one masquerade per network that routes IPv6 out of this node.
+    pub nat6: Vec<Nat6Rule>,
     /// Port forwards to local guests, as destination NAT.
     pub dnat: Vec<DnatRule>,
     /// Destinations guests never reach through the host (the tailnet and
     /// other members' underlay addresses).
     pub blocked: Vec<Ipv4Net>,
+    /// The IPv6 counterpart of `blocked`.
+    pub blocked6: Vec<Ipv6Net>,
     /// Each bridge and the only interface it may forward out of.
     pub routed: Vec<Routed>,
 }
@@ -30,8 +34,9 @@ pub struct GuestRules {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Routed {
     pub bridge: String,
-    /// The only interface it may forward out of.
-    pub out: Option<String>,
+    /// The only interfaces it may forward out of: the uplinks of a NAT network, none for an
+    /// isolated one.
+    pub out: Vec<String>,
     /// Blocked destinations this bridge may still reach.
     pub allow: Vec<Ipv4Net>,
 }
@@ -49,7 +54,7 @@ pub struct Firewall;
 
 impl Firewall {
     /// The tables for `rules`: `inet prism` (boundary plus guest chains),
-    /// `ip prism-nat`, `ip6 prism-nat` (with IPv6 forwards) and `bridge prism`.
+    /// `ip prism-nat`, `ip6 prism-nat` (NAT66 and IPv6 forwards) and `bridge prism`.
     pub fn tables(rules: &GuestRules, mesh: Option<&MeshBoundary>) -> Vec<Table> {
         let mut inet = if let Some(m) = mesh {
             boundary_ruleset(&BoundaryConfig {
@@ -109,22 +114,29 @@ impl Firewall {
                             .drop(),
                     );
                 }
-                let rule = Rule::new(Family::Inet).iifname(bridge);
-                fwd.push(match out {
-                    Some(uplink) => rule.oifname_ne(uplink).drop(),
-                    None => rule.drop(),
-                });
+                for net in &rules.blocked6 {
+                    fwd.push(
+                        Rule::new(Family::Inet)
+                            .iifname(bridge)
+                            .ip6_daddr(*net)
+                            .drop(),
+                    );
+                }
+                let rule = out
+                    .iter()
+                    .fold(Rule::new(Family::Inet).iifname(bridge), |r, uplink| {
+                        r.oifname_ne(uplink)
+                    });
+                fwd.push(rule.drop());
             }
         }
-        let mut tables = vec![
+        // Always replaced, so turning NAT66 and IPv6 forwards off removes their rules.
+        vec![
             inet,
             nat_ruleset(&rules.nat, &rules.dnat),
+            nat6_ruleset(&rules.nat6, &rules.dnat),
             bridge_guard_ruleset(&rules.ports),
-        ];
-        if rules.dnat.iter().any(|f| f.guest.is_ipv6()) {
-            tables.push(nat6_ruleset(&rules.dnat));
-        }
-        tables
+        ]
     }
 
     pub async fn apply(
@@ -165,17 +177,18 @@ mod tests {
             switches: vec![SwitchServices {
                 bridge: "ps100000".into(),
                 vip: "10.88.0.1".parse().unwrap(),
+                vip6: None,
             }],
             blocked: vec!["100.64.0.0/10".parse().unwrap()],
             routed: vec![Routed {
                 bridge: "ps100000".into(),
-                out: Some("eth0".into()),
+                out: vec!["eth0".into()],
                 allow: vec!["100.64.9.0/24".parse().unwrap()],
             }],
             ..GuestRules::default()
         };
         let t = Firewall::tables(&rules, None);
-        assert_eq!(t.len(), 3);
+        assert_eq!(t.len(), 4);
         assert!(Firewall::tables(&hairpin_rules(), None).len() >= 4);
         let fwd = t[0].chains.iter().find(|c| c.name == "forward").unwrap();
         assert_eq!(fwd.rules.len(), 3);

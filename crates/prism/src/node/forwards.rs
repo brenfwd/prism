@@ -3,6 +3,7 @@
 use uuid::Uuid;
 
 use super::{Node, NodeError, Result, VmView};
+use crate::network::NetworkDoc;
 use crate::spec::{NicNetwork, PortForward, validate_forwards};
 
 /// Whether two forwards would listen on the same host port. A wildcard
@@ -16,21 +17,28 @@ fn overlaps(a: &PortForward, b: &PortForward) -> bool {
         }
 }
 
-/// Checks the forwards of a NIC being created or edited.
-pub(super) fn check_nic_forwards(network: &NicNetwork) -> Result<()> {
+/// Checks the forwards of a NIC being created or edited. `nets` are the
+/// cluster's networks: IPv6 forwards need a guest address, which a network
+/// with IPv6 gives every NIC.
+pub(super) fn check_nic_forwards(network: &NicNetwork, nets: &[NetworkDoc]) -> Result<()> {
     let forwards = network.forwards();
     validate_forwards(forwards).map_err(NodeError::Invalid)?;
     match network {
         NicNetwork::User { .. } => require_passt(forwards),
         NicNetwork::Network { .. } => {
-            let has_v6 = matches!(network, NicNetwork::Network { ipv6: Some(_), .. });
+            let has_v6 = match network {
+                NicNetwork::Network {
+                    network, ipv6: own, ..
+                } => own.is_some() || nets.iter().any(|n| n.id == *network && n.subnet6.is_some()),
+                _ => false,
+            };
             if !has_v6
                 && forwards
                     .iter()
                     .any(|f| f.host_addr.is_some_and(|a| a.is_ipv6()))
             {
                 return Err(NodeError::Invalid(
-                    "IPv6 port forwards need the NIC to have an IPv6 address".into(),
+                    "IPv6 port forwards need an IPv6 network: turn on IPv6 for the network".into(),
                 ));
             }
             Ok(())
@@ -66,7 +74,7 @@ impl Node {
                 ));
             }
         }
-        check_nic_forwards(&nic.network)?;
+        check_nic_forwards(&nic.network, &self.state.networks()?)?;
         if live && !matches!(&nic.network, NicNetwork::Network { ipv4: Some(_), .. }) {
             return Err(NodeError::Invalid(
                 "the NIC has no address lease to forward to yet".into(),

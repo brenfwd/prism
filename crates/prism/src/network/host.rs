@@ -1,9 +1,9 @@
 //! What this host's routing table says: the uplink to masquerade out of
 //! and the subnets guests must not reuse.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
-use ipnet::Ipv4Net;
+use ipnet::{Ipv4Net, Ipv6Net};
 
 /// One IPv4 route from `/proc/net/route`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,12 +66,100 @@ pub fn foreign_subnets(routes: &[Route]) -> Vec<Ipv4Net> {
 
 /// Turns IPv4 forwarding on, which masquerade needs.
 pub fn enable_forwarding() {
-    write_sysctl("/proc/sys/net/ipv4/ip_forward", "IPv4 forwarding");
+    write_sysctl("/proc/sys/net/ipv4/ip_forward", "1", "IPv4 forwarding");
 }
 
-/// Turns IPv6 forwarding on, which IPv6 port forwards need.
-pub fn enable_forwarding6() {
-    write_sysctl("/proc/sys/net/ipv6/conf/all/forwarding", "IPv6 forwarding");
+/// One IPv6 route from `/proc/net/ipv6_route`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Route6 {
+    pub iface: String,
+    pub dest: Ipv6Net,
+    pub metric: u32,
+}
+
+fn parse_hex_addr6(s: &str) -> Option<Ipv6Addr> {
+    u128::from_str_radix(s, 16).ok().map(Ipv6Addr::from)
+}
+
+pub fn parse_routes6(text: &str) -> Vec<Route6> {
+    text.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if f.len() < 10 {
+                return None;
+            }
+            let prefix = u8::from_str_radix(f[1], 16).ok()?;
+            Some(Route6 {
+                iface: f[9].to_string(),
+                dest: Ipv6Net::new(parse_hex_addr6(f[0])?, prefix).ok()?,
+                metric: u32::from_str_radix(f[5], 16).ok()?,
+            })
+        })
+        .collect()
+}
+
+pub fn routes6() -> Vec<Route6> {
+    std::fs::read_to_string("/proc/net/ipv6_route")
+        .map(|t| parse_routes6(&t))
+        .unwrap_or_default()
+}
+
+/// The interface of the best IPv6 default route, if the host has one.
+pub fn uplink6_of(routes: &[Route6]) -> Option<String> {
+    routes
+        .iter()
+        .filter(|r| r.dest.prefix_len() == 0 && r.iface != "lo")
+        .min_by_key(|r| r.metric)
+        .map(|r| r.iface.clone())
+}
+
+/// IPv6 routes that are not Prism's own, not the default route, not link-local, multicast
+/// or loopback: prefixes a guest network must not reuse.
+pub fn foreign_subnets6(routes: &[Route6]) -> Vec<Ipv6Net> {
+    let skip: [Ipv6Net; 3] = [
+        "fe80::/10".parse().expect("literal"),
+        "ff00::/8".parse().expect("literal"),
+        "::1/128".parse().expect("literal"),
+    ];
+    routes
+        .iter()
+        .filter(|r| {
+            r.dest.prefix_len() > 0
+                && super::vni_of(&r.iface).is_none()
+                && !skip.iter().any(|s| s.contains(&r.dest.network()))
+        })
+        .map(|r| r.dest)
+        .collect()
+}
+
+/// Turns IPv6 forwarding on, which IPv6 port forwards and NAT66 need. Turning it on makes
+/// the kernel ignore router advertisements, which would drop the host's own default route,
+/// so `uplink` first gets `accept_ra=2` (accept even when forwarding).
+pub fn enable_forwarding6(uplink: Option<&str>) {
+    if let Some(u) = uplink {
+        write_sysctl(
+            &format!("/proc/sys/net/ipv6/conf/{u}/accept_ra"),
+            "2",
+            "accept_ra",
+        );
+    }
+    write_sysctl(
+        "/proc/sys/net/ipv6/conf/all/forwarding",
+        "1",
+        "IPv6 forwarding",
+    );
+}
+
+/// Stops the host from configuring itself from router advertisements on `bridge`. The
+/// bridge carries Prism's own addresses; other nodes' advertisements must not add more.
+pub fn lock_bridge6(bridge: &str) {
+    for knob in ["accept_ra", "autoconf"] {
+        write_sysctl(
+            &format!("/proc/sys/net/ipv6/conf/{bridge}/{knob}"),
+            "0",
+            knob,
+        );
+    }
 }
 
 /// Lets `bridge` route packets that came from loopback, so a forward from
@@ -79,15 +167,16 @@ pub fn enable_forwarding6() {
 pub fn enable_route_localnet(bridge: &str) {
     write_sysctl(
         &format!("/proc/sys/net/ipv4/conf/{bridge}/route_localnet"),
+        "1",
         "route_localnet",
     );
 }
 
-fn write_sysctl(path: &str, what: &str) {
-    if std::fs::read_to_string(path).is_ok_and(|v| v.trim() == "1") {
+fn write_sysctl(path: &str, value: &str, what: &str) {
+    if std::fs::read_to_string(path).is_ok_and(|v| v.trim() == value) {
         return;
     }
-    if let Err(e) = std::fs::write(path, "1") {
+    if let Err(e) = std::fs::write(path, value) {
         tracing::warn!("enabling {what}: {e}");
     }
 }
@@ -119,6 +208,21 @@ eth0\t00000000\t0101A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
 eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0
 ps100000\t0058580A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0
 ";
+
+    const TABLE6: &str = "\
+fd000000000000000000000000000000 08 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000001 eth0
+00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000400 00000001 00000000 00000003 eth0
+fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000001 eth0
+fd010203040500070000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000001 ps100000
+";
+
+    #[test]
+    fn parses_the_ipv6_table() {
+        let r = parse_routes6(TABLE6);
+        assert_eq!(r.len(), 4);
+        assert_eq!(uplink6_of(&r).as_deref(), Some("eth0"));
+        assert_eq!(foreign_subnets6(&r), vec!["fd00::/8".parse().unwrap()]);
+    }
 
     #[test]
     fn parses_the_table() {

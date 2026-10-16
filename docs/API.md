@@ -33,6 +33,28 @@ the SLAAC address that NIC forms on its network. It is absent for NICs on
 networks without IPv6. A port forward with an IPv6 `host_addr` targets that
 address.
 
+## VLAN subnets
+
+A network can give a VLAN its own subnet, with a gateway on every node, a DHCP
+scope, DNS and (on a NAT network) internet access. `GET /networks` and
+`GET /networks/{id}` list them as `vlan_subnets`, an object keyed by VLAN ID
+whose values carry `subnet` and `gateways` (one address per node).
+
+`POST /networks/{id}/vlans` takes `{vlan, subnet?}` and returns the network. The
+VLAN ID is 2 to 4094. Without `subnet` the node picks a free `/24`. NICs of the
+network that are already on that VLAN move into the new subnet and get new
+addresses. It answers 409 when the VLAN has a subnet already or the subnet
+overlaps another network or a host route.
+
+`DELETE /networks/{id}/vlans/{vlan}` removes the subnet. It answers 409 while a
+NIC is on the VLAN. `GET /networks/{id}/vlan-suggestion` returns `{subnet}`, the
+subnet the next `POST` without a `subnet` would use.
+
+A NIC takes its address from the subnet of its `vlan` (its native VLAN for a
+trunk), or from the network's subnet when that VLAN has none. Changing a NIC's
+VLAN with `PUT /vms/{id}/nics/{nic}/vlans` gives it an address from the new
+subnet. Guests keep the old address until their DHCP client renews.
+
 ## Rolling upgrades
 
 Each node advertises `{version, feature_level}`; `GET /api/v1/cluster` reports

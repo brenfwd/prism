@@ -207,6 +207,25 @@ fn allowed_ip(addr: Ipv6Addr) -> WireguardAllowedIp {
     ])
 }
 
+/// A handshake newer than this means the peer's current endpoint works.
+const LIVE_HANDSHAKE: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// Whether the peer's endpoint needs no write. `WireGuard` follows a peer that
+/// roams to the source of its latest authenticated packet, so while the session
+/// is live a differing endpoint is the learned one and resetting it to the
+/// configured address would break the tunnel until the next handshake.
+fn endpoint_settled(want: Option<std::net::SocketAddr>, cur: &PeerStatus) -> bool {
+    let Some(want) = want else { return true };
+    if cur.endpoint == Some(want) {
+        return true;
+    }
+    cur.endpoint.is_some()
+        && cur
+            .last_handshake
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age < LIVE_HANDSHAKE)
+}
+
 impl Netlink {
     /// Creates the `WireGuard` link if missing, sets key, port, fwmark, MTU and address, and
     /// brings it up. Existing peers are left alone. Returns the interface index.
@@ -289,7 +308,7 @@ impl Netlink {
                 Some(c)
                     if c.allowed_ips == want_allowed
                         && c.keepalive == keepalive
-                        && (p.endpoint.is_none() || p.endpoint == c.endpoint) =>
+                        && endpoint_settled(p.endpoint, c) =>
                 {
                     continue;
                 }

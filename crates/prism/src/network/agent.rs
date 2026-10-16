@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ipnet::{IpNet, Ipv6Net};
+use prism_libvirt::DomainEvent;
 use prism_net::Netlink;
 use prism_net::link::{BridgeConfig, PortVlans, VXLAN_PORT, VxlanConfig};
 use tokio::sync::broadcast;
@@ -26,21 +27,26 @@ pub struct Agent {
     state: State,
     firewall: Firewall,
     services: tokio::sync::Mutex<Services>,
+    /// Libvirt domain events: a VM starting creates its tap, which needs
+    /// its VLANs applied right away.
+    domains: broadcast::Sender<DomainEvent>,
 }
 
 impl Agent {
-    pub fn new(node: Uuid, state: State) -> Arc<Self> {
+    pub fn new(node: Uuid, state: State, domains: broadcast::Sender<DomainEvent>) -> Arc<Self> {
         Arc::new(Self {
             node,
             state,
             firewall: Firewall,
             services: tokio::sync::Mutex::default(),
+            domains,
         })
     }
 
     /// Reconciles on every state change and periodically, forever.
     pub async fn run(self: Arc<Self>) {
         let mut rx = self.state.subscribe();
+        let mut dom = self.domains.subscribe();
         let mut nl: Option<Netlink> = None;
         loop {
             if nl.is_none() {
@@ -60,6 +66,16 @@ impl Agent {
                     }
                     tokio::time::sleep(DEBOUNCE).await;
                     while rx.try_recv().is_ok() {}
+                }
+                r = dom.recv() => {
+                    match r {
+                        Err(broadcast::error::RecvError::Closed) => return,
+                        Ok(DomainEvent::Lifecycle { .. }) | Err(_) => {}
+                        Ok(_) => continue,
+                    }
+                    // The tap appears a moment after the lifecycle event.
+                    tokio::time::sleep(DEBOUNCE).await;
+                    while dom.try_recv().is_ok() {}
                 }
                 () = tokio::time::sleep(RESYNC) => {}
             }
@@ -104,7 +120,9 @@ impl Agent {
         }
         remove_stale(nl, &p).await;
         self.services.lock().await.sync(&p.switches);
-        let mesh = cluster.filter(|_| clustered).map(|c| MeshBoundary {
+        // Keyed on the cluster record alone: an empty member list while
+        // state loads must not replace the boundary table with an open one.
+        let mesh = cluster.map(|c| MeshBoundary {
             prefix: Ipv6Net::new(c.mesh_prefix, 48).unwrap_or_default().trunc(),
             qemu_uid: crate::cluster::wg::qemu_uid(),
         });

@@ -216,7 +216,10 @@ impl Node {
         tokio::spawn(Arc::clone(self).balloon_loop());
         tokio::spawn(Arc::clone(self).archive_health_loop());
         tokio::spawn(Arc::clone(self).iso_cache_loop());
-        tokio::spawn(crate::network::Agent::new(self.id, self.state.clone()).run());
+        tokio::spawn(
+            crate::network::Agent::new(self.id, self.state.clone(), self.domain_events.clone())
+                .run(),
+        );
         tokio::spawn(Arc::clone(self).seed_default_network());
     }
 

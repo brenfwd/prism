@@ -5,7 +5,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use ipnet::{Ipv4Net, Ipv6Net};
 
 use super::{Chain, ChainType, CtState, Family, Hook, Rule, Table, priority};
-use crate::MacAddr;
 use crate::link::VXLAN_PORT;
 
 const CHAIN_PREROUTING: &str = "prerouting";
@@ -16,12 +15,8 @@ const CHAIN_POSTROUTING: &str = "postrouting";
 
 /// `127.0.0.0/8`, the destinations a host-local forward matches when no host address is set.
 const LOOPBACK_V4: Ipv4Net = Ipv4Net::new_assert(Ipv4Addr::new(127, 0, 0, 0), 8);
-/// `fe80::/10`, the `IPv6` link-local range.
-const LINK_LOCAL_V6: Ipv6Net = Ipv6Net::new_assert(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10);
 
 const ICMPV6_ECHO_REQUEST: u8 = 128;
-const ICMPV6_NEIGHBOR_ADVERT: u8 = 136;
-const ICMPV6_REDIRECT: u8 = 137;
 
 /// Name of the `inet` filter table.
 pub const INET_TABLE: &str = "prism";
@@ -383,116 +378,6 @@ fn forward_chains<'t, 'a>(
         }
     }
     c
-}
-
-/// The `IPv6` addresses a guest may send from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum Ipv6Source {
-    /// No `IPv6` checks: the network does not hand out addresses.
-    #[default]
-    Any,
-    /// Only the NIC's own address in `prefix`, link-local addresses and `::`.
-    Only {
-        /// The NIC's own address.
-        addr: Ipv6Addr,
-        /// The network the address belongs to; other addresses in it may not be claimed.
-        prefix: Ipv6Net,
-    },
-}
-
-/// A guest's tap on a switch bridge and the addresses it may use.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GuestPort {
-    /// The tap, `pn<nicid>`.
-    pub tap: String,
-    /// The NIC's MAC address; frames from any other source MAC are dropped.
-    pub mac: MacAddr,
-    /// The NIC's IPAM lease; `None` allows no IPv4 source other than `0.0.0.0`.
-    pub ipv4: Option<Ipv4Addr>,
-    /// Which `IPv6` sources the guest may use.
-    pub ipv6: Ipv6Source,
-    /// A trunk NIC may send VLAN-tagged frames; their sources are checked
-    /// like untagged ones. Other NICs may not send tagged frames at all.
-    pub trunk: bool,
-}
-
-const ETH_P_8021Q: u16 = 0x8100;
-const ETH_P_8021AD: u16 = 0x88a8;
-
-/// The `IPv6` rules of one guest tap: the source address is the NIC's own, a link-local
-/// address or `::`; neighbour advertisements may not claim another address of the network;
-/// redirects are dropped.
-fn guard_ipv6(c: &mut Chain, tap: &str, addr: Ipv6Addr, prefix: Ipv6Net) {
-    let f = Family::Bridge;
-    c.push(
-        Rule::new(f)
-            .iifname(tap)
-            .ip6_saddr_ne(addr)
-            .ip6_saddr_ne(Ipv6Addr::UNSPECIFIED)
-            .ip6_saddr_outside(LINK_LOCAL_V6)
-            .drop(),
-    )
-    .push(
-        Rule::new(f)
-            .iifname(tap)
-            .icmpv6_type(ICMPV6_NEIGHBOR_ADVERT)
-            .icmpv6_target_in(prefix)
-            .icmpv6_target_ne(addr)
-            .drop(),
-    )
-    .push(
-        Rule::new(f)
-            .iifname(tap)
-            .icmpv6_type(ICMPV6_REDIRECT)
-            .drop(),
-    );
-}
-
-/// The `bridge prism` table: anti-spoofing per guest tap (ether source, IPv4 and ARP source,
-/// `0.0.0.0` allowed for DHCPDISCOVER, `IPv6` source and neighbour advertisements on networks
-/// with `IPv6`), no rogue DHCP servers or router advertisements, no VLAN-tagged ingress.
-pub fn bridge_guard_ruleset(ports: &[GuestPort]) -> Table {
-    let f = Family::Bridge;
-    let mut t = Table::new(f, BRIDGE_TABLE);
-    let c = t.chain(Chain::base(
-        CHAIN_PREROUTING,
-        ChainType::Filter,
-        Hook::Prerouting,
-        priority::BRIDGE_FILTER,
-    ));
-    for p in ports {
-        let tap = p.tap.as_str();
-        let ip = p.ipv4.unwrap_or(Ipv4Addr::UNSPECIFIED);
-        c.push(Rule::new(f).iifname(tap).ether_saddr_ne(p.mac).drop())
-            .push(
-                Rule::new(f)
-                    .iifname(tap)
-                    .ip_saddr_ne(ip)
-                    .ip_saddr_ne(Ipv4Addr::UNSPECIFIED)
-                    .drop(),
-            )
-            .push(Rule::new(f).iifname(tap).arp_saddr_ip_ne(ip).drop())
-            .push(Rule::new(f).iifname(tap).udp_sport(67).drop())
-            .push(Rule::new(f).iifname(tap).icmpv6_type(134).drop())
-            .push(Rule::new(f).iifname(tap).ether_type(ETH_P_8021AD).drop());
-        if let Ipv6Source::Only { addr, prefix } = p.ipv6 {
-            guard_ipv6(c, tap, addr, prefix);
-        }
-        if p.trunk {
-            c.push(
-                Rule::new(f)
-                    .iifname(tap)
-                    .tagged_ip_saddr_ne(ip)
-                    .tagged_ip_saddr_ne(Ipv4Addr::UNSPECIFIED)
-                    .drop(),
-            )
-            .push(Rule::new(f).iifname(tap).tagged_arp_saddr_ip_ne(ip).drop())
-            .push(Rule::new(f).iifname(tap).tagged_udp_sport_eq(67).drop());
-        } else {
-            c.push(Rule::new(f).iifname(tap).ether_type(ETH_P_8021Q).drop());
-        }
-    }
-    t
 }
 
 #[cfg(test)]

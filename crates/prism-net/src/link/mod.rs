@@ -5,6 +5,7 @@
 mod addr;
 mod fdb;
 mod kind;
+mod neigh;
 mod subif;
 mod vlan;
 

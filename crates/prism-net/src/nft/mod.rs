@@ -9,15 +9,17 @@
 //! `ip6 saddr` match in an `inet` table), so `nft list` shows the rules exactly as written.
 
 mod expr;
+mod guard;
 mod rule;
 mod rules;
 mod wire;
 
 pub use expr::{CmpOp, CtState, Expr, MetaKey, PayloadBase, Verdict};
+pub use guard::{GuestPort, Ipv6Source, bridge_guard_ruleset};
 pub use rule::Rule;
 pub use rules::{
-    BoundaryConfig, DnatRule, GuestPort, Ipv6Source, Nat6Rule, NatRule, SwitchServices,
-    boundary_ruleset, bridge_guard_ruleset, guest_input_chain, nat_ruleset, nat6_ruleset,
+    BoundaryConfig, DnatRule, Nat6Rule, NatRule, SwitchServices, boundary_ruleset,
+    guest_input_chain, nat_ruleset, nat6_ruleset,
 };
 pub use wire::Nft;
 

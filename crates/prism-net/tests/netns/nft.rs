@@ -107,9 +107,10 @@ table bridge prism {
         iifname "pn1" ip saddr != 10.20.0.5 ip saddr != 0.0.0.0 drop
         iifname "pn1" arp saddr ip != 10.20.0.5 drop
         iifname "pn1" udp sport 67 drop
+        iifname "pn1" udp sport 547 drop
         iifname "pn1" icmpv6 type nd-router-advert drop
-        iifname "pn1" ether type 8021q drop
         iifname "pn1" ether type 8021ad drop
+        iifname "pn1" ether type 8021q drop
     }
 }
 "#;

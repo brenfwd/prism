@@ -183,6 +183,67 @@ impl Rule {
             .cmp(CmpOp::Eq, port.to_be_bytes().to_vec())
     }
 
+    /// The start of a match on an IPv6 packet inside an 802.1Q frame.
+    fn tagged_ipv6(self) -> Self {
+        self.ether_type(ETH_P_8021Q)
+            .payload(PayloadBase::Link, 16, 2)
+            .cmp(CmpOp::Eq, ETH_P_IPV6.to_be_bytes().to_vec())
+    }
+
+    /// An IPv6 packet inside an 802.1Q frame whose next header is `proto` (extension headers
+    /// are not followed).
+    fn tagged_ip6_l4(self, proto: u8) -> Self {
+        self.tagged_ipv6()
+            .payload(PayloadBase::Link, 18 + 6, 1)
+            .cmp(CmpOp::Eq, vec![proto])
+    }
+
+    /// `ip6 saddr != <addr>` for a VLAN-tagged frame.
+    pub fn tagged_ip6_saddr_ne(self, addr: Ipv6Addr) -> Self {
+        self.tagged_payload_ne(ETH_P_IPV6, 8, addr.octets().to_vec())
+    }
+
+    /// `ip6 saddr != <prefix>` for a VLAN-tagged frame.
+    pub fn tagged_ip6_saddr_outside(self, net: Ipv6Net) -> Self {
+        self.tagged_ipv6().prefix_cmp(
+            PayloadBase::Link,
+            18 + 8,
+            &net.network().octets(),
+            net.prefix_len(),
+            CmpOp::Neq,
+        )
+    }
+
+    /// `icmpv6 type <type>` for a VLAN-tagged IPv6 frame without extension headers.
+    pub fn tagged_icmpv6_type(self, kind: u8) -> Self {
+        self.tagged_ip6_l4(IPPROTO_ICMPV6)
+            .payload(PayloadBase::Link, 18 + 40, 1)
+            .cmp(CmpOp::Eq, vec![kind])
+    }
+
+    /// The target of a tagged neighbour message lies inside `net`.
+    pub fn tagged_icmpv6_target_in(self, net: Ipv6Net) -> Self {
+        self.prefix(
+            PayloadBase::Link,
+            18 + 40 + 8,
+            &net.network().octets(),
+            net.prefix_len(),
+        )
+    }
+
+    /// The target of a tagged neighbour message is not `addr`.
+    pub fn tagged_icmpv6_target_ne(self, addr: Ipv6Addr) -> Self {
+        self.payload(PayloadBase::Link, 18 + 40 + 8, 16)
+            .cmp(CmpOp::Neq, addr.octets().to_vec())
+    }
+
+    /// `udp sport <port>` for a VLAN-tagged IPv6 frame without extension headers.
+    pub fn tagged_udp6_sport_eq(self, port: u16) -> Self {
+        self.tagged_ip6_l4(IPPROTO_UDP)
+            .payload(PayloadBase::Link, 18 + 40, 2)
+            .cmp(CmpOp::Eq, port.to_be_bytes().to_vec())
+    }
+
     /// `ether saddr != <mac>`
     pub fn ether_saddr_ne(self, mac: MacAddr) -> Self {
         self.payload(PayloadBase::Link, 6, 6)
@@ -315,6 +376,15 @@ impl Rule {
     pub fn icmpv6_target_ne(self, addr: Ipv6Addr) -> Self {
         self.payload(PayloadBase::Transport, 8, 16)
             .cmp(CmpOp::Neq, addr.octets().to_vec())
+    }
+
+    /// A neighbour solicitation or advertisement whose first option is a link-layer address
+    /// option of type `option` (1 for source, 2 for target) naming a MAC other than `mac`.
+    pub fn icmpv6_lladdr_ne(self, option: u8, mac: MacAddr) -> Self {
+        self.payload(PayloadBase::Transport, 24, 1)
+            .cmp(CmpOp::Eq, vec![option])
+            .payload(PayloadBase::Transport, 26, 6)
+            .cmp(CmpOp::Neq, mac.0.to_vec())
     }
 
     /// `arp saddr ip != <addr>` (bridge family).

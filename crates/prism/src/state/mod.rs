@@ -14,6 +14,7 @@ mod network_tests;
 mod networks;
 #[cfg(test)]
 mod tests;
+mod timers;
 
 pub use backend::StateBackend;
 pub use command::{Command, Outcome};
@@ -36,6 +37,8 @@ use crate::db::StateDb;
 use crate::network::{NETWORKS, NetworkDoc, RELEASED_VNIS, ReleasedVni};
 use crate::spec::VmSpec;
 use apply::apply_command;
+pub use timers::ArchiveTimers;
+use timers::{ARCHIVE_TIMERS_ID, TIMERS};
 
 pub const VMS: &str = "vm";
 pub const POOLS: &str = "pool";
@@ -225,6 +228,11 @@ impl State {
             })
             .filter(|p| p.node == node)
             .collect())
+    }
+
+    /// The replicated archive timers; empty until a leader writes them.
+    pub fn archive_timers(&self) -> anyhow::Result<ArchiveTimers> {
+        Ok(self.db.get(TIMERS, ARCHIVE_TIMERS_ID)?.unwrap_or_default())
     }
 
     pub fn cluster(&self) -> anyhow::Result<Option<ClusterDoc>> {

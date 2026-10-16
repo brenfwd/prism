@@ -1,7 +1,7 @@
 //! Background archive health: re-replicating after a node has been offline
 //! past the grace period, rebalancing fill, and scrubbing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,7 @@ use uuid::Uuid;
 use super::Node;
 use super::archive_repair::{MoveReport, ScrubReport};
 use crate::archive::{ArchiveFileDoc, ArchiveMemberDoc, MemberState, Replica};
+use crate::cluster::model::{FEATURE_LEVEL, feature_enabled};
 use crate::state::Command;
 
 /// A node offline this long no longer counts toward a file's replicas.
@@ -19,6 +20,8 @@ pub const OFFLINE_GRACE: Duration = Duration::from_secs(24 * 3600);
 const HEALTH_EVERY: Duration = Duration::from_secs(300);
 const REBALANCE_EVERY: Duration = Duration::from_secs(24 * 3600);
 const OFFLINE_META: &str = "archive.offline";
+/// Feature level that replicates the archive timers.
+const TIMERS_LEVEL: u32 = 3;
 const SCRUB_META: &str = "archive.scrub_at";
 const SCRUB_EVERY: Duration = Duration::from_secs(7 * 24 * 3600);
 /// Fill may differ from the pool's mean by this much before files move.
@@ -76,18 +79,12 @@ pub fn pick_file<'a>(
 
 impl Node {
     /// Nodes that have been unreachable for longer than the grace period.
-    /// First-seen-offline times persist in the state db's node-local meta,
-    /// so a daemon restart does not restart the clock.
-    pub(super) fn archive_expired_nodes(&self) -> HashSet<Uuid> {
+    /// First-seen-offline times are replicated, so a new leader keeps the
+    /// clock, and a daemon restart does not restart it.
+    pub(super) async fn archive_expired_nodes(&self) -> HashSet<Uuid> {
         let now = unix_now();
-        let db = self.state.db();
-        let mut offline: HashMap<Uuid, u64> = db
-            .meta(OFFLINE_META)
-            .ok()
-            .flatten()
-            .and_then(|m| serde_json::from_str(&m).ok())
-            .unwrap_or_default();
-        let before = offline.clone();
+        let before = self.stored_offline();
+        let mut offline = before.clone();
         let mut expired = HashSet::new();
         let nodes = self.nodes();
         offline.retain(|id, _| nodes.iter().any(|n| n.id == *id && !n.reachable));
@@ -97,13 +94,54 @@ impl Node {
                 expired.insert(n.id);
             }
         }
-        if offline != before
-            && let Ok(json) = serde_json::to_string(&offline)
-            && let Err(e) = db.set_meta(OFFLINE_META, &json)
+        if offline != before {
+            self.store_offline(&offline).await;
+        }
+        expired
+    }
+
+    /// Whether the replicated timers are in use: the cluster has reached
+    /// the feature level that carries them.
+    fn timers_replicated(&self) -> bool {
+        let level = self
+            .state
+            .cluster()
+            .ok()
+            .flatten()
+            .map_or(FEATURE_LEVEL, |c| c.feature_level);
+        feature_enabled(level, TIMERS_LEVEL)
+    }
+
+    fn stored_offline(&self) -> BTreeMap<Uuid, u64> {
+        if self.timers_replicated() {
+            return self
+                .state
+                .archive_timers()
+                .unwrap_or_default()
+                .offline_since;
+        }
+        self.state
+            .db()
+            .meta(OFFLINE_META)
+            .ok()
+            .flatten()
+            .and_then(|m| serde_json::from_str(&m).ok())
+            .unwrap_or_default()
+    }
+
+    async fn store_offline(&self, offline: &BTreeMap<Uuid, u64>) {
+        if self.timers_replicated() {
+            let cmd = Command::SetArchiveOffline {
+                since: offline.clone(),
+            };
+            if let Err(e) = self.state.apply(cmd).await {
+                tracing::warn!("replicating archive offline clock: {e:#}");
+            }
+        } else if let Ok(json) = serde_json::to_string(offline)
+            && let Err(e) = self.state.db().set_meta(OFFLINE_META, &json)
         {
             tracing::warn!("persisting archive offline clock: {e:#}");
         }
-        expired
     }
 
     fn archive_fills(&self, pool: &str) -> anyhow::Result<Vec<Fill>> {
@@ -242,22 +280,34 @@ impl Node {
     }
 
     /// Whether a weekly scrub is due; stamps the time when it is, so the
-    /// schedule survives restarts.
-    fn archive_scrub_due(&self) -> bool {
-        let (now, db) = (unix_now(), self.state.db());
-        let last = db
-            .meta(SCRUB_META)
-            .ok()
-            .flatten()
-            .and_then(|m| m.parse::<u64>().ok());
-        let Some(last) = last else {
-            // First run: start the clock rather than scrubbing at once.
-            let _ = db.set_meta(SCRUB_META, &now.to_string());
-            return false;
+    /// schedule survives restarts and leader changes.
+    async fn archive_scrub_due(&self) -> bool {
+        let now = unix_now();
+        let replicated = self.timers_replicated();
+        let last = if replicated {
+            self.state.archive_timers().ok().and_then(|t| t.scrub_at)
+        } else {
+            self.state
+                .db()
+                .meta(SCRUB_META)
+                .ok()
+                .flatten()
+                .and_then(|m| m.parse::<u64>().ok())
         };
-        let due = now.saturating_sub(last) >= SCRUB_EVERY.as_secs();
-        if due {
-            let _ = db.set_meta(SCRUB_META, &now.to_string());
+        // First run: start the clock rather than scrubbing at once.
+        let due = last.is_some_and(|l| now.saturating_sub(l) >= SCRUB_EVERY.as_secs());
+        if last.is_none() || due {
+            if replicated {
+                if let Err(e) = self
+                    .state
+                    .apply(Command::StampArchiveScrub { at: now })
+                    .await
+                {
+                    tracing::warn!("replicating archive scrub time: {e:#}");
+                }
+            } else {
+                let _ = self.state.db().set_meta(SCRUB_META, &now.to_string());
+            }
         }
         due
     }
@@ -286,7 +336,7 @@ impl Node {
                     last_rebalance = Instant::now();
                 }
             }
-            if leads && self.archive_scrub_due() {
+            if leads && self.archive_scrub_due().await {
                 for p in &pools {
                     match self.archive_scrub(&p.name).await {
                         Ok(r) if r.corrupt + r.missing > 0 => {

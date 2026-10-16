@@ -274,3 +274,15 @@ fn level_two_commands_are_refused_at_level_one() {
         2
     );
 }
+
+#[test]
+fn archive_timer_commands_need_level_three() {
+    let scrub = Command::StampArchiveScrub { at: 5 };
+    assert_eq!(scrub.required_level(), 3);
+    let s = state();
+    let b = s.backend();
+    let meta = prism_cluster::AppliedMeta::default();
+    b.apply(Some(&serde_json::to_string(&scrub).unwrap()), &meta)
+        .unwrap();
+    assert_eq!(s.archive_timers().unwrap().scrub_at, Some(5));
+}

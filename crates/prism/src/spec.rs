@@ -7,6 +7,9 @@ use uuid::Uuid;
 
 use crate::storage::valid_name;
 
+/// The `owner_epoch` of a VM that has never moved between nodes.
+pub const FIRST_OWNER_EPOCH: u64 = 1;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmSpec {
     pub id: Uuid,
@@ -24,7 +27,8 @@ pub struct VmSpec {
     /// Owning node; nil in documents written before clustering existed.
     #[serde(default)]
     pub node: Uuid,
-    /// Bumped whenever ownership moves; a node only runs VMs it owns.
+    /// Starts at [`FIRST_OWNER_EPOCH`] and grows by one whenever ownership
+    /// moves; a node only runs VMs it owns.
     #[serde(default)]
     pub owner_epoch: u64,
     /// Start the VM when its node starts (managed by Prism, not libvirt).
@@ -556,7 +560,7 @@ pub mod tests {
             disks: vec![],
             nics: vec![],
             node: Uuid::nil(),
-            owner_epoch: 0,
+            owner_epoch: FIRST_OWNER_EPOCH,
             autostart: false,
             cloud_init: None,
             migrating: None,

@@ -283,7 +283,7 @@ impl Node {
             .find(|p| p.name == pool)
             .ok_or_else(|| anyhow::anyhow!("no archive pool {pool}"))?;
         let mut report = MoveReport::default();
-        let expired = self.archive_expired_nodes();
+        let expired = self.archive_expired_nodes().await;
         for file in self.state.archive_files(pool, "")? {
             let mut file = file;
             loop {

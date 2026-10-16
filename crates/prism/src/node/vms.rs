@@ -98,7 +98,7 @@ impl Node {
                 boot_order: None,
             }],
             node: self.id,
-            owner_epoch: 1,
+            owner_epoch: crate::spec::FIRST_OWNER_EPOCH,
             autostart: req.autostart,
             cloud_init: req.cloud_init,
             migrating: None,

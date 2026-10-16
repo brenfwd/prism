@@ -1,5 +1,7 @@
 //! The commands that change desired state, and their outcomes.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -116,6 +118,14 @@ pub enum Command {
         node_id: Uuid,
         level: u32,
     },
+    /// Records when the weekly archive scrub last started.
+    StampArchiveScrub {
+        at: u64,
+    },
+    /// Replaces the times at which unreachable nodes were first seen offline.
+    SetArchiveOffline {
+        since: BTreeMap<Uuid, u64>,
+    },
 }
 
 impl Command {
@@ -128,6 +138,7 @@ impl Command {
             | Self::DeleteNetwork { .. }
             | Self::SetFeatureLevel { .. }
             | Self::SetMemberFeatureLevel { .. } => 2,
+            Self::StampArchiveScrub { .. } | Self::SetArchiveOffline { .. } => 3,
             _ => 1,
         }
     }

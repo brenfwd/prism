@@ -3,6 +3,7 @@
 use uuid::Uuid;
 
 use super::networks;
+use super::timers::{ARCHIVE_TIMERS_ID, ArchiveTimers, TIMERS};
 use super::{CLUSTER_ID, Command, Outcome, POOLS, PoolDoc, VMS};
 use crate::archive::{
     ARCHIVE_FILES, ARCHIVE_MEMBERS, ARCHIVE_POOLS, ArchiveFileDoc, ArchiveMemberDoc, ArchivePoolDoc,
@@ -275,6 +276,16 @@ pub(super) fn apply_command(
             m.feature_level = *level;
             d.put(MEMBERS, &node_id.to_string(), &m)?;
         }
+        Command::StampArchiveScrub { at } => {
+            let mut t = archive_timers(d)?;
+            t.scrub_at = Some(*at);
+            d.put(TIMERS, ARCHIVE_TIMERS_ID, &t)?;
+        }
+        Command::SetArchiveOffline { since } => {
+            let mut t = archive_timers(d)?;
+            t.offline_since = since.clone();
+            d.put(TIMERS, ARCHIVE_TIMERS_ID, &t)?;
+        }
         Command::SetFeatureLevel { level } => {
             if let Some(mut c) = d.get::<ClusterDoc>(CLUSTER, CLUSTER_ID)?
                 && *level > c.feature_level
@@ -327,4 +338,8 @@ fn admit(
     d.put(INVITES, invite_id, &invite)?;
     d.put(MEMBERS, &member.node_id.to_string(), member)?;
     Ok(Ok(()))
+}
+
+fn archive_timers(d: &Docs<'_>) -> anyhow::Result<ArchiveTimers> {
+    Ok(d.get(TIMERS, ARCHIVE_TIMERS_ID)?.unwrap_or_default())
 }

@@ -155,7 +155,8 @@ impl Node {
             let xml = c.snapshot_xml(&snap, 0).await?;
             let mut view = parse_snapshot(&xml);
             view.current = c.snapshot_is_current(&snap).await.unwrap_or(false);
-            view.confirm_required = view.memory && spec.owner_epoch > 0;
+            view.confirm_required =
+                view.memory && spec.owner_epoch > crate::spec::FIRST_OWNER_EPOCH;
             out.push(view);
         }
         out.sort_by_key(|s| s.created);

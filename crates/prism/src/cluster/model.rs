@@ -13,7 +13,8 @@ pub const TOMBSTONES: &str = "tombstone";
 
 /// Cluster feature level; peers must be within one of each other.
 /// Level 2 adds networks (`PutNetwork`, `DeleteNetwork`, `SetFeatureLevel`).
-pub const FEATURE_LEVEL: u32 = 2;
+/// Level 3 replicates the archive timers (`StampArchiveScrub`, `SetArchiveOffline`).
+pub const FEATURE_LEVEL: u32 = 3;
 
 /// Rolling-upgrade rule: nodes may differ by at most one feature level.
 pub fn levels_compatible(a: u32, b: u32) -> bool {

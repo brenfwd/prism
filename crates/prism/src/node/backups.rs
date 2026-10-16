@@ -346,7 +346,7 @@ impl Node {
                 spec.id = Uuid::new_v4();
                 spec.name.clone_from(&req.name);
                 spec.node = node.id;
-                spec.owner_epoch = 1;
+                spec.owner_epoch = crate::spec::FIRST_OWNER_EPOCH;
                 spec.generation = 1;
                 spec.migrating = None;
                 for nic in &mut spec.nics {

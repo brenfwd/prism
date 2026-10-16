@@ -141,7 +141,10 @@ impl Node {
                         serde_json::Value::Null,
                     );
                 }
-                Command::SetFeatureLevel { .. } | Command::SetMemberFeatureLevel { .. } => {}
+                Command::SetFeatureLevel { .. }
+                | Command::SetMemberFeatureLevel { .. }
+                | Command::StampArchiveScrub { .. }
+                | Command::SetArchiveOffline { .. } => {}
             }
         }
     }

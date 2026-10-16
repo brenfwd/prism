@@ -248,7 +248,7 @@ mod tests {
             egress: None,
             vlan: Some(10),
             trunk: Vec::new(),
-            forwards: vec![forward.clone()],
+            forwards: vec![forward],
         };
         nic.reset_for_copy();
         let NicNetwork::Network {
@@ -262,11 +262,11 @@ mod tests {
             unreachable!()
         };
         assert_eq!((ipv4, ipv6, vlan), (None, None, Some(10)));
-        assert!(forwards.is_empty());
+        assert_eq!(forwards.len(), 0);
         let mut user = NicNetwork::User {
             forwards: vec![forward],
         };
         user.reset_for_copy();
-        assert!(user.forwards().is_empty());
+        assert_eq!(user.forwards().len(), 0);
     }
 }

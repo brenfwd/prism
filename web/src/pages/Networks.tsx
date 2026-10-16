@@ -6,6 +6,7 @@ import { useNetworks, useVms } from "../lib/hooks";
 import { toast } from "../lib/toast";
 import { confirm } from "../components/Confirm";
 import { NetworkModal } from "./networks/NetworkModal";
+import { VlanSubnetList } from "./networks/VlanSubnets";
 import { Badge, Button, Card, EmptyState, IconButton } from "../components/ui";
 
 export function NetworksPage() {
@@ -96,6 +97,7 @@ function NetworkCard({ net, vms, onRename }: { net: NetworkInfo; vms: Vm[]; onRe
           ))}
         </ul>
       )}
+      <VlanSubnetList net={net} />
       <div className="mt-3">
         <Button variant="ghost" loading={dhcp.isPending} onClick={() => dhcp.mutate()}>{net.dhcp ? "Turn DHCP off" : "Turn DHCP on"}</Button>
       </div>

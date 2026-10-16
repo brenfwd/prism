@@ -15,6 +15,7 @@ import {
 import { isOn } from "./VmPage";
 import { Forwards, NicSub } from "./Nics";
 import { VlanEditor } from "./Vlans";
+import { VlanSubnetOffer } from "../networks/VlanSubnets";
 
 /** Applies a device change and explains what happened. */
 async function deviceChange(qc: QueryClient, _vm: Vm, what: string, run: () => Promise<Vm>): Promise<boolean> {
@@ -478,9 +479,12 @@ function AddNic({ vm, onClose }: { vm: Vm; onClose: () => void }) {
           </Field>
         )}
         {type === "network" && nets.length > 0 && (
-          <Field label="VLAN" htmlFor="nic-vlan" hint="Optional (2 to 4094). Puts this adapter on its own segment, without the gateway or DHCP, so give it a static address. Trunks and later changes: use the VLANs button on the adapter." error={vlanOk ? undefined : "Use a number from 2 to 4094."}>
+          <Field label="VLAN" htmlFor="nic-vlan" hint="Optional (2 to 4094). Puts this adapter on its own segment. Trunks and later changes: use the VLANs button on the adapter." error={vlanOk ? undefined : "Use a number from 2 to 4094."}>
             <Input id="nic-vlan" inputMode="numeric" value={vlanText} onChange={(e) => setVlanText(e.target.value.replace(/\D/g, ""))} placeholder="none" className="font-mono" aria-invalid={!vlanOk} />
           </Field>
+        )}
+        {type === "network" && nets.length > 0 && vlan !== undefined && (
+          <VlanSubnetOffer net={nets.find((n) => n.id === chosen)} vlan={vlan} />
         )}
         <Field label="MAC address" htmlFor="nic-mac" hint="Leave empty to pick a random one." error={macOk ? undefined : "Format: 52:54:00:12:34:56"}>
           <Input id="nic-mac" value={mac} onChange={(e) => setMac(e.target.value.trim())} placeholder="random" className="font-mono" aria-invalid={!macOk} />

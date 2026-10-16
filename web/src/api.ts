@@ -104,6 +104,8 @@ export interface NetworkInfo {
   domain: string;
   /** Names of the VMs with a NIC on it. */
   vms: string[];
+  /** VLANs with a subnet of their own, by VLAN id: a gateway, DHCP scope and NAT each. */
+  vlan_subnets?: Record<string, { subnet: string }>;
 }
 
 export interface Disk {
@@ -369,6 +371,9 @@ export const api = {
   checkNetwork: (req: { id?: string; name?: string; subnet?: string }) => request<NetworkCheck>("POST", "/networks/check", req),
   updateNetwork: (id: string, req: { name?: string; dhcp?: boolean; subnet?: string; kind?: "nat" | "isolated"; allow_prefixes?: string[]; ipv6?: boolean; nat66?: boolean }) => request<NetworkInfo>("PATCH", `/networks/${id}`, req),
   deleteNetwork: (id: string) => request<void>("DELETE", `/networks/${id}`),
+  addVlanSubnet: (id: string, req: { vlan: number; subnet?: string }) => request<NetworkInfo>("POST", `/networks/${id}/vlans`, req),
+  removeVlanSubnet: (id: string, vlan: number) => request<NetworkInfo>("DELETE", `/networks/${id}/vlans/${vlan}`),
+  vlanSuggestion: (id: string) => request<{ subnet: string }>("GET", `/networks/${id}/vlan-suggestion`),
 
   addDisk: (id: string, req: { pool: string; volume?: string; size_gib?: number; device: "disk" | "cdrom" }) =>
     request<Vm>("POST", `/vms/${id}/disks`, req),

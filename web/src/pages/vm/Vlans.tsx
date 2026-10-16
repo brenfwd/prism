@@ -3,6 +3,8 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, humanError, type Nic, type Vm } from "../../api";
 import { putVm } from "../../events";
 import { toast } from "../../lib/toast";
+import { useNetworks } from "../../lib/hooks";
+import { VlanSubnetOffer } from "../networks/VlanSubnets";
 import { Button, ErrorText, Field, Input, Modal, Segmented } from "../../components/ui";
 
 /** Parses "10, 20, 30-32" into VLAN ids; null when malformed. */
@@ -23,6 +25,7 @@ export function parseVlans(text: string): number[] | null {
 export function VlanEditor({ vm, nic, onClose }: { vm: Vm; nic: Nic; onClose: () => void }) {
   const qc = useQueryClient();
   const cur = nic.network.type === "network" ? nic.network : undefined;
+  const net = useNetworks().data?.find((n) => n.id === cur?.network);
   const [mode, setMode] = useState<"none" | "access" | "trunk">(cur?.trunk?.length ? "trunk" : cur?.vlan ? "access" : "none");
   const [vlanText, setVlanText] = useState(cur?.vlan ? String(cur.vlan) : "");
   const [trunkText, setTrunkText] = useState((cur?.trunk ?? []).join(", "));
@@ -65,7 +68,7 @@ export function VlanEditor({ vm, nic, onClose }: { vm: Vm; nic: Nic; onClose: ()
         />
         <p className="text-[13px] text-zinc-500">
           {mode === "none" && "On the network's default segment: the gateway, DHCP and DNS just work."}
-          {mode === "access" && "Only sees adapters on the same VLAN. The gateway and DHCP live on the default segment, so give the guest a static address."}
+          {mode === "access" && "Only sees adapters on the same VLAN. With a subnet for the VLAN, the guest gets its address, gateway and DNS by DHCP; without one it needs a static address."}
           {mode === "trunk" && "Receives several VLANs tagged (802.1Q), for a guest that runs its own VLAN interfaces, a router or a hypervisor. Untagged traffic stays on the native VLAN."}
         </p>
         {mode !== "none" && (
@@ -73,6 +76,7 @@ export function VlanEditor({ vm, nic, onClose }: { vm: Vm; nic: Nic; onClose: ()
             <Input id="vlan-id" inputMode="numeric" value={vlanText} onChange={(e) => setVlanText(e.target.value.replace(/\D/g, ""))} placeholder={mode === "trunk" ? "default" : "e.g. 10"} className="font-mono" aria-invalid={!vlanOk} />
           </Field>
         )}
+        {mode !== "none" && <VlanSubnetOffer net={net} vlan={vlan} />}
         {mode === "trunk" && (
           <Field label="Tagged VLANs" htmlFor="vlan-trunk" hint="Comma-separated, ranges allowed: 10, 20, 30-32." error={trunk === null ? "Use numbers 2 to 4094, like 10, 20, 30-32." : undefined}>
             <Input id="vlan-trunk" value={trunkText} onChange={(e) => setTrunkText(e.target.value)} placeholder="10, 20" className="font-mono" aria-invalid={trunk === null} />

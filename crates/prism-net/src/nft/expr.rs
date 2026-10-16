@@ -79,7 +79,7 @@ pub enum CmpOp {
     Gte,
 }
 
-/// Conntrack states for [`Rule::ct_state`]; combine with `|` to match any of them.
+/// Conntrack states for `Rule::ct_state`; combine with `|` to match any of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CtState(u32);
 

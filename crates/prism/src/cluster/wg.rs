@@ -17,7 +17,7 @@ use super::mesh::{INTERFACE, Mesh, MeshPeer, PeerStatus};
 
 const KEEPALIVE: u16 = 25;
 
-/// A [`Mesh`](super::mesh::Mesh) backed by a kernel `WireGuard` interface, configured over netlink.
+/// A [`Mesh`] backed by a kernel `WireGuard` interface, configured over netlink.
 pub struct NetlinkMesh {
     key_path: PathBuf,
     nl: Mutex<Option<Netlink>>,

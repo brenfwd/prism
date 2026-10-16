@@ -321,6 +321,28 @@ format = "qcow2"
 mod tests {
     use super::*;
 
+    /// `contrib/prism.toml.example` with every commented-out setting enabled.
+    #[test]
+    fn example_toml_parses() {
+        let text = include_str!("../../../contrib/prism.toml.example");
+        let enabled: String = text
+            .lines()
+            .map(|l| match l.strip_prefix("# ") {
+                Some(rest) if rest.starts_with('[') || rest.contains(" = ") => rest,
+                _ => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cfg: Config = toml::from_str(&enabled).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(
+            cfg.pools["default"].path,
+            Path::new("/var/lib/prism/pools/default")
+        );
+        assert_eq!(cfg.archive_members["disk1"].reserve, 50 << 30);
+        toml::from_str::<Config>(text).unwrap().validate().unwrap();
+    }
+
     #[test]
     fn default_toml_parses() {
         let cfg: Config =

@@ -1,0 +1,58 @@
+# Every option of prism.toml with its default. Copy this file to
+# /etc/prism/prism.toml (or run `prism init --config /etc/prism`) and
+# uncomment what you want to change. Unknown keys are an error. Sizes accept
+# a byte count or a string such as "50GiB".
+
+[node]
+# Display name of this node. Defaults to the host name.
+# name = "node-a"
+
+[http]
+# Addresses to serve on. The list must not be empty.
+# listen = ["127.0.0.1:8080"]
+# Extra Host header values accepted besides IP literals, "localhost" and the
+# host name. "*" turns the check off.
+# allowed_hosts = []
+# Origin values allowed to make cross-origin writes.
+# allowed_origins = []
+
+[libvirt]
+# Daemon socket path. "auto" tries /run/libvirt/virtqemud-sock, then
+# /run/libvirt/libvirt-sock.
+# socket = "auto"
+# libvirt connection URI.
+# uri = "qemu:///system"
+# "auto" is kvm when /dev/kvm exists and qemu (software emulation) otherwise.
+# Other values: "kvm", "qemu".
+# domain_type = "auto"
+# Path of the <emulator> binary. libvirt picks one when this is unset.
+# emulator = "/usr/bin/qemu-system-x86_64"
+# The qemu-img binary.
+# qemu_img = "qemu-img"
+# UEFI firmware image, loaded as a read-only ROM instead of libvirt's
+# firmware auto-selection.
+# uefi_loader = "/usr/share/OVMF/OVMF_CODE.fd"
+
+[storage]
+# Directories under which the API may create pools.
+# pool_roots = []
+
+# Disk pools fixed by this file. Remove them by editing the file.
+# [pools.default]
+# type = "dir"                              # only "dir" exists
+# path = "/var/lib/prism/pools/default"     # absolute
+# format = "qcow2"                          # or "raw"
+
+[cluster]
+# Underlay IPs or names other members reach this node at, in preference
+# order. Leave empty behind NAT: peers learn the address by roaming.
+# advertise = []
+# UDP port of the wg-prism interface, the only port members need open.
+# wireguard_port = 51820
+
+# Directories on this node that hold archive files.
+# [archive_members.disk1]
+# pool = "archive"              # archive pool, created on first use
+# path = "/srv/prism/archive"   # absolute
+# weight = 1.0                  # relative share of new files
+# reserve = "50GiB"             # free space to keep; no new files below it

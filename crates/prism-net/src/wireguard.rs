@@ -259,7 +259,7 @@ impl Netlink {
         .await?;
         self.set_mtu(name, cfg.mtu).await?;
         self.ensure_address(name, IpNet::V6(cfg.address)).await?;
-        self.set_link_up(name, true).await?;
+        self.set_link_up(name).await?;
         self.link_index(name).await
     }
 

@@ -618,7 +618,7 @@ async fn switch_side(nl: &Netlink, local: Ipv6Addr) {
     .unwrap();
     nl.set_controller("pn1", Some("ps1")).await.unwrap();
     nl.set_mtu("pn1", 1346).await.unwrap();
-    nl.set_link_up("pn1", true).await.unwrap();
+    nl.set_link_up("pn1").await.unwrap();
     nl.set_port_vlans("pn1", &PortVlans::Access(10))
         .await
         .unwrap();
@@ -765,7 +765,7 @@ async fn dhcp_static_leases() {
         ));
         g.exec(&format!("ip link set eth0 address {mac} up"));
         nl.set_controller(&port, Some("ps1")).await.unwrap();
-        nl.set_link_up(&port, true).await.unwrap();
+        nl.set_link_up(&port).await.unwrap();
     }
 
     let lease = |ip: u8| Lease {

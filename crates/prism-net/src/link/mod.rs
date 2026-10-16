@@ -2,14 +2,15 @@
 //!
 //! Every `ensure_*` call is idempotent: it creates what is missing and corrects what drifted.
 
+mod addr;
 mod fdb;
+mod kind;
 mod subif;
 mod vlan;
 
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::Ipv6Addr;
 
 use futures::TryStreamExt;
-use ipnet::IpNet;
 use netlink_packet_route::link::{
     BridgeStpState, InfoData, InfoVxlan, LinkAttribute, LinkFlags, LinkInfo as NlLinkInfo,
     LinkMessage,
@@ -18,6 +19,8 @@ use rtnetlink::{LinkBridge, LinkUnspec, LinkVxlan};
 
 use crate::error::{ENODEV, ENOENT, rtnl_errno};
 use crate::{Error, MacAddr, Netlink, Result};
+
+use kind::{LinkKind, check_ifname};
 
 pub use fdb::{FdbChanges, VxlanFdb};
 pub use vlan::{PortVlan, PortVlans};
@@ -129,21 +132,38 @@ impl Netlink {
             .ok_or_else(|| Error::NoSuchLink(name.to_owned()))
     }
 
-    async fn existing_of_kind(&self, name: &str, kind: &'static str) -> Result<Option<LinkInfo>> {
+    /// The link `name` when it exists and has kind `kind`; `Ok(None)` when it does not
+    /// exist; [`Error::WrongKind`] when another kind owns the name.
+    async fn existing_of_kind(&self, name: &str, kind: LinkKind) -> Result<Option<LinkInfo>> {
         match self.link(name).await? {
-            Some(l) if l.kind.as_deref() == Some(kind) => Ok(Some(l)),
+            Some(l) if l.kind.as_deref() == Some(kind.as_str()) => Ok(Some(l)),
             Some(l) => Err(Error::WrongKind {
                 name: name.to_owned(),
-                expected: kind,
+                expected: kind.as_str(),
                 found: l.kind.unwrap_or_else(|| "none".into()),
             }),
             None => Ok(None),
         }
     }
 
+    /// Sends a link change request and maps a failure to `op`.
+    async fn change_link(&self, op: impl Into<String>, msg: LinkMessage) -> Result<()> {
+        self.route
+            .link()
+            .change(msg)
+            .execute()
+            .await
+            .map_err(|e| Error::rtnl(op, e))
+    }
+
     /// Creates or corrects a switch bridge and brings it up. Returns its index.
+    ///
+    /// # Errors
+    /// [`Error::Invalid`] when `name` is not a valid interface name and
+    /// [`Error::WrongKind`] when `name` is a link of another kind.
     pub async fn ensure_bridge(&self, name: &str, cfg: &BridgeConfig) -> Result<u32> {
-        let existing = self.existing_of_kind(name, "bridge").await?;
+        check_ifname(name)?;
+        let existing = self.existing_of_kind(name, LinkKind::Bridge).await?;
         let mut builder = LinkBridge::new(name)
             .vlan_filtering(true)
             .stp_state(BridgeStpState::Disabled)
@@ -152,12 +172,7 @@ impl Netlink {
         let op = format!("ensure bridge {name}");
         if let Some(l) = existing {
             builder = builder.index(l.index);
-            self.route
-                .link()
-                .change(builder.build())
-                .execute()
-                .await
-                .map_err(|e| Error::rtnl(op, e))?;
+            self.change_link(op, builder.build()).await?;
             Ok(l.index)
         } else {
             self.route
@@ -172,8 +187,14 @@ impl Netlink {
 
     /// Creates a VXLAN device, or recreates it when its VNI, local address, port or learning
     /// setting differ (the kernel cannot change those in place). Then sets MTU, bridge and up.
+    /// Returns the device's index.
+    ///
+    /// # Errors
+    /// [`Error::Invalid`] for a bad interface name, [`Error::WrongKind`] when `name` is
+    /// another kind of link and [`Error::NoSuchLink`] when `cfg.bridge` does not exist.
     pub async fn ensure_vxlan(&self, name: &str, cfg: &VxlanConfig) -> Result<u32> {
-        if let Some(existing) = self.existing_of_kind(name, "vxlan").await?
+        check_ifname(name)?;
+        if let Some(existing) = self.existing_of_kind(name, LinkKind::Vxlan).await?
             && !self.vxlan_matches(existing.index, cfg).await?
         {
             self.delete_link(name).await?;
@@ -198,12 +219,8 @@ impl Netlink {
             Some(br) => builder.controller(self.link_index(br).await?),
             None => builder.nocontroller(),
         };
-        self.route
-            .link()
-            .change(builder.build())
-            .execute()
-            .await
-            .map_err(|e| Error::rtnl(format!("configure vxlan {name}"), e))?;
+        self.change_link(format!("configure vxlan {name}"), builder.build())
+            .await?;
         Ok(index)
     }
 
@@ -250,39 +267,33 @@ impl Netlink {
             Some(br) => builder.controller(self.link_index(br).await?),
             None => builder.nocontroller(),
         };
-        self.route
-            .link()
-            .change(builder.build())
-            .execute()
+        self.change_link(format!("set controller of {port}"), builder.build())
             .await
-            .map_err(|e| Error::rtnl(format!("set controller of {port}"), e))
     }
 
-    /// Sets a link administratively up or down.
-    pub async fn set_link_up(&self, name: &str, up: bool) -> Result<()> {
+    /// Sets a link administratively up.
+    pub async fn set_link_up(&self, name: &str) -> Result<()> {
         let index = self.link_index(name).await?;
-        let builder = LinkUnspec::new_with_index(index);
-        let builder = if up { builder.up() } else { builder.down() };
-        self.route
-            .link()
-            .change(builder.build())
-            .execute()
-            .await
-            .map_err(|e| Error::rtnl(format!("set {name} up={up}"), e))
+        let msg = LinkUnspec::new_with_index(index).up().build();
+        self.change_link(format!("set {name} up"), msg).await
+    }
+
+    /// Sets a link administratively down.
+    pub async fn set_link_down(&self, name: &str) -> Result<()> {
+        let index = self.link_index(name).await?;
+        let msg = LinkUnspec::new_with_index(index).down().build();
+        self.change_link(format!("set {name} down"), msg).await
     }
 
     /// Sets a link's MTU.
     pub async fn set_mtu(&self, name: &str, mtu: u32) -> Result<()> {
         let index = self.link_index(name).await?;
-        self.route
-            .link()
-            .change(LinkUnspec::new_with_index(index).mtu(mtu).build())
-            .execute()
-            .await
-            .map_err(|e| Error::rtnl(format!("set mtu of {name}"), e))
+        let msg = LinkUnspec::new_with_index(index).mtu(mtu).build();
+        self.change_link(format!("set mtu of {name}"), msg).await
     }
 
-    /// Deletes a link. Returns `false` when it did not exist.
+    /// Deletes a link. Returns `true` when the link existed and was deleted, `false` when it
+    /// was already gone.
     pub async fn delete_link(&self, name: &str) -> Result<bool> {
         let Some(link) = self.link(name).await? else {
             return Ok(false);
@@ -292,102 +303,5 @@ impl Netlink {
             Err(e) if matches!(rtnl_errno(&e), Some(ENODEV | ENOENT)) => Ok(false),
             Err(e) => Err(Error::rtnl(format!("delete link {name}"), e)),
         }
-    }
-
-    /// Adds an address to a link unless already present (replacing its flags otherwise).
-    pub async fn ensure_address(&self, name: &str, addr: IpNet) -> Result<()> {
-        let index = self.link_index(name).await?;
-        self.route
-            .address()
-            .add(index, addr.addr(), addr.prefix_len())
-            .replace()
-            .execute()
-            .await
-            .map_err(|e| Error::rtnl(format!("add address {addr} to {name}"), e))
-    }
-
-    /// Routes the host address `addr` (a /128) directly out of `name`, which
-    /// lets the host forward to a guest whose network has no IPv6 prefix.
-    pub async fn ensure_host_route6(&self, name: &str, addr: Ipv6Addr) -> Result<()> {
-        use rtnetlink::RouteMessageBuilder;
-        let index = self.link_index(name).await?;
-        let msg = RouteMessageBuilder::<Ipv6Addr>::new()
-            .destination_prefix(addr, 128)
-            .output_interface(index)
-            .build();
-        self.route
-            .route()
-            .add(msg)
-            .replace()
-            .execute()
-            .await
-            .map_err(|e| Error::rtnl(format!("route {addr} via {name}"), e))
-    }
-
-    /// Removes every IPv4 address on a link except `keep`, so a re-addressed bridge drops its old gateway.
-    pub async fn prune_v4_addresses(&self, name: &str, keep: Option<IpNet>) -> Result<()> {
-        use netlink_packet_route::address::AddressAttribute;
-        let index = self.link_index(name).await?;
-        let msgs: Vec<_> = self
-            .route
-            .address()
-            .get()
-            .set_link_index_filter(index)
-            .execute()
-            .try_collect()
-            .await
-            .map_err(|e| Error::rtnl(format!("list addresses of {name}"), e))?;
-        for msg in msgs {
-            let addr = msg.attributes.iter().find_map(|a| match a {
-                AddressAttribute::Address(ip) if ip.is_ipv4() => Some(*ip),
-                _ => None,
-            });
-            let Some(ip) = addr else { continue };
-            let wanted =
-                keep.is_some_and(|k| k.addr() == ip && k.prefix_len() == msg.header.prefix_len);
-            if wanted {
-                continue;
-            }
-            self.route
-                .address()
-                .del(msg)
-                .execute()
-                .await
-                .map_err(|e| Error::rtnl(format!("delete address {ip} from {name}"), e))?;
-        }
-        Ok(())
-    }
-
-    /// Removes every ULA address (`fc00::/7`) on a link except `keep`, so a bridge whose
-    /// network lost or changed its IPv6 prefix drops the old address.
-    pub async fn prune_ula_addresses(&self, name: &str, keep: Option<Ipv6Addr>) -> Result<()> {
-        use netlink_packet_route::address::AddressAttribute;
-        let index = self.link_index(name).await?;
-        let msgs: Vec<_> = self
-            .route
-            .address()
-            .get()
-            .set_link_index_filter(index)
-            .execute()
-            .try_collect()
-            .await
-            .map_err(|e| Error::rtnl(format!("list addresses of {name}"), e))?;
-        for msg in msgs {
-            let addr = msg.attributes.iter().find_map(|a| match a {
-                AddressAttribute::Address(IpAddr::V6(ip)) => Some(*ip),
-                _ => None,
-            });
-            let Some(ip) = addr.filter(|ip| ip.octets()[0] & 0xfe == 0xfc && Some(*ip) != keep)
-            else {
-                continue;
-            };
-            self.route
-                .address()
-                .del(msg)
-                .execute()
-                .await
-                .map_err(|e| Error::rtnl(format!("delete address {ip} from {name}"), e))?;
-        }
-        Ok(())
     }
 }

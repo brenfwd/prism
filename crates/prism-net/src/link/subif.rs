@@ -2,6 +2,7 @@
 
 use rtnetlink::{LinkUnspec, LinkVlan};
 
+use super::{LinkKind, check_ifname};
 use crate::{Error, Netlink, Result};
 
 impl Netlink {
@@ -16,10 +17,11 @@ impl Netlink {
         vid: u16,
         mtu: u32,
     ) -> Result<u32> {
+        check_ifname(name)?;
         if !(1..=4094).contains(&vid) {
             return Err(Error::Invalid(format!("VLAN id {vid} out of range 1-4094")));
         }
-        if self.existing_of_kind(name, "vlan").await?.is_none() {
+        if self.existing_of_kind(name, LinkKind::Vlan).await?.is_none() {
             let base = self.link_index(parent).await?;
             self.route
                 .link()

@@ -1,4 +1,5 @@
-//! Developer tasks. Run with `cargo xtask <task>`.
+//! Developer tasks, run with `cargo xtask <task>`. The only task is
+//! `testbed`, which manages nested-VM Prism nodes on the local libvirt.
 
 mod cloudinit;
 mod testbed;
@@ -64,6 +65,10 @@ fn main() -> anyhow::Result<()> {
         TestbedCmd::Status => tb.status(),
         TestbedCmd::Ssh { node, cmd } => tb.ssh(node, &cmd),
         TestbedCmd::Deploy { binary } => tb.deploy(&binary),
-        TestbedCmd::Down { all } => tb.down(all),
+        TestbedCmd::Down { all } => tb.down(if all {
+            testbed::Scope::Everything
+        } else {
+            testbed::Scope::Nodes
+        }),
     }
 }

@@ -28,6 +28,8 @@ WantedBy=multi-user.target
 ";
 
 impl Testbed {
+    /// Copies `binary` and a systemd unit to every running node, restarts
+    /// Prism there and waits for its HTTP port to answer.
     pub fn deploy(&self, binary: &Path) -> anyhow::Result<()> {
         let root = self.dir.ancestors().nth(2).expect("target/testbed");
         let binary = if binary.is_absolute() {
@@ -62,6 +64,7 @@ impl Testbed {
     fn deploy_node(&self, spec: &NodeSpec, ip: &str, binary: &Path) -> anyhow::Result<()> {
         let mut scp = Command::new("scp");
         scp.arg("-q")
+            .args(["-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15"])
             .arg("-i")
             .arg(self.key_path())
             .args(SSH_OPTS)

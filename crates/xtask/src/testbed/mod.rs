@@ -2,6 +2,7 @@
 //! as root, with nested KVM, for clustering and networking tests.
 
 mod deploy;
+mod image;
 mod node;
 mod provision;
 mod ssh;
@@ -15,6 +16,7 @@ use crate::virsh::{self, virsh, virsh_ok};
 use node::{NodeSpec, existing_nodes, node_ip};
 use provision::{ensure_nat_network, ensure_pool, net_active, pool_exists};
 
+/// Most nodes `up` accepts, named `prism-tb-1` to `prism-tb-50`.
 pub const MAX_NODES: i64 = 50;
 
 const POOL: &str = "prism-testbed";
@@ -34,6 +36,8 @@ const PRISM_PORT: u16 = 8080;
 const IP_TIMEOUT: Duration = Duration::from_secs(180);
 const SSH_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// The testbed: a working directory plus the libvirt objects named by the
+/// constants above.
 pub struct Testbed {
     /// `target/testbed` in the workspace.
     dir: PathBuf,
@@ -48,6 +52,8 @@ fn info(msg: &str) {
 }
 
 impl Testbed {
+    /// Opens the testbed rooted at `target/testbed` in the workspace,
+    /// creating the directory if needed.
     pub fn new() -> anyhow::Result<Self> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
@@ -62,8 +68,9 @@ impl Testbed {
         self.dir.join("id_ed25519")
     }
 
-    // ---- up ----------------------------------------------------------
-
+    /// Creates or resumes nodes 1 to `nodes` and waits until each has an
+    /// address, answers SSH and has finished cloud-init. Fails when
+    /// `/dev/kvm` is missing or any node does not become ready.
     pub fn up(&self, nodes: u8) -> anyhow::Result<()> {
         if !Path::new("/dev/kvm").exists() {
             bail!("/dev/kvm is missing on this host");
@@ -100,8 +107,8 @@ impl Testbed {
         self.status()
     }
 
-    // ---- status ------------------------------------------------------
-
+    /// Prints a table of every node with its state, addresses, Prism service
+    /// state and cloud-init status.
     pub fn status(&self) -> anyhow::Result<()> {
         let specs = existing_nodes()?;
         if specs.is_empty() {
@@ -139,10 +146,21 @@ impl Testbed {
         );
         Ok(())
     }
+    /// Removes the nodes and their disks and seeds. With [`Scope::Everything`]
+    /// it also removes the base volume, the storage pool, the isolated
+    /// network and the cached image download.
+    pub fn down(&self, scope: Scope) -> anyhow::Result<()> {
+        self.remove_nodes()?;
+        Self::remove_volumes(scope)?;
+        if scope == Scope::Everything {
+            self.remove_pool_and_network()?;
+        }
+        println!("Done.");
+        Ok(())
+    }
 
-    // ---- down --------------------------------------------------------
-
-    pub fn down(&self, all: bool) -> anyhow::Result<()> {
+    /// Stops and undefines every node and deletes its generated files.
+    fn remove_nodes(&self) -> anyhow::Result<()> {
         for spec in existing_nodes()? {
             let name = spec.domain();
             step(&format!("Removing {name}"));
@@ -150,42 +168,82 @@ impl Testbed {
                 virsh(&["destroy", &name])?;
             }
             virsh(&["undefine", &name])?;
-            let _ = std::fs::remove_file(self.dir.join(format!("{name}.xml")));
-            let _ = std::fs::remove_file(self.dir.join(spec.seed_vol()));
+            remove_file_best_effort(&self.dir.join(format!("{name}.xml")));
+            remove_file_best_effort(&self.dir.join(spec.seed_vol()));
         }
-        if pool_exists() {
-            virsh(&["pool-refresh", POOL])?;
-            let vols = virsh::volume_names(&virsh(&["vol-list", POOL])?);
-            for vol in vols {
-                if vol.starts_with(DOMAIN_PREFIX) || (all && vol == BASE_VOL) {
-                    info(&format!("deleting volume {vol}"));
-                    virsh(&["vol-delete", "--pool", POOL, &vol])?;
-                }
-            }
-        }
-        if all {
-            if pool_exists() {
-                step(&format!("Removing pool {POOL}"));
-                let _ = virsh(&["pool-destroy", POOL]);
-                // Removes the (now empty) directory.
-                virsh(&["pool-delete", POOL])?;
-                virsh(&["pool-undefine", POOL])?;
-            }
-            if virsh_ok(&["net-info", NET_LAN]) {
-                step(&format!("Removing network {NET_LAN}"));
-                if net_active(NET_LAN)? {
-                    virsh(&["net-destroy", NET_LAN])?;
-                }
-                virsh(&["net-undefine", NET_LAN])?;
-            }
-            let image = self.dir.join(IMAGE_FILE);
-            if image.exists() {
-                info(&format!("deleting {}", image.display()));
-                std::fs::remove_file(image)?;
-            }
-        }
-        println!("Done.");
         Ok(())
+    }
+
+    /// Deletes node volumes from the pool, and the base volume for
+    /// [`Scope::Everything`].
+    fn remove_volumes(scope: Scope) -> anyhow::Result<()> {
+        if !pool_exists() {
+            return Ok(());
+        }
+        virsh(&["pool-refresh", POOL])?;
+        let vols = virsh::volume_names(&virsh(&["vol-list", POOL])?);
+        for vol in vols {
+            if vol.starts_with(DOMAIN_PREFIX) || (scope == Scope::Everything && vol == BASE_VOL) {
+                info(&format!("deleting volume {vol}"));
+                virsh(&["vol-delete", "--pool", POOL, &vol])?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes the storage pool, the isolated network and the cached image.
+    fn remove_pool_and_network(&self) -> anyhow::Result<()> {
+        if pool_exists() {
+            step(&format!("Removing pool {POOL}"));
+            // The pool may already be stopped; pool-delete reports real failures.
+            best_effort("stop the pool", virsh(&["pool-destroy", POOL]));
+            // Removes the (now empty) directory.
+            virsh(&["pool-delete", POOL])?;
+            virsh(&["pool-undefine", POOL])?;
+        }
+        if virsh_ok(&["net-info", NET_LAN]) {
+            step(&format!("Removing network {NET_LAN}"));
+            if net_active(NET_LAN)? {
+                virsh(&["net-destroy", NET_LAN])?;
+            }
+            virsh(&["net-undefine", NET_LAN])?;
+        }
+        let image = self.dir.join(IMAGE_FILE);
+        if image.exists() {
+            info(&format!("deleting {}", image.display()));
+            std::fs::remove_file(image)?;
+        }
+        Ok(())
+    }
+}
+
+/// How much `down` removes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// The nodes, their disks and their seeds.
+    Nodes,
+    /// Everything `Nodes` removes, plus the base volume, the storage pool,
+    /// the isolated network and the cached image download.
+    Everything,
+}
+
+/// Prints a warning when a cleanup step fails and carries on. Cleanup runs
+/// after another error or on state that may be gone already, so failing again
+/// would hide the first problem.
+fn best_effort<T, E: std::fmt::Display>(what: &str, result: Result<T, E>) {
+    if let Err(e) = result {
+        info(&format!("warning: could not {what}: {e}"));
+    }
+}
+
+/// Deletes a file, ignoring one that is already gone and warning about any
+/// other failure.
+fn remove_file_best_effort(path: &Path) {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            best_effort(&format!("remove {}", path.display()), Err::<(), _>(e));
+        }
+        _ => {}
     }
 }
 

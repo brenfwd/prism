@@ -1,17 +1,18 @@
 //! Creating testbed resources: the SSH key, networks, storage pool, base
-//! image and node domains.
+//! volume and node domains. Downloading the cloud image is in `image`.
 
-use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, bail};
 
 use super::node::{NodeSpec, node_ip};
+use super::ssh::CONNECT_TIMEOUT;
 use super::{
-    BASE_VOL, DISK_SIZE, IMAGE_BASE_URL, IMAGE_FILE, IP_TIMEOUT, MEMORY_MIB, NET_LAN, NET_NAT,
-    POOL, POOL_PATH, SSH_TIMEOUT, Testbed, VCPUS, domstate, info, path_str, step, wait_for,
+    BASE_VOL, DISK_SIZE, IMAGE_FILE, IP_TIMEOUT, MEMORY_MIB, NET_LAN, NET_NAT, POOL, POOL_PATH,
+    SSH_TIMEOUT, Testbed, VCPUS, best_effort, domstate, info, path_str, step, wait_for,
 };
 use crate::cloudinit;
-use crate::virsh::{run, run_visible, virsh, virsh_ok};
+use crate::virsh::{run, virsh, virsh_ok};
 
 impl Testbed {
     pub(super) fn ensure_ssh_key(&self) -> anyhow::Result<String> {
@@ -77,54 +78,15 @@ impl Testbed {
             "raw",
         ])?;
         if let Err(e) = virsh(&["vol-upload", "--pool", POOL, BASE_VOL, path_str(&image)?]) {
-            let _ = virsh(&["vol-delete", "--pool", POOL, BASE_VOL]);
+            best_effort(
+                "delete the half-uploaded base volume",
+                virsh(&["vol-delete", "--pool", POOL, BASE_VOL]),
+            );
             return Err(e);
         }
         // Let libvirt re-probe the file: it is a qcow2 image.
         virsh(&["pool-refresh", POOL])?;
         Ok(())
-    }
-
-    /// Downloads the cloud image into `target/testbed` and verifies it.
-    pub(super) fn ensure_image(&self) -> anyhow::Result<PathBuf> {
-        let image = self.dir.join(IMAGE_FILE);
-        step("Fetching SHA256SUMS");
-        let sums = run("curl", &["-fsSL", &format!("{IMAGE_BASE_URL}/SHA256SUMS")])?;
-        let want = sums
-            .lines()
-            .find_map(|l| {
-                let (hash, name) = l.split_once(' ')?;
-                (name.trim_start_matches([' ', '*']) == IMAGE_FILE).then(|| hash.to_owned())
-            })
-            .with_context(|| format!("{IMAGE_FILE} not listed in SHA256SUMS"))?;
-
-        if image.exists() {
-            if sha256(&image)? == want {
-                info(&format!("cached {} verified", image.display()));
-                return Ok(image);
-            }
-            info("cached image is stale or corrupt; downloading again");
-        }
-        step(&format!("Downloading {IMAGE_FILE}"));
-        let part = image.with_extension("img.part");
-        run_visible(
-            "curl",
-            &[
-                "-fL",
-                "--progress-bar",
-                "-o",
-                path_str(&part)?,
-                &format!("{IMAGE_BASE_URL}/{IMAGE_FILE}"),
-            ],
-        )?;
-        let got = sha256(&part)?;
-        if got != want {
-            let _ = std::fs::remove_file(&part);
-            bail!("checksum mismatch for {IMAGE_FILE}: got {got}, want {want}");
-        }
-        std::fs::rename(&part, &image)?;
-        info("checksum OK");
-        Ok(image)
     }
 
     pub(super) fn ensure_node(&self, spec: &NodeSpec, pubkey: &str) -> anyhow::Result<()> {
@@ -202,7 +164,7 @@ impl Testbed {
         virsh(&["define", path_str(&xml)?])?;
         if let Err(e) = virsh(&["start", &name]) {
             // Leave nothing half-made, so the next `up` starts from scratch.
-            let _ = virsh(&["undefine", &name]);
+            best_effort(&format!("undefine {name}"), virsh(&["undefine", &name]));
             return Err(e);
         }
         info(&format!(
@@ -218,7 +180,7 @@ impl Testbed {
             .with_context(|| format!("{name}: no DHCP lease"))?;
         info(&format!("{name}: lease {ip}, waiting for SSH"));
         wait_for(SSH_TIMEOUT, || {
-            self.ssh_output(&ip, "true", None, Some(5))
+            self.ssh_output(&ip, "true", None, Duration::from_secs(5))
                 .ok()
                 .filter(|o| o.status.success())
         })
@@ -226,7 +188,12 @@ impl Testbed {
         info(&format!(
             "{name}: waiting for cloud-init (package installs take a few minutes)"
         ));
-        let out = self.ssh_output(&ip, "cloud-init status --wait --long", None, None)?;
+        let out = self.ssh_output(
+            &ip,
+            "cloud-init status --wait --long",
+            None,
+            CONNECT_TIMEOUT,
+        )?;
         let text = String::from_utf8_lossy(&out.stdout);
         match out.status.code() {
             Some(0) => Ok(ip),
@@ -244,14 +211,6 @@ impl Testbed {
             ),
         }
     }
-}
-
-pub(super) fn sha256(path: &Path) -> anyhow::Result<String> {
-    let out = run("sha256sum", &[path_str(path)?])?;
-    out.split_whitespace()
-        .next()
-        .map(str::to_owned)
-        .context("sha256sum printed nothing")
 }
 
 pub(super) fn ensure_nat_network() -> anyhow::Result<()> {

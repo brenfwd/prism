@@ -12,16 +12,23 @@ pub const PACKAGES: &[&str] = &[
     "bridge-utils",
 ];
 
+/// The per-node values that go into the seed files.
 pub struct Node<'a> {
+    /// Node number, from 1.
     pub index: u8,
+    /// Hostname inside the guest.
     pub hostname: &'a str,
+    /// OpenSSH public key authorised for the `ubuntu` user.
     pub ssh_pubkey: &'a str,
+    /// MAC of the NIC on the NAT network.
     pub mgmt_mac: &'a str,
+    /// MAC of the NIC on the isolated network.
     pub lan_mac: &'a str,
     /// Static address on the isolated segment, with prefix length.
     pub lan_addr: &'a str,
 }
 
+/// The `user-data` file: user, key-only SSH, packages and libvirt setup.
 pub fn user_data(n: &Node<'_>) -> String {
     let packages: String = PACKAGES.iter().fold(String::new(), |mut s, p| {
         s.push_str("  - ");
@@ -55,6 +62,7 @@ packages:
     )
 }
 
+/// The `meta-data` file: instance ID and hostname.
 pub fn meta_data(n: &Node<'_>) -> String {
     format!(
         "instance-id: prism-tb-{}\nlocal-hostname: {}\n",

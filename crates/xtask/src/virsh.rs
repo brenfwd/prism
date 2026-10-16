@@ -1,14 +1,19 @@
 //! Thin wrappers over `virsh -c qemu:///system` and other subprocesses.
+//!
+//! Subprocesses run to completion with no timeout of their own, so a hung
+//! libvirt call hangs the task. curl gets explicit time limits at its call
+//! sites, and ssh and scp are given connect timeouts.
 
 use std::ffi::OsStr;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, bail};
 
-pub const URI: &str = "qemu:///system";
+/// The libvirt connection URI every `virsh` call uses.
+pub(crate) const URI: &str = "qemu:///system";
 
 /// Runs a program and returns its stdout, failing with its stderr.
-pub fn run<S: AsRef<OsStr>>(prog: &str, args: &[S]) -> anyhow::Result<String> {
+pub(crate) fn run<S: AsRef<OsStr>>(prog: &str, args: &[S]) -> anyhow::Result<String> {
     let out = Command::new(prog)
         .args(args)
         .stdin(Stdio::null())
@@ -27,7 +32,7 @@ pub fn run<S: AsRef<OsStr>>(prog: &str, args: &[S]) -> anyhow::Result<String> {
 }
 
 /// Runs a program with its output passed through to the terminal.
-pub fn run_visible<S: AsRef<OsStr>>(prog: &str, args: &[S]) -> anyhow::Result<()> {
+pub(crate) fn run_visible<S: AsRef<OsStr>>(prog: &str, args: &[S]) -> anyhow::Result<()> {
     let status = Command::new(prog)
         .args(args)
         .stdin(Stdio::null())
@@ -39,19 +44,23 @@ pub fn run_visible<S: AsRef<OsStr>>(prog: &str, args: &[S]) -> anyhow::Result<()
     Ok(())
 }
 
-pub fn virsh<S: AsRef<OsStr>>(args: &[S]) -> anyhow::Result<String> {
+/// Runs `virsh -c qemu:///system` with `args` and returns its stdout, failing
+/// with its stderr.
+pub(crate) fn virsh<S: AsRef<OsStr>>(args: &[S]) -> anyhow::Result<String> {
     let mut all: Vec<&OsStr> = vec![OsStr::new("-c"), OsStr::new(URI)];
     all.extend(args.iter().map(AsRef::as_ref));
     run("virsh", &all)
 }
 
-/// Runs virsh and reports only whether it succeeded.
-pub fn virsh_ok<S: AsRef<OsStr>>(args: &[S]) -> bool {
+/// Runs virsh and reports whether it succeeded. The error is dropped, so a
+/// missing libvirt looks the same as a missing object; use it only for
+/// existence checks.
+pub(crate) fn virsh_ok<S: AsRef<OsStr>>(args: &[S]) -> bool {
     virsh(args).is_ok()
 }
 
 /// Names printed by a `virsh … --name` listing.
-pub fn names(out: &str) -> Vec<String> {
+pub(crate) fn names(out: &str) -> Vec<String> {
     out.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
@@ -60,7 +69,7 @@ pub fn names(out: &str) -> Vec<String> {
 }
 
 /// Volume names from `virsh vol-list` (a two-column table).
-pub fn volume_names(out: &str) -> Vec<String> {
+pub(crate) fn volume_names(out: &str) -> Vec<String> {
     out.lines()
         .skip(2)
         .filter_map(|l| l.split_whitespace().next())
@@ -75,7 +84,7 @@ pub fn volume_names(out: &str) -> Vec<String> {
 /// (client ID `01:<mac>`) takes one, then the real OS (a DUID client ID)
 /// takes another. Only the newest one is live, so pick the lease with the
 /// latest expiry (timestamps sort lexically).
-pub fn lease_ipv4(out: &str, mac: &str) -> Option<String> {
+pub(crate) fn lease_ipv4(out: &str, mac: &str) -> Option<String> {
     out.lines()
         .filter_map(|l| {
             let cols: Vec<_> = l.split_whitespace().collect();

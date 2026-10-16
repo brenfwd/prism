@@ -101,6 +101,25 @@ fn global_v6_by_mac(ifaces: &[GuestNic]) -> Vec<(MacAddr, Vec<Ipv6Addr>)> {
 }
 
 impl Node {
+    /// Puts the addresses learned for the NICs of `spec` into the VM's runtime state, which
+    /// peers receive with their event streams. A VM that is not running publishes none.
+    fn publish_learned(&self, spec: &crate::spec::VmSpec) {
+        let learned = if self.runtime(spec.id).state.is_active() {
+            let known = self.guest_addrs.snapshot(std::time::Instant::now());
+            spec.nics
+                .iter()
+                .filter_map(|n| {
+                    let mac = n.mac.parse::<MacAddr>().ok()?;
+                    let addrs = known.get(&mac)?.clone();
+                    Some((mac.to_string(), addrs))
+                })
+                .collect()
+        } else {
+            Default::default()
+        };
+        self.update_runtime(spec.id, |rt| rt.learned_v6 = learned);
+    }
+
     /// Asks the guest agent of every running local VM for its addresses, so AAAA records and
     /// IPv6 forwards follow the address the guest really uses. A VM that stopped or has no
     /// agent loses what it reported before.
@@ -128,6 +147,7 @@ impl Node {
                         self.guest_addrs.set_agent(mac, addrs);
                     }
                 }
+                self.publish_learned(&spec);
             }
         }
     }

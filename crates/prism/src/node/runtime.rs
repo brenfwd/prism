@@ -68,6 +68,11 @@ impl Node {
                     pending_restart: prev.pending_restart && state.is_active(),
                     agent: prev.agent && state.is_active(),
                     balloon: prev.balloon.filter(|_| state.is_active()),
+                    learned_v6: if state.is_active() {
+                        prev.learned_v6
+                    } else {
+                        Default::default()
+                    },
                 }
             }
             Err(e) if e.remote_code() == Some(error_codes::NO_DOMAIN) => VmRuntime {

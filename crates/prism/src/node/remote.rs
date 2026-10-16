@@ -52,8 +52,12 @@ impl Node {
             .map(|v| v.id)
             .collect();
         let mut rt = lock(&self.remote_runtime);
-        for id in owned {
-            rt.remove(&id);
+        for id in &owned {
+            rt.remove(id);
+            self.guest_addrs.set_peer(*id, HashMap::new());
+        }
+        for (id, vm) in &snap.vms {
+            self.learn_from_peer(*id, vm);
         }
         rt.extend(snap.vms);
         drop(rt);
@@ -71,6 +75,7 @@ impl Node {
         match (ev.ty.as_str(), id) {
             ("vm.state" | "vm.stats", Some(id)) => {
                 if let Ok(rt) = serde_json::from_value::<VmRuntime>(ev.payload.clone()) {
+                    self.learn_from_peer(id, &rt);
                     lock(&self.remote_runtime).insert(id, rt);
                 }
             }
@@ -90,8 +95,23 @@ impl Node {
         }
     }
 
-    /// Marks a peer unreachable in the cache.
+    /// Hands the IPv6 addresses a peer learned for its VM to the network agent.
+    fn learn_from_peer(&self, id: Uuid, rt: &VmRuntime) {
+        let addrs = rt
+            .learned_v6
+            .iter()
+            .filter_map(|(mac, a)| Some((mac.parse::<prism_net::MacAddr>().ok()?, a.clone())))
+            .collect();
+        self.guest_addrs.set_peer(id, addrs);
+    }
+
+    /// Marks a peer unreachable in the cache and forgets the addresses it learned.
     pub fn forget_remote(&self, node: Uuid) {
+        for vm in self.state.vms().unwrap_or_default() {
+            if vm.node == node {
+                self.guest_addrs.set_peer(vm.id, HashMap::new());
+            }
+        }
         if let Some(v) = lock(&self.remote_nodes).get_mut(&node) {
             v.libvirt_connected = false;
             v.reachable = false;

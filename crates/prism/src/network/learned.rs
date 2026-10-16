@@ -18,6 +18,9 @@ pub const RETAIN: Duration = Duration::from_secs(30 * 60);
 /// Most addresses kept per NIC, oldest first. Bounds the firewall rules a guest can cause.
 pub const MAX_PER_NIC: usize = 8;
 
+/// What the node that owns a VM learned for its NICs, by MAC.
+type PeerAddrs = HashMap<MacAddr, Vec<Ipv6Addr>>;
+
 #[derive(Debug, Default)]
 struct Entry {
     /// What the guest agent last reported, in its order.
@@ -31,6 +34,9 @@ struct Entry {
 #[derive(Debug, Default)]
 pub struct GuestAddrs {
     inner: Mutex<HashMap<MacAddr, Entry>>,
+    /// Addresses learned by other nodes for the VMs they own, by VM. They replace nothing
+    /// learned here: a VM lives on one node, and a NIC this node knows stays its own.
+    peers: Mutex<HashMap<uuid::Uuid, PeerAddrs>>,
 }
 
 impl GuestAddrs {
@@ -38,6 +44,19 @@ impl GuestAddrs {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Replaces what the owning node reports for the NICs of VM `vm`; an empty map forgets it.
+    pub fn set_peer(&self, vm: uuid::Uuid, addrs: PeerAddrs) {
+        let mut peers = self
+            .peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if addrs.is_empty() {
+            peers.remove(&vm);
+        } else {
+            peers.insert(vm, addrs);
+        }
     }
 
     /// Replaces what the guest agent reports for `mac`.
@@ -79,7 +98,8 @@ impl GuestAddrs {
             e.seen.retain(|(_, t)| fresh(*t, now));
             !e.agent.is_empty() || !e.seen.is_empty()
         });
-        map.iter()
+        let mut out: HashMap<MacAddr, Vec<Ipv6Addr>> = map
+            .iter()
             .map(|(m, e)| {
                 let mut out: Vec<Ipv6Addr> = Vec::new();
                 for a in e.agent.iter().chain(e.seen.iter().map(|(a, _)| a)) {
@@ -90,7 +110,20 @@ impl GuestAddrs {
                 out.truncate(MAX_PER_NIC);
                 (*m, out)
             })
-            .collect()
+            .collect();
+        drop(map);
+        let peers = self
+            .peers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (mac, addrs) in peers.values().flatten() {
+            out.entry(*mac).or_insert_with(|| {
+                let mut a = addrs.clone();
+                a.truncate(MAX_PER_NIC);
+                a
+            });
+        }
+        out
     }
 }
 
@@ -138,6 +171,24 @@ mod tests {
         g.observe(&[(ip("fd00::2"), mac(1))], t);
         g.observe(&[(ip("fd00::2"), mac(1))], t + RETAIN / 2 * 3);
         assert_eq!(g.snapshot(t + RETAIN * 2)[&mac(1)], vec![ip("fd00::2")]);
+    }
+
+    #[test]
+    fn a_peer_supplies_addresses_for_nics_not_learned_here() {
+        let g = GuestAddrs::default();
+        let t = Instant::now();
+        let vm = uuid::Uuid::from_u128(1);
+        g.set_peer(
+            vm,
+            HashMap::from([(mac(1), vec![ip("fd00::5")]), (mac(2), vec![ip("fd00::6")])]),
+        );
+        g.set_agent(mac(2), vec![ip("fd00::7")]);
+        let got = g.snapshot(t);
+        assert_eq!(got[&mac(1)], vec![ip("fd00::5")]);
+        // what this node learned wins
+        assert_eq!(got[&mac(2)], vec![ip("fd00::7")]);
+        g.set_peer(vm, HashMap::new());
+        assert!(!g.snapshot(t).contains_key(&mac(1)));
     }
 
     #[test]

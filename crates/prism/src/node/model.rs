@@ -79,6 +79,10 @@ pub struct VmRuntime {
     /// The QEMU guest agent is connected.
     pub agent: bool,
     pub balloon: Option<BalloonStatus>,
+    /// The IPv6 addresses the guest was seen using, by NIC MAC. The owning node learns them
+    /// (guest agent, neighbour table); peers read them from here, so DNS and forwards agree.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub learned_v6: BTreeMap<String, Vec<Ipv6Addr>>,
 }
 
 impl Default for VmRuntime {
@@ -93,6 +97,7 @@ impl Default for VmRuntime {
             pending_restart: false,
             agent: false,
             balloon: None,
+            learned_v6: BTreeMap::new(),
         }
     }
 }
@@ -183,5 +188,27 @@ impl std::str::FromStr for Action {
             "resume" => Self::Resume,
             _ => return Err(NodeError::NotFound(format!("action {s}"))),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn learned_addresses_travel_with_the_runtime_and_are_optional() {
+        let mut rt = VmRuntime::default();
+        let plain = serde_json::to_value(&rt).unwrap();
+        assert!(plain.get("learned_v6").is_none());
+        // A peer that predates the field sends none.
+        let back: VmRuntime = serde_json::from_value(plain).unwrap();
+        assert!(back.learned_v6.is_empty());
+
+        rt.learned_v6.insert(
+            "52:54:00:00:00:01".into(),
+            vec!["fd00:1::5".parse().unwrap()],
+        );
+        let back: VmRuntime = serde_json::from_value(serde_json::to_value(&rt).unwrap()).unwrap();
+        assert_eq!(back, rt);
     }
 }

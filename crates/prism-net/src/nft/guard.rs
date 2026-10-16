@@ -23,6 +23,9 @@ const OPT_TARGET_LLADDR: u8 = 2;
 /// The source ports of DHCP servers.
 const DHCP4_SERVER_PORT: u16 = 67;
 const DHCP6_SERVER_PORT: u16 = 547;
+/// Next-header values of the IPv6 extension headers a receiver walks past to reach the
+/// upper-layer header: hop-by-hop, routing, fragment, authentication and destination options.
+const IPV6_EXT_HEADERS: [u8; 5] = [0, 43, 44, 51, 60];
 const ETH_P_8021Q: u16 = 0x8100;
 const ETH_P_8021AD: u16 = 0x88a8;
 
@@ -243,10 +246,45 @@ fn guard_ipv6_tagged(
     );
 }
 
+/// What a trunk tap's tagged IPv6 rules do about extension headers. The tagged checks read
+/// the upper-layer header at a fixed offset, which only holds without extension headers, so
+/// a guest could slip a router advertisement or a `DHCPv6` reply past them behind one. The
+/// kernel walks the headers for untagged frames, but nothing here can for tagged ones, so
+/// tagged packets that start with an extension header are dropped. The exception is an
+/// 8-byte hop-by-hop header in front of an `ICMPv6` message that is not neighbour discovery,
+/// which is how MLD reports look. The exception comes after the source checks, which it
+/// would otherwise skip.
+fn guard_ipv6_tagged_ext_headers(c: &mut Chain, port: &GuestPort) {
+    let f = Family::Bridge;
+    let tap = port.tap.as_str();
+    c.push(
+        Rule::new(f)
+            .iifname(tap)
+            .tagged_ip6_hbh_icmpv6_type_not(&[
+                ICMPV6_ROUTER_ADVERT,
+                ICMPV6_NEIGHBOR_SOLICIT,
+                ICMPV6_NEIGHBOR_ADVERT,
+                ICMPV6_REDIRECT,
+            ])
+            .accept(),
+    );
+    for proto in IPV6_EXT_HEADERS {
+        c.push(
+            Rule::new(f)
+                .iifname(tap)
+                .tagged_ip6_next_header(proto)
+                .drop(),
+        );
+    }
+}
+
 /// The `bridge prism` table: anti-spoofing per guest tap (ether source, IPv4 and ARP source,
 /// `0.0.0.0` allowed for DHCPDISCOVER, `IPv6` source and neighbour messages on networks
 /// with `IPv6`), no rogue DHCP servers (v4 or v6) or router advertisements, no VLAN-tagged
-/// ingress except on trunks, whose tagged frames get the same checks.
+/// ingress except on trunks, whose tagged frames get the same checks. IPv6 extension
+/// headers in front of the checked headers do not get a frame past them: the kernel walks
+/// them for untagged frames, and tagged ones that start with one are dropped, see the
+/// trunk rules in this module.
 pub fn bridge_guard_ruleset(ports: &[GuestPort]) -> Table {
     let f = Family::Bridge;
     let mut t = Table::new(f, BRIDGE_TABLE);
@@ -307,6 +345,12 @@ pub fn bridge_guard_ruleset(ports: &[GuestPort]) -> Table {
             .push(
                 Rule::new(f)
                     .iifname(tap)
+                    .tagged_ip_udp_with_options()
+                    .drop(),
+            )
+            .push(
+                Rule::new(f)
+                    .iifname(tap)
                     .tagged_udp_sport_eq(DHCP4_SERVER_PORT)
                     .drop(),
             )
@@ -330,6 +374,7 @@ pub fn bridge_guard_ruleset(ports: &[GuestPort]) -> Table {
             {
                 guard_ipv6_tagged(c, p, addrs, *prefix, gateways);
             }
+            guard_ipv6_tagged_ext_headers(c, p);
         } else {
             c.push(Rule::new(f).iifname(tap).ether_type(ETH_P_8021Q).drop());
         }
@@ -340,6 +385,7 @@ pub fn bridge_guard_ruleset(ports: &[GuestPort]) -> Table {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::nft::{CmpOp, Expr, PayloadBase, Verdict};
 
     fn port(trunk: bool, ipv6: Ipv6Source) -> GuestPort {
         GuestPort {
@@ -380,9 +426,89 @@ mod tests {
 
     #[test]
     fn trunk_gets_tagged_ipv4_and_ipv6_rules() {
-        // base 7 (no 8021q drop) + ipv4 tagged 5 + ipv6 untagged 13 + ipv6 tagged 11
-        assert_eq!(rules(&port(true, only(&["fd00:1::1"]))), 7 + 5 + 13 + 11);
-        assert_eq!(rules(&port(true, Ipv6Source::Any)), 7 + 5);
+        // base 7 (no 8021q drop) + ipv4 tagged 6 + ipv6 untagged 13 + ipv6 tagged 11
+        // + extension headers 6
+        assert_eq!(
+            rules(&port(true, only(&["fd00:1::1"]))),
+            7 + 6 + 13 + 11 + 6
+        );
+        assert_eq!(rules(&port(true, Ipv6Source::Any)), 7 + 6 + 6);
+    }
+
+    /// The rules of the chain whose first-next-header compare (offset 18 + 6 on the link
+    /// layer) uses one of `values`, as the compared value.
+    fn next_header_drops(p: &GuestPort) -> Vec<u8> {
+        let t = bridge_guard_ruleset(std::slice::from_ref(p));
+        t.chains[0]
+            .rules
+            .iter()
+            .filter(|r| matches!(r.exprs().last(), Some(Expr::Verdict(Verdict::Drop))))
+            .filter_map(|r| {
+                let e = r.exprs();
+                let n = e.len();
+                // ..., payload(link, 24, 1), cmp(eq, [proto]), verdict
+                match (&e[n - 3], &e[n - 2]) {
+                    (
+                        Expr::Payload {
+                            base: PayloadBase::Link,
+                            offset: 24,
+                            len: 1,
+                        },
+                        Expr::Cmp {
+                            op: CmpOp::Eq,
+                            data,
+                        },
+                    ) if data.len() == 1 => Some(data[0]),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn trunk_drops_tagged_ipv6_that_starts_with_an_extension_header() {
+        for ipv6 in [Ipv6Source::Any, only(&["fd00:1::1"])] {
+            let drops = next_header_drops(&port(true, ipv6));
+            for ext in [0, 43, 44, 51, 60] {
+                assert!(drops.contains(&ext), "next header {ext} is not dropped");
+            }
+        }
+        // untagged ports leave extension headers to the kernel, which walks them
+        assert_eq!(
+            next_header_drops(&port(false, only(&["fd00:1::1"]))),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn mld_exception_comes_after_the_source_checks() {
+        let t = bridge_guard_ruleset(&[port(true, only(&["fd00:1::1"]))]);
+        let rules = &t.chains[0].rules;
+        let accept = rules
+            .iter()
+            .rposition(|r| matches!(r.exprs().last(), Some(Expr::Verdict(Verdict::Accept))))
+            .unwrap();
+        // the accept is the rule right before the five extension header drops, and the
+        // tagged source check sits before it
+        assert_eq!(accept, rules.len() - 6);
+        assert!(rules[accept - 1].exprs().len() > 3);
+    }
+
+    #[test]
+    fn trunk_drops_tagged_ipv4_udp_with_options() {
+        let t = bridge_guard_ruleset(&[port(true, Ipv6Source::Any)]);
+        let hit = t.chains[0].rules.iter().any(|r| {
+            r.exprs()
+                .iter()
+                .any(|e| matches!(e, Expr::Bitwise { mask, .. } if mask == &[0x0f]))
+        });
+        assert!(hit);
+        let t = bridge_guard_ruleset(&[port(false, Ipv6Source::Any)]);
+        assert!(!t.chains[0].rules.iter().any(|r| {
+            r.exprs()
+                .iter()
+                .any(|e| matches!(e, Expr::Bitwise { mask, .. } if mask == &[0x0f]))
+        }));
     }
 
     #[test]

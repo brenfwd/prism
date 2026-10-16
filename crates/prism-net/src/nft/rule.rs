@@ -21,6 +21,8 @@ const IPPROTO_ICMP: u8 = 1;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 const IPPROTO_ICMPV6: u8 = 58;
+/// The next-header value of an IPv6 hop-by-hop options header.
+const IPV6_HOP_BY_HOP: u8 = 0;
 const ETH_P_8021Q: u16 = 0x8100;
 const ETH_P_IP: u16 = 0x0800;
 const ETH_P_ARP: u16 = 0x0806;
@@ -196,12 +198,52 @@ impl Rule {
             .cmp(CmpOp::Eq, ETH_P_IPV6.to_be_bytes().to_vec())
     }
 
-    /// An IPv6 packet inside an 802.1Q frame whose next header is `proto` (extension headers
-    /// are not followed).
+    /// An IPv6 packet inside an 802.1Q frame whose next header is `proto`. Extension headers
+    /// are not followed: the matches that read the upper-layer header at a fixed offset see
+    /// only packets without them, and [`Rule::tagged_ip6_next_header`] finds the rest.
     fn tagged_ip6_l4(self, proto: u8) -> Self {
         self.tagged_ipv6()
             .payload(PayloadBase::Link, 18 + 6, 1)
             .cmp(CmpOp::Eq, vec![proto])
+    }
+
+    /// A VLAN-tagged IPv6 packet whose first next-header field is `proto`.
+    pub fn tagged_ip6_next_header(self, proto: u8) -> Self {
+        self.tagged_ip6_l4(proto)
+    }
+
+    /// A VLAN-tagged IPv6 packet with one 8-byte hop-by-hop header in front of an `ICMPv6`
+    /// message whose type is none of `kinds`. This is the shape of MLD reports, which the
+    /// extension-header drop must let through.
+    pub fn tagged_ip6_hbh_icmpv6_type_not(self, kinds: &[u8]) -> Self {
+        let mut r = self
+            .tagged_ip6_l4(IPV6_HOP_BY_HOP)
+            .payload(PayloadBase::Link, 18 + 40, 1)
+            .cmp(CmpOp::Eq, vec![IPPROTO_ICMPV6])
+            .payload(PayloadBase::Link, 18 + 41, 1)
+            .cmp(CmpOp::Eq, vec![0]);
+        for kind in kinds {
+            r = r
+                .payload(PayloadBase::Link, 18 + 48, 1)
+                .cmp(CmpOp::Neq, vec![*kind]);
+        }
+        r
+    }
+
+    /// A VLAN-tagged IPv4 UDP packet with IP options. The tagged DHCP server check reads
+    /// the UDP header at the offset that follows a 20-byte IPv4 header.
+    pub fn tagged_ip_udp_with_options(self) -> Self {
+        self.ether_type(ETH_P_8021Q)
+            .payload(PayloadBase::Link, 16, 2)
+            .cmp(CmpOp::Eq, ETH_P_IP.to_be_bytes().to_vec())
+            .payload(PayloadBase::Link, 18 + 9, 1)
+            .cmp(CmpOp::Eq, vec![IPPROTO_UDP])
+            .payload(PayloadBase::Link, 18, 1)
+            .expr(Expr::Bitwise {
+                mask: vec![0x0f],
+                xor: vec![0],
+            })
+            .cmp(CmpOp::Neq, vec![5])
     }
 
     /// `ip6 saddr != <addr>` for a VLAN-tagged frame.

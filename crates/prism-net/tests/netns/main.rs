@@ -7,11 +7,12 @@
 //! sudo ./netns-<hash> --ignored --test-threads=1
 //! ```
 //!
-//! Needs `ip`, `nft`, `wg`, `ping`, `nc`, `setpriv`, `busybox udhcpc` and `dig`.
+//! Needs `ip`, `nft`, `wg`, `ping`, `nc`, `setpriv`, `busybox udhcpc`, `dig` and `python3`.
 
 mod common;
 mod dhcp;
 mod dns;
+mod guard;
 mod mesh;
 mod nft;
 mod vlan;

@@ -1,8 +1,7 @@
 /target
-/web/node_modules
-/web/dist
-/web/*.tsbuildinfo
-/dev-config
+node_modules/
+dist/
 *.tsbuildinfo
-scratch/
+/dev-config/
+/scratch/
 /.claude/worktrees

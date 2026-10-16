@@ -6,6 +6,10 @@
 //! certificate store, so a fresh host behaves the same as the dev machine.
 //! A full HTTP stack (hyper, reqwest) would be far more than a single
 //! streaming GET needs.
+//!
+//! Connecting and each read have their own timeouts. A download has no total
+//! deadline: a server that keeps sending slowly runs until the task's
+//! cancellation token fires.
 
 mod body;
 mod url;
@@ -62,6 +66,8 @@ pub fn parse_sha256(s: &str) -> Option<String> {
     (s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())).then_some(s)
 }
 
+/// The shared client TLS configuration, built on first use. The `expect`
+/// cannot fail: `ring` supports the default protocol versions.
 fn tls_config() -> Arc<rustls::ClientConfig> {
     static CFG: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     CFG.get_or_init(|| {
@@ -96,7 +102,9 @@ async fn connect(
     .await
     .map_err(|_| FetchError::Failed(format!("connecting to {}: timed out", u.host)))?
     .map_err(|e| FetchError::Failed(format!("connecting to {}: {e}", u.host)))?;
-    let _ = tcp.set_nodelay(true);
+    if let Err(e) = tcp.set_nodelay(true) {
+        tracing::debug!(host = %u.host, "could not set TCP_NODELAY: {e}");
+    }
     if !u.tls {
         let (r, w) = tcp.into_split();
         return Ok((Box::new(r), Box::new(w)));
@@ -245,11 +253,8 @@ async fn stream_to_file(
     let actual = hasher
         .finalize()
         .iter()
-        .fold(String::with_capacity(64), |mut acc, b| {
-            use std::fmt::Write;
-            let _ = write!(acc, "{b:02x}");
-            acc
-        });
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     if let Some(expected) = want
         && expected != actual
     {

@@ -10,7 +10,8 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use super::Node;
-use super::migrate::{PrepareReq, PrepareResp, splice_loop, to_params};
+use super::migrate::{PrepareReq, PrepareResp, to_params};
+use super::migrate_splice::splice_loop;
 use crate::cluster::dataplane::migration_dir;
 use crate::cluster::model::MemberDoc;
 

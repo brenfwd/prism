@@ -8,9 +8,8 @@ use prism_libvirt::TypedParam;
 use prism_libvirt::migrate::params as mp;
 use uuid::Uuid;
 
-use super::migrate::{
-    FinishReq, FinishResp, PrepareReq, PrepareResp, remove_migration_dir, to_params,
-};
+use super::migrate::{FinishReq, FinishResp, PrepareReq, PrepareResp, to_params};
+use super::migrate_splice::remove_migration_dir;
 use super::{Node, Result};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;

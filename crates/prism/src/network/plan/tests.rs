@@ -1,3 +1,5 @@
+//! Tests for building the network plan from VM specs and cluster state.
+
 use super::*;
 use crate::cluster::model::MemberState;
 use crate::network::VlanSubnet;

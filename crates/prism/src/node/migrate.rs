@@ -17,11 +17,10 @@ use base64::engine::general_purpose::STANDARD as B64;
 use prism_libvirt::migrate::{flags as mf, params as mp};
 use prism_libvirt::{Params, TypedParam};
 use serde::{Deserialize, Serialize};
-use tokio::net::UnixListener;
 use uuid::Uuid;
 
+use super::migrate_splice::remove_migration_dir;
 use super::{Node, NodeError, Result, VmState, domain_ref};
-use crate::cluster::dataplane::{Purpose, migration_dir};
 use crate::cluster::model::{MemberDoc, MemberState};
 use crate::spec::{DiskDevice, Migration, VmSpec};
 use crate::tasks::Task;
@@ -158,7 +157,7 @@ impl Node {
         Ok(self
             .tasks
             .spawn("vm.migrate", resource, move |ctx| async move {
-                let migration = ctx_id(&ctx);
+                let migration = ctx.task_id();
                 let detached = std::sync::Mutex::new(None);
                 let res = node
                     .run_migration(&cluster, &spec, &dst, &req, &ctx, &detached)
@@ -200,7 +199,7 @@ impl Node {
         ctx: &crate::tasks::TaskCtx,
         detached: &std::sync::Mutex<Option<Vec<String>>>,
     ) -> anyhow::Result<serde_json::Value> {
-        let migration = ctx_id(ctx);
+        let migration = ctx.task_id();
         let c = self.client()?;
         let dom = domain_ref(spec);
         let (snapshot_xml, memory) = self.export_snapshots(spec).await?;
@@ -528,54 +527,4 @@ struct Transfer {
     finish_cookie: Vec<u8>,
     /// Why the transfer failed or was cancelled, if it did.
     error: Option<String>,
-}
-
-/// Removes the socket directory of a migration. A directory that is
-/// already gone is not an error.
-pub(super) fn remove_migration_dir(migration: Uuid) {
-    if let Err(e) = std::fs::remove_dir_all(migration_dir(migration))
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        tracing::warn!(%migration, "could not remove the migration socket directory: {e}");
-    }
-}
-
-/// A per-task migration ID (the task's own ID).
-fn ctx_id(ctx: &crate::tasks::TaskCtx) -> Uuid {
-    ctx.task_id()
-}
-
-/// Accepts QEMU's connections on a source socket and splices each one to
-/// the destination over a data-plane session.
-pub(super) async fn splice_loop(
-    listener: UnixListener,
-    channels: prism_cluster::Channels,
-    dst: MemberDoc,
-    migration: Uuid,
-    which: &'static str,
-) {
-    while let Ok((mut unix, _)) = listener.accept().await {
-        let (channels, dst) = (channels.clone(), dst.clone());
-        tokio::spawn(async move {
-            let res: anyhow::Result<()> = async {
-                let ch = channels.get(&crate::cluster::peers::grpc_addr(&dst))?;
-                let purpose = serde_json::to_vec(&Purpose::MigrationSocket {
-                    migration,
-                    which: which.into(),
-                })?;
-                let reply = prism_proto::v1::data_plane_client::DataPlaneClient::new(ch)
-                    .open(prism_proto::v1::OpenSession { purpose })
-                    .await?
-                    .into_inner();
-                let mut tcp =
-                    crate::cluster::dataplane::connect(dst.mesh_addr, &reply.session_id).await?;
-                tokio::io::copy_bidirectional(&mut unix, &mut tcp).await?;
-                Ok(())
-            }
-            .await;
-            if let Err(e) = res {
-                tracing::warn!("migration {which} splice: {e:#}");
-            }
-        });
-    }
 }

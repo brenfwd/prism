@@ -18,6 +18,7 @@ mod libvirt;
 mod migrate;
 mod migrate_dest;
 mod migrate_setup;
+mod migrate_splice;
 mod model;
 mod moves;
 mod networks;

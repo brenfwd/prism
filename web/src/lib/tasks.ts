@@ -1,5 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query";
-import { uploadVolume, humanError, type Task, type Vm, type Volume } from "../api";
+import { ApiError, uploadVolume, humanError, type Task, type Vm, type Volume } from "../api";
 import { createStore } from "./store";
 import { toast } from "./toast";
 
@@ -109,7 +109,7 @@ export function startUpload(qc: QueryClient, pool: string, file: File, name = fi
     },
     (e) => {
       const msg = humanError(e);
-      const aborted = (e as { code?: string }).code === "aborted";
+      const aborted = e instanceof ApiError && e.code === "aborted";
       uploads.set((all) => (aborted ? all.filter((x) => x.id !== id) : all.map((x) => (x.id === id ? { ...x, state: "failed", error: msg } : x))));
       if (!aborted) toast({ tone: "error", title: `Upload of ${name} failed`, body: msg });
       else toast({ tone: "info", title: `Upload of ${name} cancelled` });

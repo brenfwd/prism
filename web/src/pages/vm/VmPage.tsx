@@ -36,7 +36,7 @@ export function VmPage({ id, tab, take }: { id: string; tab: VmTab; take: boolea
         title="This machine doesn't exist"
         actions={<Link to="/vms"><Button>Back to machines</Button></Link>}
       >
-        It may have been deleted. {String((q.error as Error).message)}
+        It may have been deleted. {humanError(q.error)}
       </EmptyState>
     );
   }

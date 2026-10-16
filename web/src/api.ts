@@ -103,6 +103,7 @@ export interface NetworkInfo {
   bridge: string;
   domain: string;
   /** Names of the VMs with a NIC on it. */
+  /** Every VM on this node. */
   vms: string[];
   /** VLANs with a subnet of their own, by VLAN id: a gateway, DHCP scope and NAT each. */
   vlan_subnets?: Record<string, { subnet: string }>;
@@ -262,12 +263,14 @@ export interface Task {
 
 export type VmAction = "start" | "shutdown" | "stop" | "reboot" | "reset" | "pause" | "resume";
 
+/** A failed request: HTTP `status` (0 when the node was unreachable), a machine-readable `code` and a readable message. */
 export class ApiError extends Error {
   constructor(public status: number, public code: string, message: string) {
     super(message);
   }
 }
 
+/** Sends a JSON request under `/api/v1` and parses the JSON answer; empty bodies give `undefined`. */
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   let res: Response;
   try {
@@ -325,83 +328,142 @@ export interface ArchivePool { name: string; replicas: number; members: ArchiveM
 
 const enc = encodeURIComponent;
 
+/** One method per endpoint. Each rejects with an [`ApiError`] on a non-2xx answer or when the node cannot be reached. */
 export const api = {
+  /** Cluster state, members and this node's role. A standalone node answers with `clustered: false`. */
   cluster: () => request<ClusterStatus>("GET", "/cluster"),
+  /** Turns this standalone node into the first member of a new cluster. */
   createCluster: (name: string, mode: "hub_spoke" | "consensus") => request<ClusterStatus>("POST", "/cluster", { name, mode }),
+  /** Join invites that are pending or used. */
   invites: () => request<InviteDoc[]>("GET", "/cluster/invites"),
+  /** Makes a single-use join invite; `name` is a hint for the joining node. */
   createInvite: (name?: string) => request<InviteView>("POST", "/cluster/invites", { name: name || undefined }),
+  /** Revokes an unused invite. */
   revokeInvite: (id: string) => request<void>("DELETE", `/cluster/invites/${id}`),
+  /** Starts joining from an invite blob and returns the reply to paste into the sponsor's accept step. */
   joinCluster: (invite: string) => request<JoinReply>("POST", "/cluster/join", { invite }),
+  /** Previews a joiner's reply (`confirm: false`) or admits the node (`confirm: true`) on the sponsor. */
   acceptReply: (reply: string, confirm: boolean) => request<AcceptPreview>("POST", "/cluster/accept", { reply, confirm }),
+  /** Removes a member from the cluster by node id. */
   removeMember: (id: string) => request<void>("DELETE", `/cluster/members/${id}`),
+  /** Removals still waiting for every member to apply them. */
   removals: () => request<RemovalStatus[]>("GET", "/cluster/removed"),
+  /** Hands the hub role to another node in a hub-and-spoke cluster. */
   transferHub: (node: string) => request<void>("POST", "/cluster/hub", { node }),
+  /** Leaves the cluster; the node restarts as standalone. */
   leaveCluster: () => request<void>("POST", "/cluster/leave"),
+  /** Makes a member a voting or non-voting member of a consensus cluster. */
   setVoter: (id: string, voter: boolean) => request<void>("POST", `/cluster/members/${id}/voter`, { voter }),
+  /** WireGuard peers with endpoint, last handshake age and traffic counters. */
   mesh: () => request<MeshPeer[]>("GET", "/cluster/mesh"),
+  /** Archive pools with their members and usage. */
   archivePools: () => request<ArchivePool[]>("GET", "/archive/pools"),
+  /** Creates an archive pool that keeps `replicas` copies of each file. */
   createArchivePool: (name: string, replicas: number) => request<void>("POST", "/archive/pools", { name, replicas }),
+  /** Changes how many copies of each file an archive pool keeps. */
   setArchiveReplicas: (pool: string, replicas: number) => request<void>("PUT", `/archive/pools/${enc(pool)}`, { replicas }),
+  /** Starts a repair, scrub or rebalance on an archive pool and returns its task. */
   archiveAction: (pool: string, a: "repair" | "scrub" | "rebalance") => request<Task>("POST", `/archive/pools/${enc(pool)}/${a}`),
+  /** Sets an archive member to active, draining or disabled. */
   setArchiveMember: (node: string, name: string, state: ArchiveMemberState) =>
     request<void>("PUT", `/archive/members/${node}/${enc(name)}`, { state }),
+  /** Moves a member's files to other members and returns the task. */
   drainArchiveMember: (node: string, name: string) => request<Task>("POST", `/archive/members/${node}/${enc(name)}/drain`),
+  /** The nodes Prism knows about, with host and memory-pressure data. */
   nodes: () => request<NodeView[]>("GET", "/nodes"),
   vms: () => request<Vm[]>("GET", "/vms"),
+  /** One VM by id; rejects with code `not_found` for an unknown id. */
   vm: (id: string) => request<Vm>("GET", `/vms/${id}`),
+  /** Creates a VM, copying `image` into its disk when one is given. */
   createVm: (req: CreateVm) => request<Vm>("POST", "/vms", req),
+  /** Changes a VM's settings, boot order or description. */
   updateVm: (id: string, req: UpdateVm) => request<Vm>("PATCH", `/vms/${id}`, req),
+  /** Deletes a VM and, with `deleteDisks`, its disk volumes. */
   deleteVm: (id: string, deleteDisks: boolean) =>
     request<void>("DELETE", `/vms/${id}?delete_disks=${deleteDisks}`),
+  /** Lists what deleting the VM would remove, without deleting anything. */
   deletePlan: (id: string) => request<DeletePlan>("GET", `/vms/${id}/delete-plan`),
+  /** Runs a power action and returns the updated VM. */
   action: (id: string, action: VmAction) => request<Vm>("POST", `/vms/${id}/actions/${action}`),
 
+  /** Starts a clone of a VM under a new name and returns its task. */
   cloneVm: (id: string, name: string) => request<Task>("POST", `/vms/${id}/clone`, { name }),
+  /** Addresses the guest agent reports. */
   guestNetwork: (id: string) => request<GuestNetwork>("GET", `/vms/${id}/guest/network`),
+  /** Replaces the port forwards on one adapter. */
   setForwards: (id: string, nic: string, forwards: PortForward[]) =>
     request<Vm>("PUT", `/vms/${id}/nics/${nic}/forwards`, forwards),
+  /** Linux bridges on the host, for bridged adapters. */
   bridges: () => request<HostBridge[]>("GET", "/nodes/local/bridges"),
+  /** Host requirements and whether each is met. */
   prereqs: () => request<Prereq[]>("GET", "/nodes/local/prereqs"),
+  /** Downloads a URL into a pool as a volume, checking `sha256` when given. Returns the task. */
   downloadVolume: (pool: string, url: string, name?: string, sha256?: string) =>
     request<Task>("POST", `/nodes/local/pools/${enc(pool)}/downloads`, { url, name: name || undefined, sha256: sha256 || undefined }),
 
+  /** Prism networks. */
   networks: () => request<NetworkInfo[]>("GET", "/networks"),
+  /** Creates a Prism network. Omitted fields take the server's defaults. */
   createNetwork: (req: { name?: string; kind?: "nat" | "isolated"; subnet?: string; dhcp?: boolean; allow_prefixes?: string[]; ipv6?: boolean; nat66?: boolean } = {}) =>
     request<NetworkInfo>("POST", "/networks", req),
+  /** Checks a name and subnet against other networks and the host's routes without saving anything. */
   checkNetwork: (req: { id?: string; name?: string; subnet?: string }) => request<NetworkCheck>("POST", "/networks/check", req),
+  /** Changes a network. A new subnet moves every address in it. */
   updateNetwork: (id: string, req: { name?: string; dhcp?: boolean; subnet?: string; kind?: "nat" | "isolated"; allow_prefixes?: string[]; ipv6?: boolean; nat66?: boolean }) => request<NetworkInfo>("PATCH", `/networks/${id}`, req),
+  /** Deletes a network. */
   deleteNetwork: (id: string) => request<void>("DELETE", `/networks/${id}`),
+  /** Gives a VLAN on a network its own subnet; one is chosen when `subnet` is omitted. */
   addVlanSubnet: (id: string, req: { vlan: number; subnet?: string }) => request<NetworkInfo>("POST", `/networks/${id}/vlans`, req),
+  /** Removes a VLAN's subnet from a network. */
   removeVlanSubnet: (id: string, vlan: number) => request<NetworkInfo>("DELETE", `/networks/${id}/vlans/${vlan}`),
+  /** A free subnet for a new VLAN on the network. */
   vlanSuggestion: (id: string) => request<{ subnet: string }>("GET", `/networks/${id}/vlan-suggestion`),
 
+  /** Adds a disk or CD-ROM drive: a new empty disk (`size_gib`) or an existing `volume`. Hot-plugs into a running VM. */
   addDisk: (id: string, req: { pool: string; volume?: string; size_gib?: number; device: "disk" | "cdrom" }) =>
     request<Vm>("POST", `/vms/${id}/disks`, req),
+  /** Inserts or ejects media (`media`) or grows a disk (`size_gib`). */
   updateDisk: (id: string, disk: string, req: { media?: string | null; size_gib?: number }) =>
     request<Vm>("PATCH", `/vms/${id}/disks/${disk}`, req),
+  /** Detaches a disk and, with `deleteVolume`, deletes its volume. */
   removeDisk: (id: string, disk: string, deleteVolume: boolean) =>
     request<Vm>("DELETE", `/vms/${id}/disks/${disk}?delete_volume=${deleteVolume}`),
+  /** Sets an adapter's access VLAN and trunk list. */
   setVlans: (id: string, nic: string, req: { vlan?: number | null; trunk: number[] }) =>
     request<Vm>("PUT", `/vms/${id}/nics/${nic}/vlans`, req),
+  /** Adds a network adapter; the MAC is random when omitted. */
   addNic: (id: string, req: { network: NicNetwork; mac?: string }) => request<Vm>("POST", `/vms/${id}/nics`, req),
+  /** Removes a network adapter. */
   removeNic: (id: string, nic: string) => request<Vm>("DELETE", `/vms/${id}/nics/${nic}`),
 
+  /** A VM's snapshots. */
   snapshots: (id: string) => request<Snapshot[]>("GET", `/vms/${id}/snapshots`),
+  /** Takes a snapshot, optionally with memory, and returns its task. */
   createSnapshot: (id: string, req: { name?: string; description: string; memory: boolean }) =>
     request<Task>("POST", `/vms/${id}/snapshots`, req),
+  /** Deletes a snapshot and returns its task. */
   deleteSnapshot: (id: string, name: string) => request<Task>("DELETE", `/vms/${id}/snapshots/${enc(name)}`),
+  /** Reverts to a snapshot. Pass `confirmMemory` to accept restoring a memory snapshot. */
   revertSnapshot: (id: string, name: string, confirmMemory = false) =>
     request<Task>("POST", `/vms/${id}/snapshots/${enc(name)}/revert${confirmMemory ? "?confirm_memory=true" : ""}`),
 
+  /** The 100 most recent tasks. */
   tasks: () => request<Task[]>("GET", "/tasks?limit=100"),
+  /** Asks a running task to stop. */
   cancelTask: (id: string) => request<void>("POST", `/tasks/${id}/cancel`),
 
+  /** Storage pools on this node. */
   pools: () => request<Pool[]>("GET", "/nodes/local/pools"),
+  /** Creates a storage pool with the given volume format. */
   createPool: (name: string, format: string) => request<Pool>("POST", "/nodes/local/pools", { name, format }),
+  /** Deletes a storage pool. */
   deletePool: (name: string) => request<void>("DELETE", `/nodes/local/pools/${enc(name)}`),
+  /** Volumes in a pool. */
   volumes: (pool: string) => request<Volume[]>("GET", `/nodes/local/pools/${enc(pool)}/volumes`),
+  /** Creates an empty volume of `size_gib` in the given format. */
   createVolume: (pool: string, name: string, size_gib: number, format: string) =>
     request<Volume>("POST", `/nodes/local/pools/${enc(pool)}/volumes`, { name, size_gib, format }),
+  /** Deletes a volume from a pool. */
   deleteVolume: (pool: string, name: string) =>
     request<void>("DELETE", `/nodes/local/pools/${enc(pool)}/volumes/${enc(name)}`),
 };
@@ -440,6 +502,7 @@ export function uploadVolume(
   return { promise, abort: () => xhr.abort() };
 }
 
+/** The WebSocket URL for an API path, `ws:` or `wss:` to match the page. */
 export function wsUrl(path: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${location.host}/api/v1${path}`;

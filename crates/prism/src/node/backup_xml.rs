@@ -1,9 +1,12 @@
 //! The `<domainbackup>` and `<domaincheckpoint>` documents for a push-mode
 //! backup of a running VM.
 
+use std::fmt::Write;
 use std::path::Path;
 
 use quick_xml::escape::escape;
+
+const INFALLIBLE: &str = "writing to a String cannot fail";
 
 /// One disk of the VM. `staging` is the qcow2 file libvirt writes the
 /// backup to, or `None` for a disk the backup leaves out.
@@ -17,21 +20,20 @@ pub(super) struct BackupDisk<'a> {
 pub(super) fn backup_xml(parent_checkpoint: Option<&str>, disks: &[BackupDisk<'_>]) -> String {
     let mut xml = String::from("<domainbackup mode='push'>\n");
     if let Some(cp) = parent_checkpoint {
-        xml.push_str(&format!("  <incremental>{}</incremental>\n", escape(cp)));
+        writeln!(xml, "  <incremental>{}</incremental>", escape(cp)).expect(INFALLIBLE);
     }
     xml.push_str("  <disks>\n");
     for d in disks {
         match d.staging {
-            Some(file) => xml.push_str(&format!(
-                "    <disk name='{}' backup='yes' type='file'>\n      <driver type='qcow2'/>\n      <target file='{}'/>\n    </disk>\n",
+            Some(file) => writeln!(
+                xml,
+                "    <disk name='{}' backup='yes' type='file'>\n      <driver type='qcow2'/>\n      <target file='{}'/>\n    </disk>",
                 escape(d.target),
                 escape(file.to_string_lossy().as_ref())
-            )),
-            None => xml.push_str(&format!(
-                "    <disk name='{}' backup='no'/>\n",
-                escape(d.target)
-            )),
+            ),
+            None => writeln!(xml, "    <disk name='{}' backup='no'/>", escape(d.target)),
         }
+        .expect(INFALLIBLE);
     }
     xml.push_str("  </disks>\n</domainbackup>\n");
     xml
@@ -46,10 +48,12 @@ pub(super) fn checkpoint_xml(name: &str, disks: &[BackupDisk<'_>]) -> String {
     );
     for d in disks {
         let mode = if d.staging.is_some() { "bitmap" } else { "no" };
-        xml.push_str(&format!(
-            "    <disk name='{}' checkpoint='{mode}'/>\n",
+        writeln!(
+            xml,
+            "    <disk name='{}' checkpoint='{mode}'/>",
             escape(d.target)
-        ));
+        )
+        .expect(INFALLIBLE);
     }
     xml.push_str("  </disks>\n</domaincheckpoint>\n");
     xml

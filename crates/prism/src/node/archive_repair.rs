@@ -485,10 +485,10 @@ impl Node {
             }
             report.repaired += 1;
         }
-        if report.repaired > 0 {
-            if let Err(e) = self.archive_repair_pool(pool).await {
-                tracing::warn!("re-replicating {pool} after scrub: {e:#}");
-            }
+        if report.repaired > 0
+            && let Err(e) = self.archive_repair_pool(pool).await
+        {
+            tracing::warn!("re-replicating {pool} after scrub: {e:#}");
         }
         Ok(report)
     }

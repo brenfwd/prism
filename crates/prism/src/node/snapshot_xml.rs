@@ -28,25 +28,25 @@ pub(super) fn snapshot_xml(
         escape(description)
     );
     match memory_file {
-        Some(file) => write!(
+        Some(file) => writeln!(
             xml,
-            "  <memory snapshot='external' file='{}'/>\n",
+            "  <memory snapshot='external' file='{}'/>",
             escape(file.to_string_lossy().as_ref())
         ),
-        None => write!(xml, "  <memory snapshot='no'/>\n"),
+        None => writeln!(xml, "  <memory snapshot='no'/>"),
     }
     .expect("writing to a String cannot fail");
     xml.push_str("  <disks>\n");
     for disk in disks {
         match disk {
-            SnapshotDisk::Overlay { target, overlay } => write!(
+            SnapshotDisk::Overlay { target, overlay } => writeln!(
                 xml,
-                "    <disk name='{}' snapshot='external' type='file'>\n      <driver type='qcow2'/>\n      <source file='{}'/>\n    </disk>\n",
+                "    <disk name='{}' snapshot='external' type='file'>\n      <driver type='qcow2'/>\n      <source file='{}'/>\n    </disk>",
                 escape(*target),
                 escape(overlay.to_string_lossy().as_ref())
             ),
             SnapshotDisk::Skip { target } => {
-                write!(xml, "    <disk name='{}' snapshot='no'/>\n", escape(*target))
+                writeln!(xml, "    <disk name='{}' snapshot='no'/>", escape(*target))
             }
         }
         .expect("writing to a String cannot fail");

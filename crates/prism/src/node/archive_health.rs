@@ -306,10 +306,8 @@ impl Node {
                 {
                     tracing::warn!("replicating archive scrub time: {e:#}");
                 }
-            } else {
-                if let Err(e) = self.state.db().set_meta(SCRUB_META, &now.to_string()) {
-                    tracing::warn!("recording archive scrub time: {e:#}");
-                }
+            } else if let Err(e) = self.state.db().set_meta(SCRUB_META, &now.to_string()) {
+                tracing::warn!("recording archive scrub time: {e:#}");
             }
         }
         due

@@ -174,7 +174,7 @@ mod tests {
     #[test]
     fn rewrites_both_quote_styles() {
         let xml = "<source file='/srv/a/x.qcow2'/><source file=\"/srv/a/y.qcow2\"/>";
-        let pools = vec!["/srv/a".to_string()];
+        let pools = ["/srv/a".to_string()];
         let out = rewrite_pool_paths(xml, pools.iter(), Path::new("/data/b"));
         assert_eq!(
             out,

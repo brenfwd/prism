@@ -383,7 +383,11 @@ impl Node {
         {
             return Err(NodeError::Invalid("invalid bridge name".into()));
         }
-        super::forwards::check_nic_forwards(&req.network, &self.state.networks()?)?;
+        super::forwards::check_nic_forwards(
+            &req.network,
+            &self.state.networks()?,
+            &self.reserved_forward_ports(),
+        )?;
         let mac = match req.mac {
             Some(m) if valid_mac(&m) => m.to_ascii_lowercase(),
             Some(_) => return Err(NodeError::Invalid("invalid unicast MAC address".into())),

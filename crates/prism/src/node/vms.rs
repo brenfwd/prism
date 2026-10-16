@@ -79,7 +79,11 @@ impl Node {
             ));
         }
         if let Some(n) = &req.network {
-            super::forwards::check_nic_forwards(n, &self.state.networks()?)?;
+            super::forwards::check_nic_forwards(
+                n,
+                &self.state.networks()?,
+                &self.reserved_forward_ports(),
+            )?;
         }
         let mut spec = VmSpec {
             id: Uuid::new_v4(),

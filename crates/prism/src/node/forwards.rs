@@ -17,12 +17,36 @@ fn overlaps(a: &PortForward, b: &PortForward) -> bool {
         }
 }
 
+impl Node {
+    /// Host ports that port forwards may not claim: the API listeners and the
+    /// cluster ports. A forward on one of them would capture that traffic.
+    pub(super) fn reserved_forward_ports(&self) -> Vec<u16> {
+        let mut ports: Vec<u16> = self.cfg.http.listen.iter().map(|a| a.port()).collect();
+        ports.extend([
+            self.cfg.cluster.wireguard_port,
+            prism_proto::GRPC_PORT,
+            prism_proto::DATA_PORT,
+        ]);
+        ports
+    }
+}
+
 /// Checks the forwards of a NIC being created or edited. `nets` are the
 /// cluster's networks: IPv6 forwards need a guest address, which a network
 /// with IPv6 gives every NIC.
-pub(super) fn check_nic_forwards(network: &NicNetwork, nets: &[NetworkDoc]) -> Result<()> {
+pub(super) fn check_nic_forwards(
+    network: &NicNetwork,
+    nets: &[NetworkDoc],
+    reserved: &[u16],
+) -> Result<()> {
     let forwards = network.forwards();
     validate_forwards(forwards).map_err(NodeError::Invalid)?;
+    if let Some(f) = forwards.iter().find(|f| reserved.contains(&f.host_port)) {
+        return Err(NodeError::Invalid(format!(
+            "host port {} is used by Prism itself; choose another host port",
+            f.host_port
+        )));
+    }
     match network {
         NicNetwork::User { .. } => require_passt(forwards),
         NicNetwork::Network { .. } => {
@@ -74,7 +98,11 @@ impl Node {
                 ));
             }
         }
-        check_nic_forwards(&nic.network, &self.state.networks()?)?;
+        check_nic_forwards(
+            &nic.network,
+            &self.state.networks()?,
+            &self.reserved_forward_ports(),
+        )?;
         if live && !matches!(&nic.network, NicNetwork::Network { ipv4: Some(_), .. }) {
             return Err(NodeError::Invalid(
                 "the NIC has no address lease to forward to yet".into(),

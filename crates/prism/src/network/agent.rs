@@ -21,6 +21,10 @@ use crate::state::State;
 const RESYNC: Duration = Duration::from_secs(15);
 /// Waits for a burst of changes to settle before reconciling.
 const DEBOUNCE: Duration = Duration::from_millis(250);
+/// Delay between the follow-up passes after a VM lifecycle event.
+const FOLLOW_UP: Duration = Duration::from_secs(1);
+/// Follow-up passes after a lifecycle event, for a tap that appears late.
+const FOLLOW_UPS: u8 = 5;
 
 pub struct Agent {
     node: Uuid,
@@ -48,6 +52,7 @@ impl Agent {
         let mut rx = self.state.subscribe();
         let mut dom = self.domains.subscribe();
         let mut nl: Option<Netlink> = None;
+        let mut follow_ups = 0u8;
         loop {
             if nl.is_none() {
                 nl = Netlink::connect()
@@ -73,11 +78,17 @@ impl Agent {
                         Ok(DomainEvent::Lifecycle { .. }) | Err(_) => {}
                         Ok(_) => continue,
                     }
-                    // The tap appears a moment after the lifecycle event.
+                    // The tap appears a moment after the lifecycle event,
+                    // and after a quick stop and start the first pass can
+                    // run before the new tap exists. Keep passing at short
+                    // intervals instead of waiting for the next resync.
                     tokio::time::sleep(DEBOUNCE).await;
                     while dom.try_recv().is_ok() {}
+                    follow_ups = FOLLOW_UPS;
                 }
-                () = tokio::time::sleep(RESYNC) => {}
+                () = tokio::time::sleep(if follow_ups > 0 { FOLLOW_UP } else { RESYNC }) => {
+                    follow_ups = follow_ups.saturating_sub(1);
+                }
             }
         }
     }
@@ -114,6 +125,9 @@ impl Agent {
             if let Err(e) = apply_switch(nl, sw).await {
                 errors.push(format!("{}: {e}", sw.bridge));
             }
+            // A failure above must not leave a freshly started VM's tap
+            // without its VLANs.
+            apply_ports(nl, sw).await;
         }
         for bridge in &p.local_bridges {
             host::enable_route_localnet(bridge);
@@ -174,13 +188,17 @@ async fn apply_switch(nl: &Netlink, sw: &SwitchPlan) -> anyhow::Result<()> {
         )
         .await?;
     }
+    Ok(())
+}
+
+/// Applies the VLANs of every VM tap on the switch. The tap only exists
+/// while its VM runs; the follow-up passes and the resync catch the rest.
+async fn apply_ports(nl: &Netlink, sw: &SwitchPlan) {
     for (tap, vlans) in &sw.ports {
-        // The tap only exists while its VM runs; the next resync catches it.
         if let Err(e) = nl.set_port_vlans(tap, vlans).await {
             tracing::debug!(%tap, "port vlan: {e}");
         }
     }
-    Ok(())
 }
 
 /// Deletes bridges and VXLAN devices of networks that no longer exist, and

@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,${{ matrix.arch }}-unknown-linux-musl
+      - uses: mlugg/setup-zig@v1
+      - run: cargo install cargo-zigbuild --locked
+      - run: cargo zigbuild --release --target ${{ matrix.arch }}-unknown-linux-musl -p prism
+      - name: Check that the binary is static
+        run: |
+          B=target/${{ matrix.arch }}-unknown-linux-musl/release/prism
+          if readelf -d "$B" | grep -q NEEDED; then
+            echo "binary has NEEDED entries" >&2
+            exit 1
+          fi
+      - name: Package
+        run: |
+          name=prism-${GITHUB_REF_NAME}-linux-${{ matrix.arch }}
+          mkdir "$name"
+          cp target/${{ matrix.arch }}-unknown-linux-musl/release/prism LICENSE README.md "$name"/
+          cp contrib/prism.service contrib/prism.toml.example "$name"/
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prism-linux-${{ matrix.arch }}
+          path: |
+            prism-*.tar.gz
+            prism-*.tar.gz.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Combine checksums
+        run: cd dist && cat *.sha256 > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS

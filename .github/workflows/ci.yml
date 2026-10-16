@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: bun install --frozen-lockfile
+        working-directory: web
+      - run: bun run typecheck
+        working-directory: web
+
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,x86_64-unknown-linux-musl
+      - uses: mlugg/setup-zig@v1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-zigbuild --locked
+      - run: cargo zigbuild --release --target x86_64-unknown-linux-musl -p prism
+      - name: Check that the binary is static
+        run: |
+          B=target/x86_64-unknown-linux-musl/release/prism
+          file "$B"
+          if readelf -d "$B" | grep -q NEEDED; then
+            readelf -d "$B" | grep NEEDED
+            echo "binary has NEEDED entries" >&2
+            exit 1
+          fi

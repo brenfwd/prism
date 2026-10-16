@@ -21,7 +21,13 @@ impl Node {
     /// Host ports that port forwards may not claim: the API listeners and the
     /// cluster ports. A forward on one of them would capture that traffic.
     pub(super) fn reserved_forward_ports(&self) -> Vec<u16> {
-        let mut ports: Vec<u16> = self.cfg.http.listen.iter().map(|a| a.port()).collect();
+        let mut ports: Vec<u16> = self
+            .cfg
+            .http
+            .listen
+            .iter()
+            .map(std::net::SocketAddr::port)
+            .collect();
         ports.extend([
             self.cfg.cluster.wireguard_port,
             prism_proto::GRPC_PORT,

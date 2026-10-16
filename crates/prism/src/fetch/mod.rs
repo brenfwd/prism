@@ -27,6 +27,8 @@ use body::BodyReader;
 use url::Url;
 
 const MAX_REDIRECTS: usize = 5;
+/// Largest file a URL download may write, so one request cannot fill a pool.
+const MAX_DOWNLOAD_BYTES: u64 = 256 << 30;
 const MAX_HEADERS: usize = 64 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -191,11 +193,24 @@ pub async fn download(
                 let loc = head
                     .location
                     .ok_or_else(|| FetchError::Failed("redirect without a location".into()))?;
-                u = u.join(&loc).map_err(FetchError::Failed)?;
+                let next = u.join(&loc).map_err(FetchError::Failed)?;
+                if u.tls && !next.tls {
+                    return fail(format!(
+                        "refusing a redirect from https to http ({})",
+                        next.host
+                    ));
+                }
+                u = next;
                 continue;
             }
             200 => {}
             s => return fail(format!("server answered HTTP {s}")),
+        }
+        if head.content_length.is_some_and(|n| n > MAX_DOWNLOAD_BYTES) {
+            return fail(format!(
+                "the file is larger than the {} GiB download limit",
+                MAX_DOWNLOAD_BYTES >> 30
+            ));
         }
         let mut body = BodyReader::new(reader, head.content_length, head.chunked);
         return stream_to_file(
@@ -233,6 +248,12 @@ async fn stream_to_file(
         };
         if n == 0 {
             break;
+        }
+        if done + n as u64 > MAX_DOWNLOAD_BYTES {
+            return fail(format!(
+                "the download passed the {} GiB limit",
+                MAX_DOWNLOAD_BYTES >> 30
+            ));
         }
         hasher.update(&buf[..n]);
         file.write_all(&buf[..n]).await?;

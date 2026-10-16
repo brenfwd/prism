@@ -14,7 +14,8 @@ use super::{Action, HostInfo, Node, NodeError, Result, VmState, apparmor, lock, 
 
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
 
-fn format_version(v: u64) -> String {
+/// Formats libvirt's numeric version, `10000000` for example, as `10.0.0`.
+pub(crate) fn format_version(v: u64) -> String {
     format!("{}.{}.{}", v / 1_000_000, v / 1000 % 1000, v % 1000)
 }
 

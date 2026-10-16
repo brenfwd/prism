@@ -60,7 +60,7 @@ pub async fn doctor(dir: &Path) -> anyhow::Result<()> {
         Ok(c) => c
             .lib_version()
             .await
-            .map(|v| format!("{} via {}", v, sock.display()))
+            .map(|v| format!("{} via {}", crate::node::format_version(v), sock.display()))
             .map_err(|e| e.to_string()),
         Err(e) => Err(format!("{}: {e}", sock.display())),
     };

@@ -56,6 +56,7 @@ pub use clone::CloneVm;
 pub use devices::{AddDisk, AddNic, UpdateDisk};
 pub use download::DownloadReq;
 pub use guest::GuestNetwork;
+pub(crate) use libvirt::format_version;
 pub use migrate::{FinishReq, MigrateVm, PrepareReq};
 pub use model::{
     Action, HostInfo, HotplugResult, MemoryStats, NodeView, VmRuntime, VmState, VmView,

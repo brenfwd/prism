@@ -20,12 +20,16 @@ jobs:
         with:
           targets: wasm32-unknown-unknown,${{ matrix.arch }}-unknown-linux-musl
       - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.14.1
       - run: cargo install cargo-zigbuild --locked
       - run: cargo zigbuild --release --target ${{ matrix.arch }}-unknown-linux-musl -p prism
       - name: Check that the binary is static
         run: |
           B=target/${{ matrix.arch }}-unknown-linux-musl/release/prism
-          if readelf -d "$B" | grep -q NEEDED; then
+          needed=$(readelf -d "$B" | grep NEEDED || true)
+          if [ -n "$needed" ]; then
+            echo "$needed"
             echo "binary has NEEDED entries" >&2
             exit 1
           fi
@@ -55,9 +59,13 @@ jobs:
           path: dist
           merge-multiple: true
       - name: Combine checksums
-        run: cd dist && cat *.sha256 > SHA256SUMS
+        run: |
+          cd dist
+          cat *.sha256 > SHA256SUMS
+          sha256sum -c SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
+          fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
             dist/SHA256SUMS

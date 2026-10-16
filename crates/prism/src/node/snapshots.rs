@@ -392,11 +392,14 @@ impl Node {
         let mut files = chain_files(spec);
         let c = self.client()?;
         for snap in c.snapshots(&domain_ref(spec)).await.unwrap_or_default() {
-            if let Ok(xml) = c.snapshot_xml(&snap, 0).await
-                && let Some(mem) = memory_file(&xml)
-            {
+            let Ok(xml) = c.snapshot_xml(&snap, 0).await else {
+                continue;
+            };
+            // The overlays a snapshot created stay behind when a revert drops the disk that
+            // used them, and only the snapshot still names them.
+            for path in memory_file(&xml).into_iter().chain(snapshot_overlays(&xml)) {
                 for pool in self.storage.list() {
-                    if let Ok(rest) = mem.strip_prefix(&pool.path)
+                    if let Ok(rest) = path.strip_prefix(&pool.path)
                         && let Some(f) = rest.to_str()
                     {
                         files.push((pool.name.clone(), f.to_string()));
@@ -509,6 +512,46 @@ pub(super) fn memory_file(snapshot_xml: &str) -> Option<std::path::PathBuf> {
     }
 }
 
+/// The files in a snapshot's `<disks>`: the overlay each disk continued in when it was taken.
+pub(super) fn snapshot_overlays(snapshot_xml: &str) -> Vec<std::path::PathBuf> {
+    use quick_xml::Reader;
+    use quick_xml::events::Event;
+
+    let mut reader = Reader::from_str(snapshot_xml);
+    let mut path: Vec<String> = Vec::new();
+    let mut out = Vec::new();
+    let in_disk = |path: &[String]| path.ends_with(&["disks".to_owned(), "disk".to_owned()]);
+    while let Ok(ev) = reader.read_event() {
+        match ev {
+            Event::Start(e) => {
+                if e.name().as_ref() == "source"
+                    && path.len() == 3
+                    && in_disk(&path)
+                    && let Some(f) = file_attr(&e)
+                {
+                    out.push(f);
+                }
+                path.push(e.name().as_ref().to_owned());
+            }
+            Event::Empty(e) => {
+                if e.name().as_ref() == "source"
+                    && path.len() == 3
+                    && in_disk(&path)
+                    && let Some(f) = file_attr(&e)
+                {
+                    out.push(f);
+                }
+            }
+            Event::End(_) => {
+                path.pop();
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    out
+}
+
 fn file_attr(e: &quick_xml::events::BytesStart<'_>) -> Option<std::path::PathBuf> {
     e.attributes()
         .flatten()
@@ -570,5 +613,19 @@ mod tests {
         );
         assert_eq!(relative_to(Path::new("/q/a.qcow2"), Path::new("/p")), None);
         assert_eq!(relative_to(Path::new("/p/sub/a"), Path::new("/p")), None);
+    }
+    #[test]
+    fn finds_the_overlays_a_snapshot_created() {
+        let xml = "<domainsnapshot><name>s1</name>\
+            <disks><disk name='vda' snapshot='external' type='file'>\
+            <driver type='qcow2'/><source file='/p/web.s1.qcow2'><privateData/></source>\
+            </disk><disk name='sda' snapshot='no'/></disks>\
+            <domain><devices><disk type='file'><source file='/p/web.qcow2'/></disk></devices></domain>\
+            </domainsnapshot>";
+        assert_eq!(
+            snapshot_overlays(xml),
+            [std::path::PathBuf::from("/p/web.s1.qcow2")]
+        );
+        assert!(snapshot_overlays(XML).is_empty());
     }
 }

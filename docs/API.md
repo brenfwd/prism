@@ -19,6 +19,20 @@ kind, size_bytes, shared_with}]}`. `kind` is `disk` or `snapshot`, `size_bytes`
 is the space used on disk, and a non-empty `shared_with` means the delete keeps
 that file.
 
+## IPv6 on networks
+
+`POST /networks` takes `ipv6` (default `true`) and `nat66` (default `true` on a
+NAT network). With IPv6 on, the node picks a free ULA /64 and the network
+shows it as `subnet6`. `PATCH /networks/{id}` takes the same two fields:
+`ipv6: true` picks a prefix for a network that has none, and `ipv6: false`
+removes it. Networks created before IPv6 support have no `subnet6` until
+someone turns it on.
+
+Every VM in `GET /vms` and `GET /vms/{id}` has `nic_ipv6`, a map from NIC ID to
+the SLAAC address that NIC forms on its network. It is absent for NICs on
+networks without IPv6. A port forward with an IPv6 `host_addr` targets that
+address.
+
 ## Rolling upgrades
 
 Each node advertises `{version, feature_level}`; `GET /api/v1/cluster` reports

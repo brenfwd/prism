@@ -277,9 +277,11 @@ impl Node {
         if let Some(ci) = &mut spec.cloud_init {
             ci.user_data = format!("blake3:{}", blake3::hash(ci.user_data.as_bytes()).to_hex());
         }
+        let nic_ipv6 = self.nic_ipv6(&spec);
         VmView {
             spec,
             status,
+            nic_ipv6,
             hotplug: None,
         }
     }

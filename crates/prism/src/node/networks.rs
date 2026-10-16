@@ -1,6 +1,7 @@
 //! Network operations: the user-facing side of `crate::network`.
 
 use std::collections::{BTreeMap, HashMap};
+use std::net::Ipv6Addr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ use crate::network::{
     CheckNetwork, CreateNetwork, DEFAULT_NETWORK, NetworkDoc, NetworkKind, UpdateNetwork, host,
     ipam, valid_allow_prefixes, valid_network_name, valid_subnet,
 };
-use crate::spec::NicNetwork;
+use crate::spec::{NicNetwork, VmSpec};
 use crate::state::Command;
 
 /// A network as the API shows it.
@@ -123,6 +124,19 @@ impl Node {
             .filter(|v| !matches!(v.status.state, VmState::Stopped | VmState::Missing))
             .map(|v| v.spec.name)
             .collect())
+    }
+
+    /// The SLAAC address of each NIC of `spec` that sits on a network with IPv6.
+    pub(crate) fn nic_ipv6(&self, spec: &VmSpec) -> BTreeMap<Uuid, Ipv6Addr> {
+        let nets = self.state.networks().unwrap_or_default();
+        spec.nics
+            .iter()
+            .filter_map(|nic| {
+                let id = nic.network.network_id()?;
+                let net = nets.iter().find(|n| n.id == id && n.subnet6.is_some())?;
+                Some((nic.id, net.guest_v6(None, &nic.mac)?))
+            })
+            .collect()
     }
 
     /// The bridge of each network, for rendering NICs.

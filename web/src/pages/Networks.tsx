@@ -50,7 +50,12 @@ export function NetworksPage() {
 function NetworkCard({ net, vms, onRename }: { net: NetworkInfo; vms: Vm[]; onRename: () => void }) {
   const qc = useQueryClient();
   const members = vms
-    .map((vm) => ({ vm, ips: vm.nics.flatMap((n) => (n.network.type === "network" && n.network.network === net.id ? [n.network.ipv4 ?? "pending"] : [])) }))
+    .map((vm) => ({
+      vm,
+      ips: vm.nics.flatMap((n) =>
+        n.network.type === "network" && n.network.network === net.id ? [n.network.ipv4 ?? "pending", ...(vm.nic_ipv6?.[n.id] ? [vm.nic_ipv6[n.id]] : [])] : [],
+      ),
+    }))
     .filter((m) => m.ips.length);
   const refresh = () => qc.invalidateQueries({ queryKey: ["networks"] });
   const dhcp = useMutation({ mutationFn: () => api.updateNetwork(net.id, { dhcp: !net.dhcp }), onSuccess: refresh, onError: (e) => toast({ tone: "error", title: "Network change failed", body: humanError(e) }) });
@@ -58,7 +63,7 @@ function NetworkCard({ net, vms, onRename }: { net: NetworkInfo; vms: Vm[]; onRe
   return (
     <Card
       title={net.name}
-      description={<span className="font-mono">{net.subnet}</span>}
+      description={<span className="font-mono">{[net.subnet, net.subnet6].filter(Boolean).join("  ")}</span>}
       actions={
         <>
         <IconButton icon="pencil" label="Edit network" onClick={onRename} />
@@ -76,6 +81,7 @@ function NetworkCard({ net, vms, onRename }: { net: NetworkInfo; vms: Vm[]; onRe
       <div className="mb-3 flex flex-wrap gap-1.5">
         <Badge tone={net.kind === "nat" ? "indigo" : "neutral"}>{net.kind === "nat" ? "Internet access" : "Isolated"}</Badge>
         <Badge tone={net.dhcp ? "green" : "neutral"}>{net.dhcp ? "DHCP on" : "DHCP off"}</Badge>
+        <Badge tone={net.subnet6 ? "green" : "neutral"}>{net.subnet6 ? (net.nat66 ? "IPv6 with NAT" : "IPv6") : "IPv6 off"}</Badge>
         <Badge>{net.domain}</Badge>
       </div>
       {members.length === 0 ? (

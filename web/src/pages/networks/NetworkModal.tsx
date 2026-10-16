@@ -2,13 +2,15 @@ import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type NetworkCheck, type NetworkInfo } from "../../api";
 import { toast } from "../../lib/toast";
-import { Button, ErrorText, Field, Input, Modal, Segmented } from "../../components/ui";
+import { Button, ErrorText, Field, Input, Modal, Segmented, Switch } from "../../components/ui";
 
 /** Create a network (everything optional) or edit an existing one. */
 export function NetworkModal({ existing, onClose }: { existing?: NetworkInfo; onClose: () => void }) {
   const qc = useQueryClient();
   const [name, setName] = useState(existing?.name ?? "");
   const [kind, setKind] = useState<"nat" | "isolated">(existing?.kind ?? "nat");
+  const [ipv6, setIpv6] = useState(existing ? !!existing.subnet6 : true);
+  const [nat66, setNat66] = useState(existing ? !!existing.nat66 : true);
   const [custom, setCustom] = useState(false);
   const [subnet, setSubnet] = useState(existing?.subnet ?? "");
   const [allowText, setAllowText] = useState((existing?.allow_prefixes ?? []).join(", "));
@@ -42,8 +44,17 @@ export function NetworkModal({ existing, onClose }: { existing?: NetworkInfo; on
             kind: kind !== existing.kind ? kind : undefined,
             subnet: subnetChanged ? wantSubnet : undefined,
             allow_prefixes: kind === "nat" ? allow : [],
+            ipv6: ipv6 !== !!existing.subnet6 ? ipv6 : undefined,
+            nat66: ipv6 && kind === "nat" && nat66 !== !!existing.nat66 ? nat66 : undefined,
           })
-        : api.createNetwork({ name: name.trim() || undefined, kind, subnet: wantSubnet || undefined, allow_prefixes: kind === "nat" && allow.length ? allow : undefined }),
+        : api.createNetwork({
+            name: name.trim() || undefined,
+            kind,
+            subnet: wantSubnet || undefined,
+            allow_prefixes: kind === "nat" && allow.length ? allow : undefined,
+            ipv6,
+            nat66: ipv6 && kind === "nat" ? nat66 : undefined,
+          }),
     onSuccess: (n) => {
       toast({ tone: "success", title: existing ? `${n.name} updated` : `Network ${n.name} created on ${n.subnet}` });
       void qc.invalidateQueries({ queryKey: ["networks"] });
@@ -123,6 +134,24 @@ export function NetworkModal({ existing, onClose }: { existing?: NetworkInfo; on
               </Field>
             )}
           </>
+        )}
+        <Switch
+          label="IPv6"
+          checked={ipv6}
+          onChange={setIpv6}
+          description={
+            existing?.subnet6
+              ? <>Machines get an address in <span className="font-mono">{existing.subnet6}</span> automatically and resolve each other over IPv6 too.</>
+              : "Machines get a private IPv6 address automatically and resolve each other over IPv6 too. Prism picks a free range."
+          }
+        />
+        {ipv6 && kind === "nat" && (
+          <Switch
+            label="IPv6 internet access"
+            checked={nat66}
+            onChange={setNat66}
+            description="Translate IPv6 traffic from the private range to the host's address, so machines reach IPv6 sites without a public range of their own."
+          />
         )}
         {kind === "nat" && (
           <Field

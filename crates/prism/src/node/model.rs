@@ -1,5 +1,8 @@
 //! The node's API-facing types: VM runtime state, host and node views.
 
+use std::collections::BTreeMap;
+use std::net::Ipv6Addr;
+
 use prism_libvirt::DomainState;
 use serde::Serialize;
 use uuid::Uuid;
@@ -95,6 +98,9 @@ pub struct VmView {
     #[serde(flatten)]
     pub spec: VmSpec,
     pub status: VmRuntime,
+    /// The IPv6 address each NIC on a network with IPv6 forms by SLAAC, by NIC ID.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub nic_ipv6: BTreeMap<Uuid, Ipv6Addr>,
     /// How the device change that produced this view reached the running
     /// guest; absent for views not returned by a device change.
     #[serde(skip_serializing_if = "Option::is_none")]

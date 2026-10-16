@@ -193,7 +193,7 @@ mimalloc replaces musl's malloc, whose global lock throttles migration and trans
 | Pool and VM directories root-owned, not writable by the qemu uid | Yes | Yes |
 | `inet prism` boundary rules from [Threat model](#threat-model-and-security) present | Yes | Yes |
 
-Prism does not need IPv6 forwarding, and its boundary rules hold when forwarding is on.
+The mesh does not need IPv6 forwarding, and the boundary rules hold when forwarding is on. IPv6 forwards and NAT66 on a switch turn it on.
 
 ## Config directory and persistence
 
@@ -1094,13 +1094,25 @@ libvirt networks are host-local and need the dnsmasq binary, which breaks the cl
 - **DNS** (hickory-proto): authoritative for `<vm>.<switch>.prism`, with records only from VM names, forwarding everything else to the host's resolvers. `.ts.net`, management search domains and `100.100.100.100` are never forwarded by default.
 - **NAT and filtering:** a minimal in-house nftables layer over netlink owns only the tables `inet prism` (prerouting, input, forward, output), `ip prism-nat` and `bridge prism`. It is validated in CI against `nft -j list ruleset`. `prism doctor` flags Docker or firewalld rules that drop forwarded traffic.
 
+### IPv6 on switches
+
+A switch can carry IPv6 next to IPv4. The network document holds `subnet6`, a ULA /64, and `nat66`. Both are absent on switches stored before IPv6 existed, so those stay IPv4-only until someone turns IPv6 on. New switches get IPv6 on by default.
+
+- **Prefix:** the node that creates the switch picks `fd` plus 40 random bits and a random 16-bit subnet ID, and retries when the result overlaps another switch, the mesh /48 or a prefix the host already routes. The state machine rejects an overlap again when it applies the command, and checks that the prefix is a /64 inside `fc00::/7`.
+- **Addresses:** guests autoconfigure from router advertisements (SLAAC). Prism takes the modified EUI-64 address of each NIC's MAC as the guest's address, which is what Linux forms by default. Each node also holds one address in the /64, built from the low 64 bits of its node ID, plus a link-local address derived the same way. The node's /64 address is the guest's DNS server and the source of forwarded connections.
+- **Router advertisements:** `prism_net::ra` sends from a raw ICMPv6 socket bound to the bridge's link-local address. Each advertisement carries the prefix (on-link, autonomous), the MTU, the node's address as RDNSS, the switch domain as DNSSL and the bridge's MAC. It repeats every 120 seconds and answers router solicitations at most once every 3 seconds. The router lifetime is 1800 seconds on a node that routes the switch and zero on the others, which still advertise the prefix. A node routes a NAT switch when NAT66 is on, the host has an IPv6 default route and the node is the switch's egress node or the switch has none.
+- **DNS:** the zone gets an AAAA record for every guest with an address, and the same zone is served on the node's /64 address as well as the IPv4 VIP.
+- **NAT66:** `ip6 prism-nat` masquerades traffic from the /64 that leaves through the IPv6 default-route interface. The table is replaced on every pass, so turning NAT66 off removes the rule. Enabling IPv6 forwarding makes the kernel ignore router advertisements, so Prism first sets `accept_ra=2` on that interface to keep the host's own default route.
+- **Filtering:** the `inet prism` forward chain drops traffic from `ps*` to anything but the uplinks, to `fd7a:115c:a1e0::/48` and to members' IPv6 endpoints, as it does for IPv4. Isolated switches forward nothing. In `bridge prism`, a tap on an IPv6 switch may send only from its own address, a link-local address or `::`. Neighbour advertisements may not claim another address of the /64, and redirects are dropped. Guests that pick another interface identifier, such as stable-privacy addresses from NetworkManager, lose IPv6 until they use EUI-64. `allow_prefixes` stays IPv4-only.
+- **Port forwards:** a forward without a `host_addr`, or with an IPv4 one, targets the NIC's lease. With an IPv6 `host_addr` it targets the guest's SLAAC address, so nobody enters a guest address by hand. The `ipv6` field on a NIC is an override that is honoured only on a switch without IPv6.
+
 ### Guest isolation rules
 
 Guests are untrusted (see [Threat model](#threat-model-and-security)), so Prism generates these rules from IPAM and membership:
 
 - **Input:** from `ps*`, accept only UDP 67, UDP/TCP 53 to the VIP, ICMP echo, ICMPv6 neighbour discovery and established traffic, with a per-tap `limit rate`, then drop. Guests can never reach the API, gRPC or the data plane on any host address.
 - **Forward:** drop `ps*` traffic to `wg-prism`, `tailscale0`, the mesh /48, `100.64.0.0/10`, `fd7a:115c:a1e0::/48` and `@node_addrs` (every member's `advertise` and HTTP addresses). A per-switch `allow_prefixes` opts back in.
-- **Bridge (`bridge prism`):** on `pn*` ports, require the NIC's MAC as ether source and its lease as ARP/IP source (`0.0.0.0` allowed for DHCPDISCOVER). Drop UDP source port 67 and ICMPv6 type 134 (rogue DHCP and router advertisements). Drop 802.1Q/802.1ad ingress on access ports and 802.1ad on trunks. Learning is off and the FDB is static. A per-NIC `trusted = true` opts out for router and appliance VMs.
+- **Bridge (`bridge prism`):** on `pn*` ports, require the NIC's MAC as ether source and its lease as ARP/IP source (`0.0.0.0` allowed for DHCPDISCOVER). Drop UDP source port 67 and ICMPv6 type 134 (rogue DHCP and router advertisements). On a switch with IPv6, also require the NIC's SLAAC address, a link-local address or `::` as IPv6 source, and drop neighbour advertisements that claim another address of the /64. Drop 802.1Q/802.1ad ingress on access ports and 802.1ad on trunks. Learning is off and the FDB is static. A per-NIC `trusted = true` opts out for router and appliance VMs.
 
 
 ### VM attachment
@@ -1138,7 +1150,7 @@ Prism installs an NM drop-in that marks `ps*`, `vx*`, `pn*` and `wg-prism` devic
 
 - **Modules:** bridge, vxlan, tun, vhost_net, wireguard, nf_tables, nft_nat, nft_masq, nft_ct, 8021q (VLAN sub-interfaces only).
 - **Capabilities:** `CAP_NET_ADMIN`, `CAP_NET_BIND_SERVICE` (ports 53 and 67), `CAP_NET_RAW` (ARP/RARP announcements).
-- **sysctls:** `ip_forward=1`; `rp_filter=2` on Prism bridges (loose mode, not anti-spoofing; the nftables rules do that); `disable_ipv6=1` on `vx*` and `pn*` ports, and on `ps*` unless the switch has an IPv6 gateway, so they get no link-local addresses or router advertisements; IPv6 stays enabled on `wg-prism`; `br_netfilter` not loaded. Prism records original values for `prism uninstall`.
+- **sysctls:** `ip_forward=1`; `rp_filter=2` on Prism bridges (loose mode, not anti-spoofing; the nftables rules do that); `disable_ipv6=1` on `vx*` and `pn*` ports, and on `ps*` unless the switch has an IPv6 gateway, so they get no link-local addresses or router advertisements; `accept_ra=0` and `autoconf=0` on `ps*` bridges with IPv6, so other nodes' advertisements add no addresses to the host; `accept_ra=2` on the IPv6 uplink once forwarding is on; IPv6 stays enabled on `wg-prism`; `br_netfilter` not loaded. Prism records original values for `prism uninstall`.
 
 ## HTTP API and SSE event stream
 
@@ -1407,7 +1419,7 @@ The largest risk is the native libvirt RPC client, since every feature sits on i
 
 ### Host programs
 
-Downloads from a URL are done in-process (`crates/prism/src/fetch`): HTTP/1.1 over `rustls` (ring provider, bundled webpki roots, no OpenSSL), with redirects, progress, cancellation and optional SHA-256 verification. Port forwards on a NIC attached to a Prism network are nftables DNAT, not passt. The plan for each node turns every forward of a VM that runs (or is migrating) there into a rule in `ip prism-nat` `prerouting` (`tcp|udp dport` and optional `ip daddr`, `dnat to <lease>:<guest port>`), targeting the NIC's IPAM lease, and turns IPv4 forwarding on. The network agent reconciles them like any other rule, so they apply at once to a running guest, disappear when the VM leaves the node and appear on the destination during a migration. The node needs a gateway on the network to route into it; with no `host_addr` the forward listens on every host address. Locally originated traffic and loopback are not translated. The inet forward chain stays policy accept for the inbound direction, and replies return through conntrack. A host port can serve one guest per node (`409` otherwise).
+Downloads from a URL are done in-process (`crates/prism/src/fetch`): HTTP/1.1 over `rustls` (ring provider, bundled webpki roots, no OpenSSL), with redirects, progress, cancellation and optional SHA-256 verification. Port forwards on a NIC attached to a Prism network are nftables DNAT, not passt. Forwards to an IPv6 guest use `ip6 prism-nat` and the guest's SLAAC address. The plan for each node turns every forward of a VM that runs (or is migrating) there into a rule in `ip prism-nat` `prerouting` (`tcp|udp dport` and optional `ip daddr`, `dnat to <lease>:<guest port>`), targeting the NIC's IPAM lease, and turns IPv4 forwarding on. The network agent reconciles them like any other rule, so they apply at once to a running guest, disappear when the VM leaves the node and appear on the destination during a migration. The node needs a gateway on the network to route into it; with no `host_addr` the forward listens on every host address. Locally originated traffic and loopback are not translated. The inet forward chain stays policy accept for the inbound direction, and replies return through conntrack. A host port can serve one guest per node (`409` otherwise).
 
 passt stays only as an explicit opt-in for user-mode ("Private NAT") NICs, which have no Prism network behind them. It needs the `passt` package and a libvirt AppArmor profile that does not break it; `GET /api/v1/nodes/{node}/prereqs` and `prism doctor` report whether it is usable, the API refuses user-mode forwards without it (pointing at network forwards as the alternative), and the UI explains the fix. libvirt cannot change a passt forward under a running guest, so those changes apply at the next start and the UI says so.
 

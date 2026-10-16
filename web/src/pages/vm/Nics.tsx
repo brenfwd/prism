@@ -16,14 +16,21 @@ export function NicSub({ vm, nic }: { vm: Vm; nic: Nic }) {
     refetchInterval: 10_000,
   }).data;
   const mine = live ? guest?.interfaces.find((i) => i.mac?.toLowerCase() === nic.mac.toLowerCase()) : undefined;
-  const ips = (mine?.addrs ?? []).filter((a) => !a.addr.startsWith("fe80:"));
+  const reported = (mine?.addrs ?? []).filter((a) => !a.addr.startsWith("fe80:"));
+  // The address the network assigns by SLAAC, shown until the guest agent reports it.
+  const assigned = vm.nic_ipv6?.[nic.id];
+  const ips = assigned && !reported.some((a) => a.addr === assigned) ? [...reported, { addr: assigned, prefix: 64, ipv6: true, planned: true }] : reported;
   const forwards = nic.network.type === "user" || nic.network.type === "network" ? (nic.network.forwards ?? []) : [];
   const anyHost = nic.network.type === "network" ? "*" : "127.0.0.1";
   return (
     <span className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
       <span className="font-mono">{nic.mac}</span>
       {ips.map((a) => (
-        <span key={a.addr} className="inline-flex items-center gap-1 font-mono text-indigo-600 dark:text-indigo-400" title="Reported by the guest agent">
+        <span
+          key={a.addr}
+          className="inline-flex items-center gap-1 font-mono text-indigo-600 dark:text-indigo-400"
+          title={"planned" in a ? "Assigned by the network. The machine forms it from its MAC address." : "Reported by the guest agent"}
+        >
           {a.addr}
           <CopyButton text={a.addr} />
         </span>
@@ -86,6 +93,11 @@ export function Forwards({ vm, nic, onClose }: { vm: Vm; nic: Nic; onClose: () =
         )}
         {isOn(vm) && !missing && !viaNetwork && (
           <p className="text-[13px] text-zinc-500">This machine is running, so changes apply the next time it starts.</p>
+        )}
+        {viaNetwork && vm.nic_ipv6?.[nic.id] && (
+          <p className="text-[13px] text-zinc-500">
+            IPv6 forwards go to <span className="font-mono">{vm.nic_ipv6[nic.id]}</span>, the address this machine forms by itself. Enter an IPv6 host address to forward over IPv6.
+          </p>
         )}
         {rows.length === 0 && <p className="text-[13px] text-zinc-500">Nothing is forwarded. Add SSH to get started.</p>}
         {rows.map((r, i) => (

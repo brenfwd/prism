@@ -95,6 +95,10 @@ export interface NetworkInfo {
   egress: string | null;
   dhcp: boolean;
   allow_prefixes?: string[];
+  /** The ULA /64 guests autoconfigure from; absent while IPv6 is off. */
+  subnet6?: string | null;
+  /** Masquerade IPv6 traffic out of the host (NAT66). */
+  nat66?: boolean;
   created: number;
   bridge: string;
   domain: string;
@@ -137,6 +141,8 @@ export interface Vm {
   /** `user_data` is a `blake3:` fingerprint; the API never returns secrets. */
   cloud_init?: { user_data: string; network_config?: string | null } | null;
   status: VmRuntime;
+  /** The IPv6 address each NIC on an IPv6 network forms by SLAAC, by NIC id. */
+  nic_ipv6?: Record<string, string>;
   /** Present only on responses to device changes. */
   hotplug?: HotplugResult;
 }
@@ -358,10 +364,10 @@ export const api = {
     request<Task>("POST", `/nodes/local/pools/${enc(pool)}/downloads`, { url, name: name || undefined, sha256: sha256 || undefined }),
 
   networks: () => request<NetworkInfo[]>("GET", "/networks"),
-  createNetwork: (req: { name?: string; kind?: "nat" | "isolated"; subnet?: string; dhcp?: boolean; allow_prefixes?: string[] } = {}) =>
+  createNetwork: (req: { name?: string; kind?: "nat" | "isolated"; subnet?: string; dhcp?: boolean; allow_prefixes?: string[]; ipv6?: boolean; nat66?: boolean } = {}) =>
     request<NetworkInfo>("POST", "/networks", req),
   checkNetwork: (req: { id?: string; name?: string; subnet?: string }) => request<NetworkCheck>("POST", "/networks/check", req),
-  updateNetwork: (id: string, req: { name?: string; dhcp?: boolean; subnet?: string; kind?: "nat" | "isolated"; allow_prefixes?: string[] }) => request<NetworkInfo>("PATCH", `/networks/${id}`, req),
+  updateNetwork: (id: string, req: { name?: string; dhcp?: boolean; subnet?: string; kind?: "nat" | "isolated"; allow_prefixes?: string[]; ipv6?: boolean; nat66?: boolean }) => request<NetworkInfo>("PATCH", `/networks/${id}`, req),
   deleteNetwork: (id: string) => request<void>("DELETE", `/networks/${id}`),
 
   addDisk: (id: string, req: { pool: string; volume?: string; size_gib?: number; device: "disk" | "cdrom" }) =>

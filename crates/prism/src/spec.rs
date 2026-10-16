@@ -1,6 +1,6 @@
 //! `VmSpec`: the desired state of a VM.
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -151,6 +151,10 @@ pub enum NicNetwork {
         /// The IPAM lease; assigned when the VM is stored if absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ipv4: Option<Ipv4Addr>,
+        /// The guest's global IPv6 address, which IPv6 port forwards target.
+        /// Set by hand: the network itself is IPv4 only.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ipv6: Option<Ipv6Addr>,
         /// Egress node override; `None` uses the network's egress.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         egress: Option<Uuid>,
@@ -196,6 +200,18 @@ pub struct PortForward {
     pub host_addr: Option<std::net::IpAddr>,
     pub host_port: u16,
     pub guest_port: u16,
+    /// Also reach the guest from the host itself (loopback, or `host_addr`).
+    /// Prism networks only.
+    #[serde(default = "yes")]
+    pub local: bool,
+    /// Also reach the guest through the host address from other guests on
+    /// the same network. Prism networks only.
+    #[serde(default = "yes")]
+    pub hairpin: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl PortForward {

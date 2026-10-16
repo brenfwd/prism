@@ -90,11 +90,17 @@ impl Agent {
         if p.forwarding {
             host::enable_forwarding();
         }
+        if p.forwarding6 {
+            host::enable_forwarding6();
+        }
         let mut errors = Vec::new();
         for sw in &p.switches {
             if let Err(e) = apply_switch(nl, sw).await {
                 errors.push(format!("{}: {e}", sw.bridge));
             }
+        }
+        for bridge in &p.local_bridges {
+            host::enable_route_localnet(bridge);
         }
         remove_stale(nl, &p).await;
         self.services.lock().await.sync(&p.switches);

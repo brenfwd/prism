@@ -105,6 +105,18 @@ export function Forwards({ vm, nic, onClose }: { vm: Vm; nic: Nic; onClose: () =
                 all interfaces
               </label>
             )}
+            {viaNetwork && (
+              <>
+                <label className="flex items-center gap-1.5 text-xs text-zinc-500" title="Reach the guest from this host, e.g. via localhost">
+                  <input type="checkbox" checked={r.local ?? true} onChange={(e) => set(i, { local: e.target.checked })} />
+                  from this host
+                </label>
+                <label className="flex items-center gap-1.5 text-xs text-zinc-500" title="Let other guests on this network use the host address">
+                  <input type="checkbox" checked={r.hairpin ?? true} onChange={(e) => set(i, { hairpin: e.target.checked })} />
+                  from other guests
+                </label>
+              </>
+            )}
             <Button size="xs" variant="ghost" onClick={() => setRows((x) => x.filter((_, j) => j !== i))}>Remove</Button>
           </div>
         ))}

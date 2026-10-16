@@ -36,7 +36,7 @@ export type Firmware = "bios" | "uefi";
 export type NicNetwork =
   | { type: "user"; forwards?: PortForward[] }
   | { type: "bridge"; bridge: string }
-  | { type: "network"; network: string; ipv4?: string | null; egress?: string | null; vlan?: number | null; trunk?: number[]; forwards?: PortForward[] };
+  | { type: "network"; network: string; ipv4?: string | null; ipv6?: string | null; egress?: string | null; vlan?: number | null; trunk?: number[]; forwards?: PortForward[] };
 
 export interface PortForward {
   proto: "tcp" | "udp";
@@ -44,6 +44,10 @@ export interface PortForward {
   host_addr?: string | null;
   host_port: number;
   guest_port: number;
+  /** Also reach the guest from the host itself (default on). Prism networks only. */
+  local?: boolean;
+  /** Also reach it through the host address from guests on the same network (default on). */
+  hairpin?: boolean;
 }
 
 /** How a device change reached the running guest. */

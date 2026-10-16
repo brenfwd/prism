@@ -1,6 +1,6 @@
 //! The rulesets Prism installs, built from typed configuration.
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use ipnet::{Ipv4Net, Ipv6Net};
 
@@ -161,58 +161,63 @@ pub struct DnatRule {
     /// UDP when set, TCP otherwise.
     pub udp: bool,
     /// Host address to match; any local address when absent.
-    pub host_addr: Option<Ipv4Addr>,
+    pub host_addr: Option<IpAddr>,
     pub host_port: u16,
-    pub guest: Ipv4Addr,
+    pub guest: IpAddr,
     pub guest_port: u16,
+    /// The guest's bridge, for hairpin forwarding.
+    pub bridge: String,
+    /// Also forward connections the host itself opens (to loopback, or to
+    /// `host_addr`).
+    pub local: bool,
+    /// Also forward connections from guests on the same bridge.
+    pub hairpin: bool,
 }
 
-/// The `ip prism-nat` table: port-forward DNAT in `prerouting`, then in `postrouting` a
-/// masquerade for each forward and one per entry in `rules`.
+impl DnatRule {
+    fn matches(&self, rule: Rule) -> Rule {
+        let rule = match self.host_addr {
+            Some(IpAddr::V4(a)) => rule.ip_daddr_eq(a),
+            Some(IpAddr::V6(a)) => rule.ip6_daddr(Ipv6Net::from(a)),
+            None => rule,
+        };
+        if self.udp {
+            rule.udp_dport(self.host_port)
+        } else {
+            rule.tcp_dport(self.host_port)
+        }
+    }
+
+    fn to_guest(&self, rule: Rule) -> Rule {
+        let rule = match self.guest {
+            IpAddr::V4(a) => rule.ip_daddr_eq(a),
+            IpAddr::V6(a) => rule.ip6_daddr(Ipv6Net::from(a)),
+        };
+        if self.udp {
+            rule.udp_dport(self.guest_port)
+        } else {
+            rule.tcp_dport(self.guest_port)
+        }
+    }
+
+    /// Accepts a hairpinned connection, which enters and leaves the same bridge.
+    pub fn hairpin_rule(&self, family: Family) -> Option<Rule> {
+        self.hairpin.then(|| {
+            let r = Rule::new(family)
+                .iifname(&self.bridge)
+                .oifname(&self.bridge);
+            self.to_guest(r).accept()
+        })
+    }
+}
+
+/// The `ip prism-nat` table: port-forward DNAT in `prerouting` (and `output`
+/// for the host's own connections), then in `postrouting` a masquerade for
+/// each forward and one per entry in `rules`.
 pub fn nat_ruleset(rules: &[NatRule], forwards: &[DnatRule]) -> Table {
     let mut t = Table::new(Family::Ip, NAT_TABLE);
-    let pre = t.chain(Chain::base(
-        "prerouting",
-        ChainType::Nat,
-        Hook::Prerouting,
-        priority::DSTNAT,
-    ));
-    for f in forwards {
-        let mut r = Rule::new(Family::Ip);
-        if let Some(a) = f.host_addr {
-            r = r.ip_daddr_eq(a);
-        }
-        r = if f.udp {
-            r.udp_dport(f.host_port)
-        } else {
-            r.tcp_dport(f.host_port)
-        };
-        pre.push(r.dnat(f.guest, f.guest_port));
-    }
-    let c = t.chain(Chain::base(
-        "postrouting",
-        ChainType::Nat,
-        Hook::Postrouting,
-        priority::SRCNAT,
-    ));
-    // A forwarded connection leaves with this node's address as its source. A
-    // guest that migrated here still has the old node as its gateway, so
-    // without this the replies would return through the wrong node.
-    let mut seen = std::collections::HashSet::new();
-    for f in forwards {
-        if !seen.insert((f.udp, f.guest, f.guest_port)) {
-            continue;
-        }
-        let r = Rule::new(Family::Ip).ip_daddr_eq(f.guest);
-        c.push(
-            if f.udp {
-                r.udp_dport(f.guest_port)
-            } else {
-                r.tcp_dport(f.guest_port)
-            }
-            .masquerade(),
-        );
-    }
+    forward_chains(&mut t, forwards.iter().filter(|f| f.guest.is_ipv4()));
+    let c = t.chain_mut("postrouting").expect("created above");
     for r in rules {
         c.push(
             Rule::new(Family::Ip)
@@ -222,6 +227,61 @@ pub fn nat_ruleset(rules: &[NatRule], forwards: &[DnatRule]) -> Table {
         );
     }
     t
+}
+
+/// The `ip6 prism-nat` table: the same forwards for IPv6 guests.
+pub fn nat6_ruleset(forwards: &[DnatRule]) -> Table {
+    let mut t = Table::new(Family::Ip6, NAT_TABLE);
+    forward_chains(&mut t, forwards.iter().filter(|f| f.guest.is_ipv6()));
+    t
+}
+
+fn forward_chains<'a>(t: &mut Table, forwards: impl Iterator<Item = &'a DnatRule> + Clone) {
+    let family = t.family;
+    let pre = t.chain(Chain::base(
+        "prerouting",
+        ChainType::Nat,
+        Hook::Prerouting,
+        priority::DSTNAT,
+    ));
+    for f in forwards.clone() {
+        pre.push(f.matches(Rule::new(family)).dnat(f.guest, f.guest_port));
+    }
+    if forwards.clone().any(|f| f.local) {
+        let out = t.chain(Chain::base(
+            "output",
+            ChainType::Nat,
+            Hook::Output,
+            priority::DSTNAT,
+        ));
+        for f in forwards.clone().filter(|f| f.local) {
+            // Without an address a forward means loopback here: the host's
+            // other addresses are reachable without a forward.
+            let rule = Rule::new(family);
+            let rule = match (f.host_addr, f.guest) {
+                (None, IpAddr::V4(_)) => rule.ip_daddr("127.0.0.0/8".parse().expect("literal")),
+                (None, IpAddr::V6(_)) => rule.ip6_daddr(Ipv6Net::from(Ipv6Addr::LOCALHOST)),
+                _ => rule,
+            };
+            out.push(f.matches(rule).dnat(f.guest, f.guest_port));
+        }
+    }
+    let c = t.chain(Chain::base(
+        "postrouting",
+        ChainType::Nat,
+        Hook::Postrouting,
+        priority::SRCNAT,
+    ));
+    // A forwarded connection leaves with this node's address as its source. A
+    // guest that migrated here still has the old node as its gateway, so
+    // without this the replies would return through the wrong node. It also
+    // makes hairpinned and loopback connections return through the host.
+    let mut seen = std::collections::HashSet::new();
+    for f in forwards {
+        if seen.insert((f.udp, f.guest, f.guest_port)) {
+            c.push(f.to_guest(Rule::new(family)).masquerade());
+        }
+    }
 }
 
 /// A guest's tap on a switch bridge and the addresses it may use.

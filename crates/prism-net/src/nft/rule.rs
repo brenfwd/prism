@@ -314,7 +314,7 @@ impl Rule {
     }
 
     /// Ends the rule with `dnat to <addr>:<port>`.
-    pub fn dnat(self, addr: Ipv4Addr, port: u16) -> Self {
+    pub fn dnat(self, addr: std::net::IpAddr, port: u16) -> Self {
         self.expr(Expr::Dnat { addr, port })
     }
 

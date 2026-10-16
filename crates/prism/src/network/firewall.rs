@@ -5,7 +5,7 @@ use ipnet::{Ipv4Net, Ipv6Net};
 use prism_net::nft::{
     BoundaryConfig, Chain, ChainType, DnatRule, Family, GuestPort, Hook, NatRule, Nft, Rule,
     SwitchServices, Table, boundary_ruleset, bridge_guard_ruleset, guest_input_chain, nat_ruleset,
-    priority,
+    nat6_ruleset, priority,
 };
 
 /// What the firewall should enforce for guests on this node.
@@ -49,7 +49,7 @@ pub struct Firewall;
 
 impl Firewall {
     /// The tables for `rules`: `inet prism` (boundary plus guest chains),
-    /// `ip prism-nat` and `bridge prism`.
+    /// `ip prism-nat`, `ip6 prism-nat` (with IPv6 forwards) and `bridge prism`.
     pub fn tables(rules: &GuestRules, mesh: Option<&MeshBoundary>) -> Vec<Table> {
         let mut inet = if let Some(m) = mesh {
             boundary_ruleset(&BoundaryConfig {
@@ -69,6 +69,14 @@ impl Firewall {
         };
         inet.chains.push(guest_input_chain(&rules.switches));
         if let Some(fwd) = inet.chain_mut("forward") {
+            // Hairpinned forwards enter and leave the same bridge; they must
+            // pass the per-bridge drop below.
+            for f in &rules.dnat {
+                let family = Family::Inet;
+                if let Some(rule) = f.hairpin_rule(family) {
+                    fwd.push(rule);
+                }
+            }
             for Routed { bridge, out, allow } in &rules.routed {
                 for net in allow {
                     fwd.push(
@@ -93,11 +101,15 @@ impl Firewall {
                 });
             }
         }
-        vec![
+        let mut tables = vec![
             inet,
             nat_ruleset(&rules.nat, &rules.dnat),
             bridge_guard_ruleset(&rules.ports),
-        ]
+        ];
+        if rules.dnat.iter().any(|f| f.guest.is_ipv6()) {
+            tables.push(nat6_ruleset(&rules.dnat));
+        }
+        tables
     }
 
     pub async fn apply(
@@ -114,6 +126,22 @@ impl Firewall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn hairpin_rules() -> GuestRules {
+        GuestRules {
+            dnat: vec![DnatRule {
+                udp: false,
+                host_addr: None,
+                host_port: 80,
+                guest: "fd00::5".parse().unwrap(),
+                guest_port: 80,
+                bridge: "ps100000".into(),
+                local: true,
+                hairpin: true,
+            }],
+            ..GuestRules::default()
+        }
+    }
 
     #[test]
     fn standalone_tables() {
@@ -132,6 +160,7 @@ mod tests {
         };
         let t = Firewall::tables(&rules, None);
         assert_eq!(t.len(), 3);
+        assert!(Firewall::tables(&hairpin_rules(), None).len() >= 4);
         let fwd = t[0].chains.iter().find(|c| c.name == "forward").unwrap();
         assert_eq!(fwd.rules.len(), 3);
         assert!(t[0].chains.iter().any(|c| c.name == "input"));

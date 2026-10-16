@@ -66,12 +66,29 @@ pub fn foreign_subnets(routes: &[Route]) -> Vec<Ipv4Net> {
 
 /// Turns IPv4 forwarding on, which masquerade needs.
 pub fn enable_forwarding() {
-    const PATH: &str = "/proc/sys/net/ipv4/ip_forward";
-    if std::fs::read_to_string(PATH).is_ok_and(|v| v.trim() == "1") {
+    write_sysctl("/proc/sys/net/ipv4/ip_forward", "IPv4 forwarding");
+}
+
+/// Turns IPv6 forwarding on, which IPv6 port forwards need.
+pub fn enable_forwarding6() {
+    write_sysctl("/proc/sys/net/ipv6/conf/all/forwarding", "IPv6 forwarding");
+}
+
+/// Lets `bridge` route packets that came from loopback, so a forward from
+/// `127.0.0.1` can reach a guest.
+pub fn enable_route_localnet(bridge: &str) {
+    write_sysctl(
+        &format!("/proc/sys/net/ipv4/conf/{bridge}/route_localnet"),
+        "route_localnet",
+    );
+}
+
+fn write_sysctl(path: &str, what: &str) {
+    if std::fs::read_to_string(path).is_ok_and(|v| v.trim() == "1") {
         return;
     }
-    if let Err(e) = std::fs::write(PATH, "1") {
-        tracing::warn!("enabling IPv4 forwarding: {e}");
+    if let Err(e) = std::fs::write(path, "1") {
+        tracing::warn!("enabling {what}: {e}");
     }
 }
 

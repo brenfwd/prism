@@ -276,6 +276,7 @@ impl Node {
                 .map_or_else(NicNetwork::user, |n| NicNetwork::Network {
                     network: n.id,
                     ipv4: None,
+                    ipv6: None,
                     egress: None,
                     vlan: None,
                     trunk: Vec::new(),

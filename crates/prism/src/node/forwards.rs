@@ -23,12 +23,14 @@ pub(super) fn check_nic_forwards(network: &NicNetwork) -> Result<()> {
     match network {
         NicNetwork::User { .. } => require_passt(forwards),
         NicNetwork::Network { .. } => {
-            if forwards
-                .iter()
-                .any(|f| f.host_addr.is_some_and(|a| a.is_ipv6()))
+            let has_v6 = matches!(network, NicNetwork::Network { ipv6: Some(_), .. });
+            if !has_v6
+                && forwards
+                    .iter()
+                    .any(|f| f.host_addr.is_some_and(|a| a.is_ipv6()))
             {
                 return Err(NodeError::Invalid(
-                    "network port forwards listen on IPv4 addresses".into(),
+                    "IPv6 port forwards need the NIC to have an IPv6 address".into(),
                 ));
             }
             Ok(())

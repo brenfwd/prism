@@ -131,11 +131,12 @@ fn data_value(m: &mut Msg, kind: u16, value: &[u8]) {
 
 /// A DNAT is three expressions: the address and port go into registers, then
 /// the `nat` expression reads them.
-fn dnat(m: &mut Msg, addr: std::net::Ipv4Addr, port: u16) {
-    for (reg, value) in [
-        (NFT_REG_1, &addr.octets()[..]),
-        (2, &port.to_be_bytes()[..]),
-    ] {
+fn dnat(m: &mut Msg, addr: std::net::IpAddr, port: u16) {
+    let (proto, octets) = match addr {
+        std::net::IpAddr::V4(a) => (2, a.octets().to_vec()), // NFPROTO_IPV4
+        std::net::IpAddr::V6(a) => (10, a.octets().to_vec()), // NFPROTO_IPV6
+    };
+    for (reg, value) in [(NFT_REG_1, &octets[..]), (2, &port.to_be_bytes()[..])] {
         m.begin(NFTA_LIST_ELEM)
             .str(NFTA_EXPR_NAME, "immediate")
             .begin(NFTA_EXPR_DATA);
@@ -147,7 +148,7 @@ fn dnat(m: &mut Msg, addr: std::net::Ipv4Addr, port: u16) {
         .str(NFTA_EXPR_NAME, "nat")
         .begin(NFTA_EXPR_DATA);
     m.be32(1, 1) // NFT_NAT_DNAT
-        .be32(2, 2) // NFPROTO_IPV4
+        .be32(2, proto)
         .be32(3, NFT_REG_1) // address min
         .be32(5, 2) // proto min
         .be32(7, 3) // MAP_IPS | PROTO_SPECIFIED

@@ -71,6 +71,10 @@ pub struct NodePlan {
     pub firewall: GuestRules,
     /// Some network masquerades here, so IPv4 forwarding must be on.
     pub forwarding: bool,
+    /// A forward targets an IPv6 guest, so IPv6 forwarding must be on.
+    pub forwarding6: bool,
+    /// Bridges that need `route_localnet`, for forwards from loopback.
+    pub local_bridges: Vec<String>,
 }
 
 /// Whether `vm` is (or is about to be) running on `node`.
@@ -132,6 +136,7 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                 let NicNetwork::Network {
                     network,
                     ipv4,
+                    ipv6,
                     egress,
                     forwards,
                     ..
@@ -163,21 +168,33 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                         ipv4: *ipv4,
                     });
                     // Forwards need this node to route into the network.
-                    if let (Some(ip), Some(_)) = (ipv4, gateway) {
+                    if gateway.is_some() {
                         for f in forwards {
-                            let host_addr = match f.host_addr {
-                                Some(IpAddr::V4(a)) => Some(a),
-                                Some(IpAddr::V6(_)) => continue,
-                                None => None,
-                            };
-                            out.forwarding = true;
-                            out.firewall.dnat.push(prism_net::nft::DnatRule {
-                                udp: f.proto == Proto::Udp,
-                                host_addr,
-                                host_port: f.host_port,
-                                guest: *ip,
-                                guest_port: f.guest_port,
-                            });
+                            let guests = [
+                                ipv4.map(IpAddr::V4)
+                                    .filter(|_| !matches!(f.host_addr, Some(IpAddr::V6(_)))),
+                                ipv6.map(IpAddr::V6)
+                                    .filter(|_| !matches!(f.host_addr, Some(IpAddr::V4(_)))),
+                            ];
+                            for guest in guests.into_iter().flatten() {
+                                out.forwarding |= guest.is_ipv4();
+                                out.forwarding6 |= guest.is_ipv6();
+                                // Loopback destinations are only routable to the
+                                // bridge with route_localnet.
+                                if f.local && f.host_addr.is_none() && guest.is_ipv4() {
+                                    out.local_bridges.push(sw.bridge.clone());
+                                }
+                                out.firewall.dnat.push(prism_net::nft::DnatRule {
+                                    udp: f.proto == Proto::Udp,
+                                    host_addr: f.host_addr,
+                                    host_port: f.host_port,
+                                    guest,
+                                    guest_port: f.guest_port,
+                                    bridge: sw.bridge.clone(),
+                                    local: f.local,
+                                    hairpin: f.hairpin,
+                                });
+                            }
                         }
                     }
                     if let (Some(ip), true) = (ipv4, net.dhcp) {
@@ -328,6 +345,7 @@ mod tests {
             network: NicNetwork::Network {
                 network: Uuid::from_u128(10),
                 ipv4: Some(Ipv4Addr::new(10, 88, 0, ip)),
+                ipv6: None,
                 egress,
                 vlan: None,
                 trunk: Vec::new(),
@@ -359,6 +377,8 @@ mod tests {
                 host_addr: None,
                 host_port: 2222,
                 guest_port: 22,
+                local: true,
+                hairpin: true,
             });
         }
         let mut doc = net();
@@ -366,7 +386,11 @@ mod tests {
         doc.gateways.insert(dst, Ipv4Addr::new(10, 88, 0, 2));
         let p = forward_plan(src, &doc, &guest);
         assert_eq!(p.firewall.dnat.len(), 1);
-        assert_eq!(p.firewall.dnat[0].guest, Ipv4Addr::new(10, 88, 0, 5));
+        assert_eq!(
+            p.firewall.dnat[0].guest,
+            IpAddr::from(Ipv4Addr::new(10, 88, 0, 5))
+        );
+        assert_eq!(p.local_bridges.len(), 1);
         assert!(p.forwarding);
         assert_eq!(forward_plan(dst, &doc, &guest).firewall.dnat.len(), 0);
         guest.migrating = Some(crate::spec::Migration { src, dst });

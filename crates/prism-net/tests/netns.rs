@@ -541,10 +541,13 @@ async fn nft_tables_match_cli() {
 
     let forwards = [DnatRule {
         udp: false,
-        host_addr: Some(Ipv4Addr::new(192, 0, 2, 7)),
+        host_addr: Some(Ipv4Addr::new(192, 0, 2, 7).into()),
         host_port: 18000,
-        guest: Ipv4Addr::new(10, 20, 0, 5),
+        guest: Ipv4Addr::new(10, 20, 0, 5).into(),
         guest_port: 8000,
+        bridge: "ps1".into(),
+        local: false,
+        hairpin: false,
     }];
     let nat = nat_ruleset(&nat_rules(), &forwards);
     assert_same_as_cli(&mine, &Ns::new("pnt-nft-r2"), &nat, NAT_TEXT);

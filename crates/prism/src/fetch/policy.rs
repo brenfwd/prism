@@ -363,6 +363,9 @@ mod tests {
         let ips = [ip("93.184.216.34"), ip("127.0.0.1")];
         let e = p.check_all("example.test", &ips).unwrap_err();
         assert!(e.contains("example.test resolves to 127.0.0.1"), "{e}");
+        assert!(e.contains("download.allow"), "{e}");
+        assert!(!e.contains("allow_private"), "{e}");
+        let e = p.check_all("example.test", &[ip("10.0.0.1")]).unwrap_err();
         assert!(e.contains("download.allow_private"), "{e}");
         assert!(p.check_all("example.test", &ips[..1]).is_ok());
         let e = p.check_all("127.0.0.1", &ips[1..]).unwrap_err();

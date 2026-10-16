@@ -97,6 +97,7 @@ fn forwards_follow_the_running_node() {
     doc.gateways.insert(dst, Ipv4Addr::new(10, 88, 0, 2));
     let p = forward_plan(src, &doc, &guest);
     assert_eq!(p.firewall.dnat.len(), 1);
+    assert_eq!(p.firewall.dnat[0].uplinks, vec!["eth0".to_string()]);
     assert_eq!(
         p.firewall.dnat[0].guest,
         IpAddr::from(Ipv4Addr::new(10, 88, 0, 5))

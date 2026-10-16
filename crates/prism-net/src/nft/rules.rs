@@ -222,8 +222,11 @@ pub struct DnatRule {
     pub guest: IpAddr,
     /// Port on the guest.
     pub guest_port: u16,
-    /// The guest's bridge, for hairpin forwarding.
+    /// The guest's bridge. Hairpin connections are accepted only from it.
     pub bridge: String,
+    /// The host's uplink interfaces for the guest's address family. External
+    /// connections are forwarded only when they arrive on one of these.
+    pub uplinks: Vec<String>,
     /// Also forward connections the host itself opens (to loopback, or to
     /// `host_addr`).
     pub local: bool,
@@ -235,6 +238,22 @@ pub struct DnatRule {
 }
 
 impl DnatRule {
+    /// The prerouting rules: one per uplink for external clients, plus one
+    /// for the guest's own bridge when hairpin is on. With no uplink, a
+    /// forward bound to an explicit host address is still matched on any
+    fn prerouting(&self, family: Family) -> Vec<Rule> {
+        let dnat = |r: Rule| self.matches(r).dnat(self.guest, self.guest_port);
+        let mut rules: Vec<Rule> = self
+            .uplinks
+            .iter()
+            .map(|u| dnat(Rule::new(family).iifname(u)))
+            .collect();
+        if self.hairpin {
+            rules.push(dnat(Rule::new(family).iifname(&self.bridge)));
+        }
+        rules
+    }
+
     fn matches(&self, rule: Rule) -> Rule {
         let rule = match self.host_addr {
             Some(IpAddr::V4(a)) => rule.ip_daddr_eq(a),
@@ -318,7 +337,9 @@ fn forward_chains<'t, 'a>(
         priority::DSTNAT,
     ));
     for f in forwards.clone() {
-        pre.push(f.matches(Rule::new(family)).dnat(f.guest, f.guest_port));
+        for rule in f.prerouting(family) {
+            pre.push(rule);
+        }
     }
     if forwards.clone().any(|f| f.local) {
         let out = t.chain(Chain::base(
@@ -472,4 +493,43 @@ pub fn bridge_guard_ruleset(ports: &[GuestPort]) -> Table {
         }
     }
     t
+}
+
+#[cfg(test)]
+mod dnat_tests {
+    use super::*;
+
+    fn rule(uplinks: &[&str], hairpin: bool) -> DnatRule {
+        DnatRule {
+            udp: false,
+            host_addr: None,
+            host_port: 80,
+            guest: "10.0.0.5".parse().unwrap(),
+            guest_port: 80,
+            bridge: "ps1".into(),
+            uplinks: uplinks.iter().map(|s| (*s).into()).collect(),
+            local: false,
+            hairpin,
+            snat6: None,
+        }
+    }
+
+    #[test]
+    fn one_prerouting_rule_per_uplink() {
+        assert_eq!(
+            rule(&["eth0", "eth1"], false).prerouting(Family::Ip).len(),
+            2
+        );
+    }
+
+    #[test]
+    fn no_uplink_and_no_hairpin_forwards_nothing() {
+        assert_eq!(rule(&[], false).prerouting(Family::Ip).len(), 0);
+    }
+
+    #[test]
+    fn hairpin_adds_a_rule_for_the_own_bridge_only() {
+        assert_eq!(rule(&["eth0"], true).prerouting(Family::Ip).len(), 2);
+        assert_eq!(rule(&[], true).prerouting(Family::Ip).len(), 1);
+    }
 }

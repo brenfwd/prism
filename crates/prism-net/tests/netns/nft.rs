@@ -87,7 +87,7 @@ const NAT_TEXT: &str = r#"
 table ip prism-nat {
     chain prerouting {
         type nat hook prerouting priority dstnat; policy accept;
-        ip daddr 192.0.2.7 tcp dport 18000 dnat to 10.20.0.5:8000
+        iifname "eth0" ip daddr 192.0.2.7 tcp dport 18000 dnat to 10.20.0.5:8000
     }
 
     chain postrouting {
@@ -148,6 +148,7 @@ async fn nft_tables_match_cli() {
         guest: Ipv4Addr::new(10, 20, 0, 5).into(),
         guest_port: 8000,
         bridge: "ps1".into(),
+        uplinks: vec!["eth0".into()],
         local: false,
         hairpin: false,
         snat6: None,

@@ -303,6 +303,13 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                                     guest,
                                     guest_port: f.guest_port,
                                     bridge: iface.clone(),
+                                    uplinks: if guest.is_ipv4() {
+                                        input.uplink.clone()
+                                    } else {
+                                        input.uplink6.clone()
+                                    }
+                                    .into_iter()
+                                    .collect(),
                                     local: f.local,
                                     hairpin: f.hairpin,
                                     snat6: Some(address6.map_or(gateway6, |a| a.addr())),

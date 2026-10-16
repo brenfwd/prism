@@ -92,7 +92,7 @@ A row has a protocol (TCP or UDP), a host port, a guest port and the options bel
 
 On a Prism network the node that runs the VM installs destination NAT rules, and the change applies at once. The NIC needs an address first (`the NIC has no address lease to forward to yet`). The options are these:
 
-- Host address limits the forward to one host address. Left empty, it answers on every address of the node.
+- Host address limits the forward to one host address. Left empty, it answers on every address of the node, but only for connections that arrive on the node's uplink. Connections from the mesh or from other networks are not forwarded.
 - From this host (`local`, on by default) makes the forward work for connections that start on the node itself. With no host address it listens on `127.0.0.1`, since the node's other addresses reach the guest through the forward already.
 - From other guests (`hairpin`, on by default) lets other machines on the same network reach the guest through the host address.
 

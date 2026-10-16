@@ -163,6 +163,7 @@ mod tests {
                 guest: "fd00::5".parse().unwrap(),
                 guest_port: 80,
                 bridge: "ps100000".into(),
+                uplinks: vec!["eth0".into()],
                 local: true,
                 hairpin: true,
                 snat6: None,

@@ -29,6 +29,7 @@ First release.
 
 - Crate metadata is filled in. `prism-libvirt`, `prism-iso` and `prism-net` can be published; the other crates have `publish = false`. The minimum Rust version is 1.89.
 
+- Port forwards on Prism networks match the incoming interface. External connections are forwarded only when they arrive on the node's uplink for the guest's address family, host-originated ones go through the output chain, and hairpin connections are accepted only from the guest's own bridge. Traffic from `wg-prism` and from other networks' bridges is not forwarded.
 ### Behaviour notes
 
 - Calls to libvirt time out after 600 seconds, except snapshot create, snapshot revert and the transfer step of a live migration. Those have no time limit. Cancelling the task aborts the libvirt job, and so does a job that shows no progress for `libvirt.job_stall_timeout_secs` (300 by default, 0 turns it off).

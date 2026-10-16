@@ -162,14 +162,18 @@ fn guard_ipv6(
     );
 }
 
-/// The `IPv6` rules of a trunk tap for VLAN-tagged frames: the same source check, neighbour
-/// advertisement claim check and redirect drop as [`guard_ipv6`]. Learning is untagged only.
-fn guard_ipv6_tagged(c: &mut Chain, tap: &str, addrs: &[Ipv6Addr], prefix: Ipv6Net) {
+/// The `IPv6` rules of a trunk tap for VLAN-tagged frames: the same claim checks, gateway
+/// checks, option checks, redirect drop and source check as [`guard_ipv6`]. Learning is
+/// untagged only.
+fn guard_ipv6_tagged(
+    c: &mut Chain,
+    port: &GuestPort,
+    addrs: &[Ipv6Addr],
+    prefix: Ipv6Net,
+    gateways: &[Ipv6Addr],
+) {
     let f = Family::Bridge;
-    let mut src = Rule::new(f).iifname(tap);
-    for a in addrs {
-        src = src.tagged_ip6_saddr_ne(*a);
-    }
+    let tap = port.tap.as_str();
     let mut claim = Rule::new(f)
         .iifname(tap)
         .tagged_icmpv6_type(ICMPV6_NEIGHBOR_ADVERT)
@@ -177,16 +181,64 @@ fn guard_ipv6_tagged(c: &mut Chain, tap: &str, addrs: &[Ipv6Addr], prefix: Ipv6N
     for a in addrs {
         claim = claim.tagged_icmpv6_target_ne(*a);
     }
+    c.push(claim.drop());
+    for g in gateways.iter().filter(|g| !addrs.contains(g)) {
+        c.push(
+            Rule::new(f)
+                .iifname(tap)
+                .tagged_icmpv6_type(ICMPV6_NEIGHBOR_ADVERT)
+                .tagged_icmpv6_target_eq(*g)
+                .drop(),
+        );
+        for kind in [ICMPV6_NEIGHBOR_SOLICIT, ICMPV6_NEIGHBOR_ADVERT] {
+            c.push(
+                Rule::new(f)
+                    .iifname(tap)
+                    .tagged_ip6_saddr_eq(*g)
+                    .tagged_icmpv6_type(kind)
+                    .drop(),
+            );
+        }
+    }
     c.push(
-        src.tagged_ip6_saddr_ne(Ipv6Addr::UNSPECIFIED)
-            .tagged_ip6_saddr_outside(LINK_LOCAL_V6)
-            .drop(),
-    )
-    .push(claim.drop())
-    .push(
+        Rule::new(f)
+            .iifname(tap)
+            .tagged_ip6_saddr_eq(Ipv6Addr::UNSPECIFIED)
+            .tagged_icmpv6_type(ICMPV6_NEIGHBOR_SOLICIT)
+            .accept(),
+    );
+    for (kind, option) in [
+        (ICMPV6_NEIGHBOR_SOLICIT, OPT_SOURCE_LLADDR),
+        (ICMPV6_NEIGHBOR_ADVERT, OPT_TARGET_LLADDR),
+    ] {
+        c.push(
+            Rule::new(f)
+                .iifname(tap)
+                .tagged_icmpv6_type(kind)
+                .tagged_icmpv6_first_option_ne(option)
+                .drop(),
+        )
+        .push(
+            Rule::new(f)
+                .iifname(tap)
+                .tagged_icmpv6_type(kind)
+                .tagged_icmpv6_lladdr_ne(option, port.mac)
+                .drop(),
+        );
+    }
+    c.push(
         Rule::new(f)
             .iifname(tap)
             .tagged_icmpv6_type(ICMPV6_REDIRECT)
+            .drop(),
+    );
+    let mut src = Rule::new(f).iifname(tap);
+    for a in addrs {
+        src = src.tagged_ip6_saddr_ne(*a);
+    }
+    c.push(
+        src.tagged_ip6_saddr_ne(Ipv6Addr::UNSPECIFIED)
+            .tagged_ip6_saddr_outside(LINK_LOCAL_V6)
             .drop(),
     );
 }
@@ -270,8 +322,13 @@ pub fn bridge_guard_ruleset(ports: &[GuestPort]) -> Table {
                     .tagged_icmpv6_type(ICMPV6_ROUTER_ADVERT)
                     .drop(),
             );
-            if let Ipv6Source::Only { addrs, prefix, .. } = &p.ipv6 {
-                guard_ipv6_tagged(c, tap, addrs, *prefix);
+            if let Ipv6Source::Only {
+                addrs,
+                prefix,
+                gateways,
+            } = &p.ipv6
+            {
+                guard_ipv6_tagged(c, p, addrs, *prefix, gateways);
             }
         } else {
             c.push(Rule::new(f).iifname(tap).ether_type(ETH_P_8021Q).drop());
@@ -323,8 +380,8 @@ mod tests {
 
     #[test]
     fn trunk_gets_tagged_ipv4_and_ipv6_rules() {
-        // base 7 (no 8021q drop) + ipv4 tagged 5 + ipv6 untagged 13 + ipv6 tagged 3
-        assert_eq!(rules(&port(true, only(&["fd00:1::1"]))), 7 + 5 + 13 + 3);
+        // base 7 (no 8021q drop) + ipv4 tagged 5 + ipv6 untagged 13 + ipv6 tagged 11
+        assert_eq!(rules(&port(true, only(&["fd00:1::1"]))), 7 + 5 + 13 + 11);
         assert_eq!(rules(&port(true, Ipv6Source::Any)), 7 + 5);
     }
 

@@ -243,6 +243,34 @@ impl Rule {
             .cmp(CmpOp::Neq, addr.octets().to_vec())
     }
 
+    /// The target of a tagged neighbour message is `addr`.
+    pub fn tagged_icmpv6_target_eq(self, addr: Ipv6Addr) -> Self {
+        self.payload(PayloadBase::Link, 18 + 40 + 8, 16)
+            .cmp(CmpOp::Eq, addr.octets().to_vec())
+    }
+
+    /// `ip6 saddr <addr>` for a VLAN-tagged frame.
+    pub fn tagged_ip6_saddr_eq(self, addr: Ipv6Addr) -> Self {
+        self.tagged_ipv6()
+            .payload(PayloadBase::Link, 18 + 8, 16)
+            .cmp(CmpOp::Eq, addr.octets().to_vec())
+    }
+
+    /// A tagged neighbour message whose first option is not of type `option`.
+    pub fn tagged_icmpv6_first_option_ne(self, option: u8) -> Self {
+        self.payload(PayloadBase::Link, 18 + 40 + 24, 1)
+            .cmp(CmpOp::Neq, vec![option])
+    }
+
+    /// A tagged neighbour message whose first option is a link-layer address option of type
+    /// `option` naming a MAC other than `mac`.
+    pub fn tagged_icmpv6_lladdr_ne(self, option: u8, mac: MacAddr) -> Self {
+        self.payload(PayloadBase::Link, 18 + 40 + 24, 1)
+            .cmp(CmpOp::Eq, vec![option])
+            .payload(PayloadBase::Link, 18 + 40 + 26, 6)
+            .cmp(CmpOp::Neq, mac.0.to_vec())
+    }
+
     /// `udp sport <port>` for a VLAN-tagged IPv6 frame without extension headers.
     pub fn tagged_udp6_sport_eq(self, port: u16) -> Self {
         self.tagged_ip6_l4(IPPROTO_UDP)

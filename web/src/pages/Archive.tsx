@@ -37,7 +37,10 @@ function NewPool({ existing }: { existing: string[] }) {
   const [replicas, setReplicas] = useState("2");
   const create = useMutation({
     mutationFn: () => api.createArchivePool(name.trim(), Number(replicas)),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["archive-pools"] }),
+    onSuccess: () => {
+      setOpen(false);
+      void qc.invalidateQueries({ queryKey: ["archive-pools"] });
+    },
     onError: (e) => toast({ tone: "error", title: "Could not create pool", body: humanError(e) }),
   });
   if (existing.length > 0 && !open) {
@@ -61,7 +64,7 @@ function PoolCard({ pool }: { pool: ArchivePool }) {
   const replicas = useMutation({ mutationFn: (n: number) => api.setArchiveReplicas(pool.name, n), onSuccess: refresh, onError: err });
   const task = useMutation({
     mutationFn: (a: "repair" | "scrub" | "rebalance") => api.archiveAction(pool.name, a),
-    onSuccess: (_t, a) => toast({ tone: "info", title: a === "repair" ? "Repair started" : "Scrub started", body: "Progress shows in the task tray." }),
+    onSuccess: (_t, a) => toast({ tone: "info", title: { repair: "Repair started", scrub: "Scrub started", rebalance: "Rebalance started" }[a], body: "Progress shows in the task tray." }),
     onError: err,
   });
   return (

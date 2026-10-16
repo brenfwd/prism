@@ -3,7 +3,8 @@ import { useTasks, useVms } from "../lib/hooks";
 import { uploads } from "../lib/tasks";
 import { useStore } from "../lib/store";
 import { TaskRow, UploadRow } from "../components/TaskTray";
-import { Card, EmptyState, Segmented } from "../components/ui";
+import { humanError } from "../api";
+import { Callout, Card, EmptyState, Segmented } from "../components/ui";
 
 type Filter = "all" | "running" | "failed";
 
@@ -27,6 +28,7 @@ export function TasksPage() {
           <div className="-my-2 divide-y divide-zinc-100 dark:divide-zinc-800">{ups.map((u) => <UploadRow key={u.id} u={u} />)}</div>
         </Card>
       )}
+      {tasks.isError && <Callout tone="warning" title="Could not load tasks" className="mb-4">{humanError(tasks.error)}</Callout>}
       <Card padded={false}>
         {tasks.isLoading ? (
           <div className="space-y-2 p-5">{[0, 1, 2].map((i) => <div key={i} className="h-10 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800/60" />)}</div>

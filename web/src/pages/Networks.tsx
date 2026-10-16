@@ -7,7 +7,7 @@ import { toast } from "../lib/toast";
 import { confirm } from "../components/Confirm";
 import { NetworkModal } from "./networks/NetworkModal";
 import { VlanSubnetList } from "./networks/VlanSubnets";
-import { Badge, Button, Card, EmptyState, IconButton } from "../components/ui";
+import { Badge, Button, Callout, Card, EmptyState, IconButton } from "../components/ui";
 
 export function NetworksPage() {
   const nets = useNetworks();
@@ -30,7 +30,8 @@ export function NetworksPage() {
         </div>
         {add}
       </div>
-      {list.length === 0 ? (
+      {nets.isError && <Callout tone="warning" title="Could not load networks" className="mb-4">{humanError(nets.error)}</Callout>}
+      {list.length === 0 && !nets.isError ? (
         <Card>
           <EmptyState icon="network" title="No networks yet" actions={add}>
             Create one and new machines can join it with an address assigned automatically.
@@ -70,7 +71,7 @@ function NetworkCard({ net, vms, onRename }: { net: NetworkInfo; vms: Vm[]; onRe
         <IconButton icon="pencil" label="Edit network" onClick={onRename} />
         <IconButton
           icon="trash"
-          label="Delete network"
+          label={members.length > 0 ? "Move its machines off this network to delete it" : "Delete network"}
           disabled={members.length > 0}
           onClick={async () => {
             if (await confirm({ title: `Delete ${net.name}?`, body: "Its subnet is released.", confirmLabel: "Delete", danger: true })) del.mutate();

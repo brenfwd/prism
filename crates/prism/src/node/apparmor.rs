@@ -63,16 +63,28 @@ pub(super) fn allow_pool_dirs(dirs: &[std::path::PathBuf]) {
     }
 }
 
+/// Whether `path` can go into a profile rule unquoted. Spaces, commas, `#`
+/// and `@` would change how the root-run parser reads the rule.
+fn safe_rule_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '+' | '-' | '/'))
+}
+
 /// Rewrites Prism's block of `local`; whether the file changed.
 fn install_pools(local: &Path, dirs: &[std::path::PathBuf]) -> std::io::Result<bool> {
     let cur = std::fs::read_to_string(local).unwrap_or_default();
     let mut block = String::from(BEGIN);
     let mut dirs: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
     dirs.sort();
-    for d in dirs
-        .iter()
-        .filter(|d| !d.contains(['{', '}', '*', '?', '[', ']', '"', '\n']))
-    {
+    for d in &dirs {
+        if !safe_rule_path(d) {
+            tracing::warn!(
+                "no AppArmor rule for pool directory {d:?}: it has characters outside A-Z, a-z, 0-9 and . _ + - /"
+            );
+            continue;
+        }
         let d = d.trim_end_matches('/');
         let _ = writeln!(block, "{d}/ r,\n{d}/** r,");
     }

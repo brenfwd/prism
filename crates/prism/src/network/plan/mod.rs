@@ -12,6 +12,8 @@ use prism_net::link::VxlanFdb;
 use prism_net::ra::RaConfig;
 use uuid::Uuid;
 
+mod learned;
+
 use super::firewall::{GuestRules, Routed};
 use super::{NetworkDoc, NetworkKind, VLAN_OVERHEAD, ipam, switch_mtu};
 use crate::cluster::model::MemberDoc;
@@ -39,6 +41,8 @@ pub struct PlanInput<'a> {
     pub uplink: Option<String>,
     /// This node's IPv6 default-route interface, for NAT66.
     pub uplink6: Option<String>,
+    /// IPv6 addresses guests were seen using, by NIC MAC (see `GuestAddrs`).
+    pub learned: &'a HashMap<MacAddr, Vec<Ipv6Addr>>,
 }
 
 /// One network on this node.
@@ -215,6 +219,7 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
             hosts: HashMap::new(),
         };
         let gateway6 = link_local_of(input.node);
+        let reserved6 = learned::reserved(net, input.node, input.vms, input.members);
         for vm in input.vms {
             for nic in &vm.nics {
                 let NicNetwork::Network {
@@ -235,7 +240,14 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                 let Ok(mac) = nic.mac.parse::<MacAddr>() else {
                     continue;
                 };
-                let v6 = net.guest_v6(*ipv6, &nic.mac);
+                let eui = net.guest_v6(*ipv6, &nic.mac);
+                let learned = learned::for_nic(net, eui, input.learned.get(&mac), &reserved6);
+                let v6s: Vec<Ipv6Addr> = if learned.is_empty() {
+                    eui.into_iter().collect()
+                } else {
+                    learned
+                };
+                let v6 = v6s.first().copied();
                 let segment = net.segment(*vlan);
                 let iface = net.interface_of(segment);
                 let nic_gateway = net.gateways_of(segment).get(&input.node).copied();
@@ -251,11 +263,11 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                             .push(IpAddr::V4(*ip));
                     }
                 }
-                if let Some(ip) = v6 {
+                for ip in &v6s {
                     sw.hosts
                         .entry(vm.name.clone())
                         .or_default()
-                        .push(IpAddr::V6(ip));
+                        .push(IpAddr::V6(*ip));
                 }
                 if runs_on(vm, input.node) {
                     if !sw.vlans.is_empty()
@@ -267,8 +279,11 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                         tap: tap_name(nic.id),
                         mac,
                         ipv4: *ipv4,
-                        ipv6: match (net.subnet6, v6) {
-                            (Some(prefix), Some(addr)) => Ipv6Source::Only { addr, prefix },
+                        ipv6: match net.subnet6 {
+                            Some(prefix) if !v6s.is_empty() => Ipv6Source::Only {
+                                addrs: learned::allowed(&v6s, eui),
+                                prefix,
+                            },
                             _ => Ipv6Source::Any,
                         },
                         trunk: matches!(nic.network.port_vlans(), Some(PortVlans::Trunk { .. })),

@@ -75,6 +75,7 @@ fn forward_plan(node: Uuid, net: &NetworkDoc, vm: &VmSpec) -> NodePlan {
         wg_mtu: None,
         uplink: Some("eth0".into()),
         uplink6: None,
+        learned: &HashMap::new(),
     })
 }
 
@@ -121,6 +122,7 @@ fn standalone() {
         wg_mtu: None,
         uplink: Some("eth0".into()),
         uplink6: None,
+        learned: &HashMap::new(),
     });
     assert!(p.forwarding);
     let sw = &p.switches[0];
@@ -159,6 +161,7 @@ fn clustered_fdb_and_egress() {
         wg_mtu: Some(1420),
         uplink: None,
         uplink6: None,
+        learned: &HashMap::new(),
     });
     let sw = &p.switches[0];
     assert_eq!(sw.mtu, 1350);
@@ -199,6 +202,7 @@ fn isolated_has_no_router() {
         wg_mtu: None,
         uplink: Some("eth0".into()),
         uplink6: None,
+        learned: &HashMap::new(),
     });
     assert_eq!(p.firewall.nat, vec![]);
     assert!(!p.forwarding);
@@ -221,6 +225,7 @@ fn plan6(node: Uuid, net: &NetworkDoc, vms: &[VmSpec], uplink6: Option<&str>) ->
         wg_mtu: None,
         uplink: Some("eth0".into()),
         uplink6: uplink6.map(Into::into),
+        learned: &HashMap::new(),
     })
 }
 
@@ -246,7 +251,7 @@ fn ipv6_networks_advertise_and_nat() {
     assert_eq!(
         p.firewall.ports[0].ipv6,
         Ipv6Source::Only {
-            addr,
+            addrs: vec![addr],
             prefix: "fd01:203:405:7::/64".parse().unwrap()
         }
     );
@@ -334,6 +339,7 @@ fn vlan_subnets_get_their_own_gateway_scope_and_rules() {
         wg_mtu: None,
         uplink: Some("eth0".into()),
         uplink6: None,
+        learned: &HashMap::new(),
     });
     let sw = &p.switches[0];
     assert_eq!(sw.vlans.iter().copied().collect::<Vec<_>>(), vec![20]);
@@ -377,6 +383,97 @@ fn vlan_subnets_get_their_own_gateway_scope_and_rules() {
         wg_mtu: None,
         uplink: Some("eth0".into()),
         uplink6: None,
+        learned: &HashMap::new(),
     });
     assert_eq!(other.switches[0].vlan_nets[0].address, None);
+}
+
+fn plan_learned(vm: &VmSpec, learned: &[(&str, &[&str])], members: &[MemberDoc]) -> NodePlan {
+    let learned: HashMap<MacAddr, Vec<Ipv6Addr>> = learned
+        .iter()
+        .map(|(m, a)| {
+            (
+                m.parse().unwrap(),
+                a.iter().map(|x| x.parse().unwrap()).collect(),
+            )
+        })
+        .collect();
+    let mut guest = vm.clone();
+    if let NicNetwork::Network { forwards, .. } = &mut guest.nics[0].network {
+        forwards.push(crate::spec::PortForward {
+            proto: Proto::Tcp,
+            host_addr: Some("2001:db8::1".parse().unwrap()),
+            host_port: 8080,
+            guest_port: 80,
+            local: false,
+            hairpin: false,
+        });
+    }
+    plan(&PlanInput {
+        node: A,
+        networks: &[v6_net()],
+        vms: &[guest],
+        members,
+        wg_mtu: None,
+        uplink: Some("eth0".into()),
+        uplink6: Some("eth1".into()),
+        learned: &learned,
+    })
+}
+
+#[test]
+fn learned_addresses_replace_the_slaac_one_in_dns_and_forwards() {
+    let vm = vm("web", A, "52:54:00:00:00:01", 3, None);
+    let stable: Ipv6Addr = "fd01:203:405:7:1111:2222:3333:4444".parse().unwrap();
+    let slaac: Ipv6Addr = "fd01:203:405:7:5054:ff:fe00:1".parse().unwrap();
+    let p = plan_learned(
+        &vm,
+        &[("52:54:00:00:00:01", &["fd01:203:405:7:1111:2222:3333:4444"])],
+        &[],
+    );
+    let hosts = &p.switches[0].hosts["web"];
+    assert!(hosts.contains(&IpAddr::V6(stable)));
+    assert!(!hosts.contains(&IpAddr::V6(slaac)));
+    assert_eq!(p.firewall.dnat[0].guest, IpAddr::V6(stable));
+    // The firewall still lets the guest fall back to its SLAAC address.
+    let Ipv6Source::Only { addrs, .. } = &p.firewall.ports[0].ipv6 else {
+        panic!("expected a source check");
+    };
+    assert_eq!(addrs, &vec![stable, slaac]);
+}
+
+#[test]
+fn learned_addresses_outside_the_prefix_or_reserved_are_ignored() {
+    let vm = vm("web", A, "52:54:00:00:00:01", 3, None);
+    let node_addr = ipam::node_addr6("fd01:203:405:7::/64".parse().unwrap(), A);
+    let node_addr = node_addr.to_string();
+    let p = plan_learned(
+        &vm,
+        &[("52:54:00:00:00:01", &["2001:db8::5", node_addr.as_str()])],
+        &[],
+    );
+    // Nothing usable: the SLAAC address stays.
+    let slaac: Ipv6Addr = "fd01:203:405:7:5054:ff:fe00:1".parse().unwrap();
+    assert_eq!(
+        p.firewall.ports[0].ipv6,
+        Ipv6Source::Only {
+            addrs: vec![slaac],
+            prefix: "fd01:203:405:7::/64".parse().unwrap()
+        }
+    );
+    assert_eq!(p.firewall.dnat[0].guest, IpAddr::V6(slaac));
+}
+
+#[test]
+fn a_guest_using_its_slaac_address_keeps_one_entry() {
+    let vm = vm("web", A, "52:54:00:00:00:01", 3, None);
+    let p = plan_learned(
+        &vm,
+        &[("52:54:00:00:00:01", &["fd01:203:405:7:5054:ff:fe00:1"])],
+        &[],
+    );
+    let Ipv6Source::Only { addrs, .. } = &p.firewall.ports[0].ipv6 else {
+        panic!("expected a source check");
+    };
+    assert_eq!(addrs.len(), 1);
 }

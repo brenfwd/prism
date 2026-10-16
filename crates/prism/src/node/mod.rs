@@ -141,6 +141,8 @@ pub struct Node {
     remote_runtime: Mutex<HashMap<Uuid, VmRuntime>>,
     /// Other nodes' status, from their event streams.
     remote_nodes: Mutex<HashMap<Uuid, NodeView>>,
+    /// IPv6 addresses guests use, shared with the network agent.
+    guest_addrs: Arc<crate::network::GuestAddrs>,
 }
 
 pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -197,6 +199,7 @@ impl Node {
             cluster: std::sync::OnceLock::new(),
             remote_runtime: Mutex::default(),
             remote_nodes: Mutex::default(),
+            guest_addrs: Arc::default(),
         })
     }
 
@@ -239,9 +242,15 @@ impl Node {
         tokio::spawn(Arc::clone(self).archive_health_loop());
         tokio::spawn(Arc::clone(self).iso_cache_loop());
         tokio::spawn(
-            crate::network::Agent::new(self.id, self.state.clone(), self.domain_events.clone())
-                .run(),
+            crate::network::Agent::new(
+                self.id,
+                self.state.clone(),
+                self.domain_events.clone(),
+                Arc::clone(&self.guest_addrs),
+            )
+            .run(),
         );
+        tokio::spawn(Arc::clone(self).guest_addr_loop());
         tokio::spawn(Arc::clone(self).seed_default_network());
     }
 

@@ -144,7 +144,7 @@ fn guard_ipv6_tagged(c: &mut Chain, tap: &str, addrs: &[Ipv6Addr], prefix: Ipv6N
 
 /// The `bridge prism` table: anti-spoofing per guest tap (ether source, IPv4 and ARP source,
 /// `0.0.0.0` allowed for DHCPDISCOVER, `IPv6` source and neighbour messages on networks
-/// with `IPv6`), no rogue DHCPv4 or DHCPv6 servers or router advertisements, no VLAN-tagged
+/// with `IPv6`), no rogue DHCP servers (v4 or v6) or router advertisements, no VLAN-tagged
 /// ingress except on trunks, whose tagged frames get the same checks.
 pub fn bridge_guard_ruleset(ports: &[GuestPort]) -> Table {
     let f = Family::Bridge;

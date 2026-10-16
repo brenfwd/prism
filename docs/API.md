@@ -202,7 +202,7 @@ A client that reconnects with `Last-Event-ID` receives the events it missed when
 
 `POST /networks` takes `ipv6` (default `true`) and `nat66` (default `true` on a NAT network). With IPv6 on, the node picks a free ULA /64 and the network shows it as `subnet6`. `PATCH /networks/{id}` takes the same two fields: `ipv6: true` picks a prefix for a network that has none, and `ipv6: false` removes it. Networks created before IPv6 support have no `subnet6` until someone turns it on.
 
-Every VM in `GET /vms` and `GET /vms/{id}` has `nic_ipv6`, a map from NIC ID to the SLAAC address that NIC forms on its network. It is absent for NICs on networks without IPv6. A port forward with an IPv6 `host_addr` targets that address.
+Every VM in `GET /vms` and `GET /vms/{id}` has `nic_ipv6`, a map from NIC ID to the EUI-64 SLAAC address that NIC forms on its network. A guest that uses another address is reachable under it by DNS name and by IPv6 port forward; `nic_ipv6` keeps the EUI-64 one. It is absent for NICs on networks without IPv6. A port forward with an IPv6 `host_addr` targets the NIC's learned address, or this one when none was learned.
 
 ## VLAN subnets
 

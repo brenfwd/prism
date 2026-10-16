@@ -1,7 +1,7 @@
 //! The nftables tables that guest networks need, around the mesh boundary
 //! rules `wg.rs` installs.
 
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prism_net::nft::{
     BoundaryConfig, Chain, ChainType, CtState, DnatRule, Family, GuestPort, Hook, Nat6Rule,
     NatRule, Nft, Rule, SwitchServices, Table, boundary_ruleset, bridge_guard_ruleset,
@@ -38,7 +38,7 @@ pub struct Routed {
     /// isolated one.
     pub out: Vec<String>,
     /// Blocked destinations this bridge may still reach.
-    pub allow: Vec<Ipv4Net>,
+    pub allow: Vec<IpNet>,
 }
 
 /// The mesh, when this node is in a cluster.
@@ -99,12 +99,11 @@ impl Firewall {
             }
             for Routed { bridge, out, allow } in &rules.routed {
                 for net in allow {
-                    fwd.push(
-                        Rule::new(Family::Inet)
-                            .iifname(bridge)
-                            .ip_daddr(*net)
-                            .accept(),
-                    );
+                    let rule = Rule::new(Family::Inet).iifname(bridge);
+                    fwd.push(match net {
+                        IpNet::V4(n) => rule.ip_daddr(*n).accept(),
+                        IpNet::V6(n) => rule.ip6_daddr(*n).accept(),
+                    });
                 }
                 for net in &rules.blocked {
                     fwd.push(

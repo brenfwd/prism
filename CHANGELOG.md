@@ -22,6 +22,9 @@ First release.
 - `prism init`, `serve`, `doctor`, `cluster`, `join` and `leave` subcommands.
 - An OpenAPI document served by the API, with `docs/API.md`.
 - A user guide in `docs/guide`, the design document in `docs/DESIGN.md`, a systemd unit and a commented `prism.toml` example in `contrib/`.
+- Guests on IPv6 networks may use stable-privacy, temporary or static addresses. The node learns them from the bridge's neighbour table and the guest agent, uses them for AAAA records and IPv6 port forwards, and falls back to the EUI-64 address.
+- `allow_prefixes` takes IPv6 prefixes next to IPv4 ones.
+- Trunk NICs get IPv6 source, neighbour advertisement and redirect checks on VLAN-tagged frames, and the bridge drops DHCPv6 server replies and, on trunks, tagged router advertisements.
 - `prism --version` prints the short git hash and build date.
 - `cargo xtask` runs a testbed of nested VMs for integration testing.
 

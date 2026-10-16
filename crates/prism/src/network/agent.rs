@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ipnet::{IpNet, Ipv6Net};
 use prism_libvirt::DomainEvent;
@@ -13,6 +13,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use super::firewall::{Firewall, MeshBoundary};
+use super::learned::GuestAddrs;
 use super::plan::{NodePlan, PlanInput, SwitchPlan, plan};
 use super::services::Services;
 use super::{host, vlan_interface_vni, vni_of};
@@ -31,14 +32,22 @@ pub struct Agent {
     state: State,
     firewall: Firewall,
     services: tokio::sync::Mutex<Services>,
+    /// Guest IPv6 addresses seen on the bridges and reported by guest agents.
+    addrs: Arc<GuestAddrs>,
     /// Libvirt domain events: a VM starting creates its tap, which needs
     /// its VLANs applied right away.
     domains: broadcast::Sender<DomainEvent>,
 }
 
 impl Agent {
-    pub fn new(node: Uuid, state: State, domains: broadcast::Sender<DomainEvent>) -> Arc<Self> {
+    pub fn new(
+        node: Uuid,
+        state: State,
+        domains: broadcast::Sender<DomainEvent>,
+        addrs: Arc<GuestAddrs>,
+    ) -> Arc<Self> {
         Arc::new(Self {
+            addrs,
             node,
             state,
             firewall: Firewall,
@@ -107,6 +116,8 @@ impl Agent {
         let clustered = !members.is_empty() && cluster.is_some();
         let routes = host::routes();
         let uplink6 = host::uplink6_of(&host::routes6());
+        self.observe_neighbours(nl, &networks).await;
+        let learned = self.addrs.snapshot(Instant::now());
         let p = plan(&PlanInput {
             node,
             networks: &networks,
@@ -115,6 +126,7 @@ impl Agent {
             wg_mtu: cluster.as_ref().filter(|_| clustered).map(|c| c.wg_mtu),
             uplink: host::uplink_of(&routes),
             uplink6: uplink6.clone(),
+            learned: &learned,
         });
         if p.forwarding {
             host::enable_forwarding();
@@ -149,6 +161,25 @@ impl Agent {
             Ok(())
         } else {
             anyhow::bail!("{}", errors.join("; "))
+        }
+    }
+}
+
+impl Agent {
+    /// Feeds the IPv6 neighbour table of every IPv6 bridge into the learned addresses.
+    async fn observe_neighbours(&self, nl: &Netlink, networks: &[super::NetworkDoc]) {
+        for net in networks {
+            let Some(prefix) = net.subnet6 else { continue };
+            match nl.neighbours6(&net.bridge()).await {
+                Ok(entries) => {
+                    let entries: Vec<_> = entries
+                        .into_iter()
+                        .filter(|(a, _)| prefix.contains(a))
+                        .collect();
+                    self.addrs.observe(&entries, Instant::now());
+                }
+                Err(e) => tracing::debug!(bridge = %net.bridge(), "neighbours: {e}"),
+            }
         }
     }
 }

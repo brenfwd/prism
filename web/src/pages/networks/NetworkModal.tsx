@@ -15,7 +15,7 @@ export function NetworkModal({ existing, onClose }: { existing?: NetworkInfo; on
   const [subnet, setSubnet] = useState(existing?.subnet ?? "");
   const [allowText, setAllowText] = useState((existing?.allow_prefixes ?? []).join(", "));
   const allow = allowText.split(/[\s,]+/).filter(Boolean);
-  const allowOk = allow.every((a) => /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(a));
+  const allowOk = allow.every((a) => /^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(a) || /^[0-9a-fA-F:]*:[0-9a-fA-F:]*\/\d{1,3}$/.test(a));
   const [check, setCheck] = useState<NetworkCheck | null>(null);
 
   // Live validation, debounced, against the other networks and the host's own routes.
@@ -160,8 +160,8 @@ export function NetworkModal({ existing, onClose }: { existing?: NetworkInfo; on
           <Field
             label="Allowed destinations"
             htmlFor="net-allow"
-            hint="Optional. Machines normally cannot reach the tailnet (100.64.0.0/10) or the cluster's own addresses. List prefixes, like 100.64.2.0/24, to let them through."
-            error={allowOk ? undefined : "Write prefixes like 100.64.2.0/24, separated by commas."}
+            hint="Optional. Machines normally cannot reach the tailnet (100.64.0.0/10, fd7a:115c:a1e0::/48) or the cluster's own addresses. List IPv4 or IPv6 prefixes, like 100.64.2.0/24 or fd7a:115c:a1e0:ab12::/64, to let them through."
+            error={allowOk ? undefined : "Write prefixes like 100.64.2.0/24 or fd7a:115c:a1e0:ab12::/64, separated by commas."}
           >
             <Input id="net-allow" className="font-mono" value={allowText} aria-invalid={!allowOk} placeholder="none" onChange={(e) => setAllowText(e.target.value)} />
           </Field>

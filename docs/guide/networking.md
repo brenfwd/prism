@@ -45,14 +45,15 @@ curl -X PATCH http://127.0.0.1:8080/api/v1/networks/default \
 
 `{"egress": null}` returns the network to one egress per node. A NIC can carry its own `egress` node, which wins over the network's.
 
-Guests never reach these destinations through the host: the tailnet range `100.64.0.0/10`, `fd7a:115c:a1e0::/48`, the cluster's WireGuard mesh and the addresses the cluster members advertise. The Allowed destinations field of the network (`allow_prefixes`) opens chosen IPv4 prefixes inside those ranges, such as `100.64.2.0/24`. A network takes at most 16 prefixes, each with no host bits set, and `/0` is refused. Isolated networks take none.
+Guests never reach these destinations through the host: the tailnet range `100.64.0.0/10`, `fd7a:115c:a1e0::/48`, the cluster's WireGuard mesh and the addresses the cluster members advertise. The Allowed destinations field of the network (`allow_prefixes`) opens chosen IPv4 or IPv6 prefixes inside those ranges, such as `100.64.2.0/24` or `fd7a:115c:a1e0:ab12::/64`. A network takes at most 16 prefixes, each with no host bits set, and `/0` is refused. Isolated networks take none.
 
 ## IPv6
 
 A network gets an IPv6 prefix by default: a random `/64` inside `fc00::/7` that no other network, the cluster mesh or a host route uses. The network card shows it next to the IPv4 subnet.
 
 - Guests configure their address themselves (SLAAC) from router advertisements that each node sends every 120 seconds. The address comes from the NIC's MAC address in the modified EUI-64 form, which Linux uses by default. `GET /vms` lists it as `nic_ipv6`, a map from NIC ID to address.
-- A guest that picks another interface identifier, as NetworkManager does with stable-privacy addresses, cannot send IPv6, because the bridge only accepts the NIC's own address, a link-local address or `::` as the source.
+- A guest may use other addresses in the prefix, such as the stable-privacy and temporary addresses NetworkManager and most desktop systems form. The node learns them from the IPv6 neighbour table of the bridge (every address the guest sent neighbour discovery from) and, when the guest agent runs, from the addresses the agent reports. A learned address is used for the AAAA records and for IPv6 port forwards in place of the EUI-64 one. The bridge accepts as source the learned addresses, the EUI-64 address, a link-local address and `::`. A guest's first packets from a new address can be dropped for up to 15 seconds, until the next reconcile pass. A NIC keeps at most 8 learned addresses, and an address stays known for 30 minutes after it was last seen. An address that is another NIC's EUI-64 address or a node's address on the bridge is never learned. Learned addresses live on the node that runs the VM. Other nodes answer with the EUI-64 address unless their own neighbour table has seen the guest.
+- Guests cannot send router advertisements or DHCPv6 server replies (UDP source port 547) into the network, and neighbour messages that name another MAC address in their link-layer option are dropped. Trunk NICs get the same IPv6 checks on VLAN-tagged frames as on untagged ones, apart from learning, which uses untagged frames only. The checks read the first header after the IPv6 header, so a frame with extension headers in front of the ICMPv6 or UDP header is not matched.
 - NAT66 is on for Internet access networks. It rewrites IPv6 traffic from the private prefix to the host's address, so guests reach IPv6 sites. The host needs an IPv6 default route. The IPv6 internet access switch in the network form turns it off.
 - The DNS zone gets AAAA records, and the node answers DNS on its IPv6 address as well.
 
@@ -96,7 +97,7 @@ On a Prism network the node that runs the VM installs destination NAT rules, and
 - From this host (`local`, on by default) makes the forward work for connections that start on the node itself. With no host address it listens on `127.0.0.1`, since the node's other addresses reach the guest through the forward already.
 - From other guests (`hairpin`, on by default) lets other machines on the same network reach the guest through the host address.
 
-A forward whose host address is IPv6 targets the NIC's SLAAC address. A forward without an address, or with an IPv4 one, targets the IPv4 lease. IPv6 forwards need IPv6 on the network (`IPv6 port forwards need an IPv6 network: turn on IPv6 for the network`). There is no loopback forward for IPv6.
+A forward whose host address is IPv6 targets the NIC's learned IPv6 address, or its EUI-64 address when none was learned. A forward without an address, or with an IPv4 one, targets the IPv4 lease. IPv6 forwards need IPv6 on the network (`IPv6 port forwards need an IPv6 network: turn on IPv6 for the network`). There is no loopback forward for IPv6.
 
 On a user-mode NIC the forward is implemented by `passt`, which must be installed, and the change applies at the next start of the VM. The form shows All interfaces instead of a host address. Without the option the forward listens on loopback. When `passt` is missing the error is `passt port forwarding is unavailable: <detail>. <hint> Forwards on a Prism network need no passt.`
 

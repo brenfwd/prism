@@ -10,6 +10,7 @@ pub mod agent;
 pub mod firewall;
 pub mod host;
 pub mod ipam;
+pub mod learned;
 pub mod plan;
 mod services;
 mod vlan;
@@ -17,12 +18,13 @@ mod vlan;
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
-use ipnet::{Ipv4Net, Ipv6Net};
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 use prism_net::MacAddr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use agent::Agent;
+pub use learned::GuestAddrs;
 pub use vlan::{AddVlanSubnet, VLAN_RANGE, VlanSubnet, valid_vlan_subnets, vlan_interface_vni};
 
 /// Collection of [`NetworkDoc`]s.
@@ -78,7 +80,7 @@ pub struct NetworkDoc {
     /// Destinations inside the blocked ranges (tailnet, member addresses)
     /// that guests on this NAT network may still reach.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub allow_prefixes: Vec<Ipv4Net>,
+    pub allow_prefixes: Vec<IpNet>,
     /// The ULA `/64` guests autoconfigure from (SLAAC); `None` while IPv6 is
     /// off, which is how networks from before IPv6 support stay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -239,7 +241,7 @@ pub struct CreateNetwork {
     pub egress: Option<Uuid>,
     pub dhcp: Option<bool>,
     #[serde(default)]
-    pub allow_prefixes: Vec<Ipv4Net>,
+    pub allow_prefixes: Vec<IpNet>,
     /// Give guests an IPv6 ULA prefix (default: yes).
     pub ipv6: Option<bool>,
     /// Masquerade IPv6 egress (default: yes on a NAT network).
@@ -271,7 +273,7 @@ pub struct UpdateNetwork {
     pub subnet: Option<Ipv4Net>,
     pub kind: Option<NetworkKind>,
     /// Replaces the list of blocked destinations guests may reach.
-    pub allow_prefixes: Option<Vec<Ipv4Net>>,
+    pub allow_prefixes: Option<Vec<IpNet>>,
     /// Turns IPv6 on (a fresh ULA prefix) or off.
     pub ipv6: Option<bool>,
     pub nat66: Option<bool>,
@@ -281,7 +283,7 @@ pub struct UpdateNetwork {
 pub const MAX_ALLOW_PREFIXES: usize = 16;
 
 /// Checks a network's allowed prefixes.
-pub fn valid_allow_prefixes(kind: NetworkKind, prefixes: &[Ipv4Net]) -> Result<(), String> {
+pub fn valid_allow_prefixes(kind: NetworkKind, prefixes: &[IpNet]) -> Result<(), String> {
     if prefixes.is_empty() {
         return Ok(());
     }
@@ -423,6 +425,24 @@ mod tests {
         assert!(!d.routes_v6(a) && d.routes_v6(b));
         d.kind = NetworkKind::Isolated;
         assert!(!d.routes_v6(b));
+    }
+
+    #[test]
+    fn allowed_prefixes_may_be_ipv4_or_ipv6() {
+        let ok = |l: &[&str]| {
+            let v: Vec<IpNet> = l.iter().map(|s| s.parse().unwrap()).collect();
+            valid_allow_prefixes(NetworkKind::Nat, &v)
+        };
+        assert!(ok(&["100.64.9.0/24", "fd7a:115c:a1e0:ab12::/64"]).is_ok());
+        assert!(
+            ok(&["fd7a:115c:a1e0:ab12::1/64"])
+                .unwrap_err()
+                .contains("host bits")
+        );
+        assert!(ok(&["::/0"]).is_err());
+        assert!(ok(&["0.0.0.0/0"]).is_err());
+        let v6: Vec<IpNet> = vec!["fd00::/8".parse().unwrap()];
+        assert!(valid_allow_prefixes(NetworkKind::Isolated, &v6).is_err());
     }
 
     #[test]

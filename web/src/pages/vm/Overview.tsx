@@ -25,7 +25,7 @@ export function OverviewTab({ vm }: { vm: Vm }) {
         <MetricCard
           icon="cpu"
           title="CPU"
-          value={on && lastCpu != null ? pct(lastCpu) : "—"}
+          value={on && lastCpu != null ? pct(lastCpu) : "n/a"}
           sub={on ? `${vm.cpu.vcpus} vCPU · ${duration(s.cpu_time_ns)} CPU time` : `${vm.cpu.vcpus} vCPU`}
         >
           {on ? (
@@ -37,7 +37,7 @@ export function OverviewTab({ vm }: { vm: Vm }) {
         <MetricCard
           icon="memory"
           title="Memory in use"
-          value={used != null ? kib(used) : on ? kib(actual) : "—"}
+          value={used != null ? kib(used) : on ? kib(actual) : "n/a"}
           sub={
             used != null
               ? `of ${kib(s.memory_stats.available_kib ?? actual)} the guest sees`
@@ -115,7 +115,7 @@ export function OverviewTab({ vm }: { vm: Vm }) {
 
       <Card title="Details">
         <dl className="grid gap-x-8 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
-          <Detail k="Guest agent" v={s.agent ? <span className="text-emerald-600 dark:text-emerald-400">Connected</span> : on ? "Not connected" : "—"} hint={!s.agent && on ? "Install qemu-guest-agent in the guest for clean shutdowns and richer stats." : undefined} />
+          <Detail k="Guest agent" v={s.agent ? <span className="text-emerald-600 dark:text-emerald-400">Connected</span> : on ? "Not connected" : "n/a"} hint={!s.agent && on ? "Install qemu-guest-agent in the guest for clean shutdowns and richer stats." : undefined} />
           <Detail k="Firmware" v={vm.firmware.toUpperCase()} />
           <Detail k="CPU model" v={vm.cpu.model === "host_passthrough" ? "Host passthrough" : "Host model"} />
           <Detail k="Machine type" v={<span className="font-mono text-xs">{vm.machine}</span>} />

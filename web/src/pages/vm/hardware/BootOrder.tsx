@@ -69,7 +69,7 @@ export function BootOrder({ vm }: { vm: Vm }) {
           >
             <Icon name="grip" className="size-4 cursor-grab text-zinc-300 active:cursor-grabbing dark:text-zinc-600" />
             <span className={cx("grid size-5 shrink-0 place-items-center rounded-full text-[11px] font-semibold tabular-nums", it.enabled ? "bg-indigo-600 text-white dark:bg-indigo-500" : "bg-zinc-200 text-zinc-500 dark:bg-zinc-800")}>
-              {it.enabled ? items.filter((x) => x.enabled).indexOf(it) + 1 : "–"}
+              {it.enabled ? items.filter((x) => x.enabled).indexOf(it) + 1 : "n/a"}
             </span>
             <Icon name={it.icon} className={cx("size-4", it.enabled ? "text-zinc-500" : "text-zinc-300 dark:text-zinc-600")} />
             <div className="min-w-0 flex-1">

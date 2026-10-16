@@ -226,10 +226,8 @@ pub(super) fn assign_leases(d: &Docs<'_>, vm: &mut VmSpec) -> anyhow::Result<Res
         let Some(net) = d.get::<NetworkDoc>(NETWORKS, &network.to_string())? else {
             return Ok(Err(format!("network {network} does not exist")));
         };
-        if let NicNetwork::Network { vlan: Some(v), .. } = &vm.nics[i].network
-            && !(2..=4094).contains(v)
-        {
-            return Ok(Err(format!("VLAN {v} is out of range 2 to 4094")));
+        if let Err(e) = vm.nics[i].network.validate_vlans() {
+            return Ok(Err(e));
         }
         let mut used = used_addresses(d, &net, Some(nic_id))?;
         // Earlier NICs of this VM, as they will be stored.

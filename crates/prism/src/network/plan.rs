@@ -15,6 +15,7 @@ use super::firewall::{GuestRules, Routed};
 use super::{NetworkDoc, NetworkKind, VLAN_OVERHEAD, switch_mtu};
 use crate::cluster::model::MemberDoc;
 use crate::spec::{NicNetwork, Proto, VmSpec};
+use prism_net::link::PortVlans;
 
 const LEASE_TIME: Duration = Duration::from_secs(12 * 3600);
 
@@ -47,9 +48,9 @@ pub struct SwitchPlan {
     /// Every VLAN any NIC on the network uses, cluster-wide: the VXLAN
     /// port carries these tagged. Empty means the network has no VLANs.
     pub vlans: BTreeSet<u16>,
-    /// Local taps on a VLAN-aware network and the VLAN each is an access
-    /// port for (1 when the NIC has none).
-    pub ports: Vec<(String, u16)>,
+    /// Local taps on a VLAN-aware network and the VLAN membership of each
+    /// (access on VLAN 1 when the NIC has none).
+    pub ports: Vec<(String, PortVlans)>,
     /// The zone origin, `<network>.prism`.
     pub domain: String,
     /// Every VM on the network, by name.
@@ -132,8 +133,8 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                     network,
                     ipv4,
                     egress,
-                    vlan,
                     forwards,
+                    ..
                 } = &nic.network
                 else {
                     continue;
@@ -151,8 +152,10 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                         .push(IpAddr::V4(*ip));
                 }
                 if runs_on(vm, input.node) {
-                    if !sw.vlans.is_empty() {
-                        sw.ports.push((tap_name(nic.id), vlan.unwrap_or(1)));
+                    if !sw.vlans.is_empty()
+                        && let Some(pv) = nic.network.port_vlans()
+                    {
+                        sw.ports.push((tap_name(nic.id), pv));
                     }
                     out.firewall.ports.push(prism_net::nft::GuestPort {
                         tap: tap_name(nic.id),
@@ -224,11 +227,13 @@ fn net_vlans(network: Uuid, vms: &[VmSpec]) -> BTreeSet<u16> {
         .filter_map(|n| match &n.network {
             NicNetwork::Network {
                 network: id,
-                vlan: Some(v),
+                vlan,
+                trunk,
                 ..
-            } if *id == network => Some(*v),
+            } if *id == network => Some(vlan.iter().chain(trunk).copied().collect::<Vec<_>>()),
             _ => None,
         })
+        .flatten()
         .collect()
 }
 
@@ -325,6 +330,7 @@ mod tests {
                 ipv4: Some(Ipv4Addr::new(10, 88, 0, ip)),
                 egress,
                 vlan: None,
+                trunk: Vec::new(),
                 forwards: Vec::new(),
             },
             boot_order: None,

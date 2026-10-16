@@ -40,6 +40,12 @@ pub const OPERATIONS: &[(&str, &str, &str, &str)] = &[
         "vms",
         "Set port forwards",
     ),
+    (
+        "put",
+        "/vms/{id}/nics/{nic}/vlans",
+        "vms",
+        "Set a NIC's VLAN and trunk",
+    ),
     ("get", "/vms/{id}/snapshots", "vms", "List snapshots"),
     ("post", "/vms/{id}/snapshots", "vms", "Create a snapshot"),
     (

@@ -25,6 +25,7 @@ mod seed_xml;
 mod snapshot_move;
 mod snapshots;
 mod state_events;
+mod vlans;
 mod vms;
 
 use std::collections::HashMap;
@@ -55,6 +56,7 @@ pub use model::{
 };
 pub use moves::MoveVm;
 pub use networks::{NetworkCheck, NetworkView};
+pub use vlans::SetVlans;
 
 pub(crate) use libvirt::undefine_flags;
 pub use snapshots::{CreateSnapshot, SnapshotView};

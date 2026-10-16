@@ -1083,7 +1083,7 @@ Thick edges are VM1's outbound path. Replies are un-NATed on host-b and return o
 
 - An `isolated` switch has no VIP or uplink; it spans every node through the overlay.
 - An optional `private` flag sets the bridge-port `isolated` flag so VMs reach only the gateway.
-- **VLANs:** a switch carries 802.1Q tags inside its VNI. Each NIC is an access port (one VID) or a trunk (a list). The tag adds 4 B inside the VNI, so a switch with VLANs gets an MTU 4 B lower: 1346 at the default W. libvirt's `<vlan>` element does not work on plain Linux bridges, so Prism programs bridge VLANs over netlink when the tap appears.
+- **VLANs:** a switch carries 802.1Q tags inside its VNI. Each NIC is an access port (one VID) or a trunk (a list). The tag adds 4 B inside the VNI, so a switch with VLANs gets an MTU 4 B lower: 1346 at the default W. libvirt's `<vlan>` element does not work on plain Linux bridges, so Prism programs bridge VLANs over netlink when the tap appears. A NIC is an access port (`vlan`) or a trunk (`trunk` = tagged VIDs, `vlan` = native). `PUT /vms/{id}/nics/{nic}/vlans` edits both on a running VM; the reconciler reprograms the port. Non-default VLANs have no gateway or DHCP, so guests use static addresses (the UI says so).
 - **MACs and IPs:** MACs come from a Prism prefix, assigned centrally. IPAM gives each NIC a static lease on DHCP-managed switches.
 
 ### DHCP, DNS and NAT are embedded

@@ -14,6 +14,7 @@ import {
 } from "../../components/ui";
 import { isOn } from "./VmPage";
 import { Forwards, NicSub } from "./Nics";
+import { VlanEditor } from "./Vlans";
 
 /** Applies a device change and explains what happened. */
 async function deviceChange(qc: QueryClient, _vm: Vm, what: string, run: () => Promise<Vm>): Promise<boolean> {
@@ -42,7 +43,7 @@ export function HardwareTab({ vm }: { vm: Vm }) {
   const size = (d: Disk) => volumes.find((v) => v.pool === d.pool && v.name === d.volume);
   const disks = vm.disks.filter((d) => d.device === "disk");
   const cdroms = vm.disks.filter((d) => d.device === "cdrom");
-  const [modal, setModal] = useState<null | { kind: "addDisk" } | { kind: "addNic" } | { kind: "grow"; disk: Disk } | { kind: "insert"; disk: Disk } | { kind: "detach"; disk: Disk } | { kind: "forwards"; nic: Nic }>(null);
+  const [modal, setModal] = useState<null | { kind: "addDisk" } | { kind: "addNic" } | { kind: "grow"; disk: Disk } | { kind: "insert"; disk: Disk } | { kind: "detach"; disk: Disk } | { kind: "forwards"; nic: Nic } | { kind: "vlans"; nic: Nic }>(null);
   const qc = useQueryClient();
   const close = () => setModal(null);
 
@@ -166,6 +167,7 @@ export function HardwareTab({ vm }: { vm: Vm }) {
                     badge={n.boot_order != null ? <Badge tone="indigo">boot #{n.boot_order}</Badge> : undefined}
                     actions={
                       <>
+                      {n.network.type === "network" && <IconButton icon="network" label="VLANs" size="xs" onClick={() => setModal({ kind: "vlans", nic: n })} />}
                       {(n.network.type === "user" || n.network.type === "network") && <IconButton icon="link" label="Port forwards" size="xs" onClick={() => setModal({ kind: "forwards", nic: n })} />}
                       <IconButton
                         icon="trash"
@@ -188,6 +190,7 @@ export function HardwareTab({ vm }: { vm: Vm }) {
       </div>
 
       {modal?.kind === "addDisk" && <AddDisk vm={vm} onClose={close} />}
+      {modal?.kind === "vlans" && <VlanEditor vm={vm} nic={modal.nic} onClose={close} />}
       {modal?.kind === "forwards" && <Forwards vm={vm} nic={modal.nic} onClose={close} />}
       {modal?.kind === "addNic" && <AddNic vm={vm} onClose={close} />}
       {modal?.kind === "grow" && <Grow vm={vm} disk={modal.disk} current={size(modal.disk)?.size_bytes} onClose={close} />}
@@ -475,7 +478,7 @@ function AddNic({ vm, onClose }: { vm: Vm; onClose: () => void }) {
           </Field>
         )}
         {type === "network" && nets.length > 0 && (
-          <Field label="VLAN" htmlFor="nic-vlan" hint="Optional. Puts this adapter on its own segment (2 to 4094): it only sees adapters on the same VLAN, not the gateway or DHCP, so give it a static address." error={vlanOk ? undefined : "Use a number from 2 to 4094."}>
+          <Field label="VLAN" htmlFor="nic-vlan" hint="Optional (2 to 4094). Puts this adapter on its own segment, without the gateway or DHCP, so give it a static address. Trunks and later changes: use the VLANs button on the adapter." error={vlanOk ? undefined : "Use a number from 2 to 4094."}>
             <Input id="nic-vlan" inputMode="numeric" value={vlanText} onChange={(e) => setVlanText(e.target.value.replace(/\D/g, ""))} placeholder="none" className="font-mono" aria-invalid={!vlanOk} />
           </Field>
         )}

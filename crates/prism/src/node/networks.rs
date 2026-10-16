@@ -278,6 +278,7 @@ impl Node {
                     ipv4: None,
                     egress: None,
                     vlan: None,
+                    trunk: Vec::new(),
                     forwards: Vec::new(),
                 })
         })

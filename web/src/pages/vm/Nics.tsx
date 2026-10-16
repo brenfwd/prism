@@ -28,6 +28,11 @@ export function NicSub({ vm, nic }: { vm: Vm; nic: Nic }) {
           <CopyButton text={a.addr} />
         </span>
       ))}
+      {nic.network.type === "network" && (nic.network.vlan || nic.network.trunk?.length) ? (
+        <span className="text-zinc-500">
+          {nic.network.trunk?.length ? `trunk ${nic.network.vlan ? `native ${nic.network.vlan}, ` : ""}tagged ${nic.network.trunk.join(",")}` : `VLAN ${nic.network.vlan}`}
+        </span>
+      ) : null}
       {forwards.length > 0 && (
         <span className="text-zinc-500">
           {forwards.map((f) => `${f.host_addr ?? anyHost}:${f.host_port} → ${f.guest_port}/${f.proto}`).join(", ")}

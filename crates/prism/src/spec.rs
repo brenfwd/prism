@@ -158,6 +158,10 @@ pub enum NicNetwork {
         /// a segment only with NICs on the same VLAN, not the gateway.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         vlan: Option<u16>,
+        /// Extra VLANs (2 to 4094) delivered tagged, making the NIC a trunk;
+        /// `vlan` (or the untagged default segment) stays its native VLAN.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        trunk: Vec<u16>,
         /// Host ports forwarded to this NIC's lease by destination NAT.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         forwards: Vec<PortForward>,
@@ -243,6 +247,48 @@ impl NicNetwork {
             Self::User { forwards } | Self::Network { forwards, .. } => Some(forwards),
             Self::Bridge { .. } => None,
         }
+    }
+
+    /// The VLAN membership of a Prism network NIC: access on `vlan` (1 when
+    /// unset) or, with a trunk list, `vlan` as native plus the tagged VIDs.
+    pub fn port_vlans(&self) -> Option<prism_net::link::PortVlans> {
+        let Self::Network { vlan, trunk, .. } = self else {
+            return None;
+        };
+        let native = vlan.unwrap_or(1);
+        Some(if trunk.is_empty() {
+            prism_net::link::PortVlans::Access(native)
+        } else {
+            prism_net::link::PortVlans::Trunk {
+                native: Some(native),
+                tagged: trunk.iter().copied().collect(),
+            }
+        })
+    }
+
+    /// Checks the VLAN settings of a NIC.
+    pub fn validate_vlans(&self) -> Result<(), String> {
+        let Self::Network { vlan, trunk, .. } = self else {
+            return Ok(());
+        };
+        let range = 2..=4094;
+        if let Some(v) = vlan.filter(|v| !range.contains(v)) {
+            return Err(format!("VLAN {v} is out of range 2 to 4094"));
+        }
+        if let Some(v) = trunk.iter().find(|v| !range.contains(v)) {
+            return Err(format!("trunk VLAN {v} is out of range 2 to 4094"));
+        }
+        if let Some(v) = vlan.filter(|v| trunk.contains(v)) {
+            return Err(format!("VLAN {v} is both native and tagged"));
+        }
+        if trunk
+            .iter()
+            .enumerate()
+            .any(|(i, v)| trunk[..i].contains(v))
+        {
+            return Err("trunk VLANs must be unique".into());
+        }
+        Ok(())
     }
 
     /// The Prism network this NIC is on, if any.

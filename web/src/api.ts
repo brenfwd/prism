@@ -36,7 +36,7 @@ export type Firmware = "bios" | "uefi";
 export type NicNetwork =
   | { type: "user"; forwards?: PortForward[] }
   | { type: "bridge"; bridge: string }
-  | { type: "network"; network: string; ipv4?: string | null; egress?: string | null; vlan?: number | null; forwards?: PortForward[] };
+  | { type: "network"; network: string; ipv4?: string | null; egress?: string | null; vlan?: number | null; trunk?: number[]; forwards?: PortForward[] };
 
 export interface PortForward {
   proto: "tcp" | "udp";
@@ -352,6 +352,8 @@ export const api = {
     request<Vm>("PATCH", `/vms/${id}/disks/${disk}`, req),
   removeDisk: (id: string, disk: string, deleteVolume: boolean) =>
     request<Vm>("DELETE", `/vms/${id}/disks/${disk}?delete_volume=${deleteVolume}`),
+  setVlans: (id: string, nic: string, req: { vlan?: number | null; trunk: number[] }) =>
+    request<Vm>("PUT", `/vms/${id}/nics/${nic}/vlans`, req),
   addNic: (id: string, req: { network: NicNetwork; mac?: string }) => request<Vm>("POST", `/vms/${id}/nics`, req),
   removeNic: (id: string, nic: string) => request<Vm>("DELETE", `/vms/${id}/nics/${nic}`),
 

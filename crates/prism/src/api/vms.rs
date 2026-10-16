@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::{ApiError, AppState, Json};
 use crate::node::{
-    Action, AddDisk, AddNic, CloneVm, CreateSnapshot, GuestNetwork, MigrateVm, MoveVm,
+    Action, AddDisk, AddNic, CloneVm, CreateSnapshot, GuestNetwork, MigrateVm, MoveVm, SetVlans,
     SnapshotView, UpdateDisk, VmView,
 };
 use crate::spec::{CreateVm, PortForward, UpdateVm};
@@ -27,6 +27,7 @@ pub fn routes() -> Router<AppState> {
         .route("/vms/{id}/nics", post(add_nic))
         .route("/vms/{id}/nics/{nic}", delete(remove_nic))
         .route("/vms/{id}/nics/{nic}/forwards", put(set_forwards))
+        .route("/vms/{id}/nics/{nic}/vlans", put(set_vlans))
         .route("/vms/{id}/snapshots", get(snapshots).post(create_snapshot))
         .route("/vms/{id}/snapshots/{name}", delete(delete_snapshot))
         .route("/vms/{id}/snapshots/{name}/revert", post(revert_snapshot))
@@ -51,6 +52,17 @@ async fn set_forwards(
 ) -> Result<axum::Json<VmView>, ApiError> {
     Ok(axum::Json(
         node.set_forwards(parse_id(&id)?, parse_sub(&nic, "nic")?, forwards)
+            .await?,
+    ))
+}
+
+async fn set_vlans(
+    State(node): State<AppState>,
+    Path((id, nic)): Path<(String, String)>,
+    Json(req): Json<SetVlans>,
+) -> Result<axum::Json<VmView>, ApiError> {
+    Ok(axum::Json(
+        node.set_vlans(parse_id(&id)?, parse_sub(&nic, "nic")?, req)
             .await?,
     ))
 }

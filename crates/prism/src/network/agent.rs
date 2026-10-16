@@ -143,9 +143,9 @@ async fn apply_switch(nl: &Netlink, sw: &SwitchPlan) -> anyhow::Result<()> {
         )
         .await?;
     }
-    for (tap, vid) in &sw.ports {
+    for (tap, vlans) in &sw.ports {
         // The tap only exists while its VM runs; the next resync catches it.
-        if let Err(e) = nl.set_port_vlans(tap, &PortVlans::Access(*vid)).await {
+        if let Err(e) = nl.set_port_vlans(tap, vlans).await {
             tracing::debug!(%tap, "port vlan: {e}");
         }
     }

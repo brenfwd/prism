@@ -35,9 +35,13 @@ const OUTER_BUILD_ENV: &[&str] = &[
     "CARGO_PRIMARY_PACKAGE",
 ];
 
+/// Builds the wasm decoder and the UI, or writes the placeholder page.
 fn main() {
-    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let manifest = PathBuf::from(
+        env::var_os("CARGO_MANIFEST_DIR").expect("cargo sets CARGO_MANIFEST_DIR for build scripts"),
+    );
+    let out_dir =
+        PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR for build scripts"));
     let out = out_dir.join("dist");
     for input in INPUTS {
         println!("cargo::rerun-if-changed={input}");
@@ -46,12 +50,7 @@ fn main() {
     println!("cargo::rerun-if-env-changed=PRISM_SKIP_WEB");
 
     if env::var_os("PRISM_SKIP_WEB").is_some_and(|v| v != "0") {
-        std::fs::create_dir_all(&out).expect("creating OUT_DIR/dist");
-        std::fs::write(
-            out.join("index.html"),
-            "<!doctype html><title>Prism</title><p>Built with PRISM_SKIP_WEB: the UI is not included.</p>",
-        )
-        .expect("writing placeholder");
+        write_placeholder(&out);
         return;
     }
 
@@ -68,6 +67,17 @@ fn main() {
         "bun run build did not produce {}",
         out.join("index.html").display()
     );
+}
+
+/// Writes a stub `index.html` into `out` for builds that skip the UI.
+fn write_placeholder(out: &Path) {
+    std::fs::create_dir_all(out).unwrap_or_else(|e| panic!("creating {}: {e}", out.display()));
+    let page = out.join("index.html");
+    std::fs::write(
+        &page,
+        "<!doctype html><title>Prism</title><p>Built with PRISM_SKIP_WEB: the UI is not included.</p>",
+    )
+    .unwrap_or_else(|e| panic!("writing {}: {e}", page.display()));
 }
 
 /// Builds `prism-rfb-wasm` with a nested cargo. It uses its own target
@@ -109,6 +119,8 @@ fn build_wasm(manifest: &Path, out_dir: &Path) -> PathBuf {
     wasm
 }
 
+/// Finds the Bun binary: `$BUN`, then `PATH`, then `~/.bun/bin/bun`.
+/// Panics with install instructions when none exists.
 fn find_bun() -> PathBuf {
     if let Some(b) = env::var_os("BUN") {
         return b.into();
@@ -126,6 +138,9 @@ fn find_bun() -> PathBuf {
     })
 }
 
+/// Runs `bun args` in `dir` with `envs` added, and panics with the exit
+/// status if it cannot start or fails. Bun's output goes straight to the
+/// build log.
 fn run(bun: &Path, args: &[&str], dir: &Path, envs: &[(&str, &Path)]) {
     let status = Command::new(bun)
         .args(args)

@@ -1,5 +1,7 @@
 //! In-process multi-node tests: a router stands in for gRPC.
 
+#![allow(clippy::unused_async_trait_impl, clippy::result_large_err)]
+
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -219,7 +221,10 @@ async fn hub_spoke_learners_replicate_and_forward() {
     leader_of(&[&hub]).await;
     hub.add_learner(2, node(2)).await.unwrap();
 
-    let (res, idx) = hub.write("a".into()).await.unwrap();
+    let WriteOutcome {
+        result: res,
+        index: idx,
+    } = hub.write("a".into()).await.unwrap();
     assert_eq!(res, "ok:1");
     s2.wait_applied(idx, Duration::from_secs(5)).await.unwrap();
     assert_eq!(s2_be.applied(), vec!["a"]);
@@ -241,7 +246,7 @@ async fn late_learner_catches_up_from_snapshot() {
     leader_of(&[&hub]).await;
     let mut last = 0;
     for i in 0..20 {
-        last = hub.write(format!("c{i}")).await.unwrap().1;
+        last = hub.write(format!("c{i}")).await.unwrap().index;
     }
     // Logs before the snapshot are purged, so the learner needs InstallSnapshot.
     wait_for(|| hub.metrics().snapshot.is_some()).await;
@@ -271,7 +276,7 @@ async fn consensus_survives_leader_loss_and_degrades_without_quorum() {
         .set_voters(BTreeSet::from([1, 2, 3]))
         .await
         .unwrap();
-    let (_, idx) = nodes[0].0.write("x".into()).await.unwrap();
+    let idx = nodes[0].0.write("x".into()).await.unwrap().index;
     for (n, _) in &nodes {
         n.wait_applied(idx, Duration::from_secs(5)).await.unwrap();
     }
@@ -291,7 +296,7 @@ async fn consensus_survives_leader_loss_and_degrades_without_quorum() {
         found.expect("survivors elected a leader")
     };
     let leader = survivors.iter().find(|n| n.id == new_leader).unwrap();
-    let (_, idx) = leader.write("y".into()).await.unwrap();
+    let idx = leader.write("y".into()).await.unwrap().index;
     for n in survivors {
         n.wait_applied(idx, Duration::from_secs(5)).await.unwrap();
     }
@@ -332,4 +337,11 @@ async fn log_store_survives_reopen() {
     );
     let st = s.get_log_state().await.unwrap();
     assert_eq!(st.last_log_id, None);
+}
+
+#[test]
+fn raft_config_validates() {
+    let cfg = raft_config("prism").unwrap();
+    assert_eq!(cfg.cluster_name, "prism");
+    assert!(cfg.election_timeout_min > cfg.heartbeat_interval);
 }

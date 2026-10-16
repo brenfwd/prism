@@ -15,7 +15,10 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use prism_cluster::{Channels, ClusterError, ClusterNode, GrpcNetwork, LogStore, RaftId};
+use prism_cluster::{
+    Channels, ClusterError, ClusterNode, DegradedReason, GrpcNetwork, LogStore, RaftId,
+    WriteOutcome,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -226,9 +229,7 @@ impl Cluster {
         let node = ClusterNode::start(
             raft_id,
             prism_cluster::raft_config("prism")?,
-            GrpcNetwork {
-                channels: self.channels.clone(),
-            },
+            GrpcNetwork::new(self.channels.clone()),
             log,
             Arc::new(self.state.backend()),
         )
@@ -325,10 +326,10 @@ impl Cluster {
     }
 
     /// Proposes on this node if it leads. Used by `Cluster.ForwardWrite`.
-    pub(crate) async fn write_local(&self, command: String) -> Result<(String, u64), ClusterError> {
+    pub(crate) async fn write_local(&self, command: String) -> Result<WriteOutcome, ClusterError> {
         let raft = self
             .raft()
-            .ok_or_else(|| ClusterError::Other("not clustered".into()))?;
+            .ok_or(ClusterError::Degraded(DegradedReason::NotRunning))?;
         raft.write(command).await
     }
 

@@ -1,13 +1,20 @@
-//! The raft state machine: delegates to the application's [`Backend`].
+//! The raft state machine: applies committed entries through the
+//! application's [`Backend`] and keeps the latest snapshot in memory.
+//!
+//! The backend persists the last applied log position with each change, so
+//! the state machine holds no durable state of its own. The in-memory
+//! snapshot is rebuilt on demand and lost on restart.
+#![allow(clippy::result_large_err)]
 
 use std::io::Cursor;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use openraft::storage::{RaftStateMachine, Snapshot};
 use openraft::{EntryPayload, ErrorSubject, ErrorVerb, RaftSnapshotBuilder};
 use tokio::sync::watch;
+use uuid::Uuid;
 
+use crate::sync::lock_unpoisoned;
 use crate::types::{
     AppliedMeta, Entry, LogId, SnapshotMeta, StorageError, StoredMembership, TypeConfig,
 };
@@ -28,22 +35,20 @@ pub trait Backend: Send + Sync + 'static {
     fn restore(&self, data: &[u8], meta: &AppliedMeta) -> anyhow::Result<()>;
 }
 
-fn sm_err(verb: ErrorVerb, e: impl std::fmt::Display) -> StorageError {
-    StorageError::from_io_error(
-        ErrorSubject::StateMachine,
-        verb,
-        std::io::Error::other(e.to_string()),
-    )
+fn sm_err(verb: ErrorVerb, e: anyhow::Error) -> StorageError {
+    StorageError::from_io_error(ErrorSubject::StateMachine, verb, std::io::Error::other(e))
 }
 
-/// The most recent snapshot: its metadata and data.
+/// The most recent snapshot: its metadata and data. openraft's snapshot
+/// type owns a `Cursor<Vec<u8>>`, so each read of it copies the data.
 type CurrentSnapshot = (SnapshotMeta, Vec<u8>);
 
+/// The raft state machine over a [`Backend`]. Clones share the backend, the
+/// snapshot slot and the applied-index channel.
 #[derive(Clone)]
 pub struct StateMachine {
     backend: Arc<dyn Backend>,
-    current: Arc<std::sync::Mutex<Option<CurrentSnapshot>>>,
-    snapshot_seq: Arc<AtomicU64>,
+    current: Arc<Mutex<Option<CurrentSnapshot>>>,
     /// The last applied index, for read-your-writes waits.
     applied: watch::Sender<u64>,
 }
@@ -55,6 +60,12 @@ impl std::fmt::Debug for StateMachine {
 }
 
 impl StateMachine {
+    /// Creates a state machine over `backend`, resuming the applied index
+    /// from the backend's recorded meta (0 on a fresh backend).
+    ///
+    /// # Errors
+    ///
+    /// Returns the backend's error if it cannot read its meta.
     pub fn new(backend: Arc<dyn Backend>) -> anyhow::Result<Self> {
         let applied = backend
             .applied_meta()?
@@ -63,11 +74,11 @@ impl StateMachine {
         Ok(Self {
             backend,
             current: Arc::default(),
-            snapshot_seq: Arc::default(),
             applied: watch::channel(applied).0,
         })
     }
 
+    /// A receiver that tracks the index of the last applied log entry.
     pub fn applied_index(&self) -> watch::Receiver<u64> {
         self.applied.subscribe()
     }
@@ -81,28 +92,27 @@ impl StateMachine {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)] // the backend is synchronous
 impl RaftSnapshotBuilder<TypeConfig> for StateMachine {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError> {
-        // The backend's snapshot and meta are read under one lock on its side
-        // only if it is consistent; apply runs on this same task, so no
-        // command can interleave here.
+        // openraft never runs apply and build_snapshot at the same time, so
+        // the meta read here matches the data the backend returns next.
         let meta = self.meta()?;
         let data = self
             .backend
             .snapshot()
             .map_err(|e| sm_err(ErrorVerb::Read, e))?;
-        let seq = self.snapshot_seq.fetch_add(1, Ordering::Relaxed);
-        let snapshot_id = format!("{}-{seq}", meta.last_applied.map_or(0, |l| l.index));
+        let snapshot_id = format!(
+            "{}-{}",
+            meta.last_applied.map_or(0, |l| l.index),
+            Uuid::new_v4().simple()
+        );
         let snap_meta = SnapshotMeta {
             last_log_id: meta.last_applied,
             last_membership: meta.membership,
             snapshot_id,
         };
-        *self
-            .current
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some((snap_meta.clone(), data.clone()));
+        *lock_unpoisoned(&self.current) = Some((snap_meta.clone(), data.clone()));
         Ok(Snapshot {
             meta: snap_meta,
             snapshot: Box::new(Cursor::new(data)),
@@ -110,6 +120,7 @@ impl RaftSnapshotBuilder<TypeConfig> for StateMachine {
     }
 }
 
+#[allow(clippy::unused_async_trait_impl)] // the backend is synchronous
 impl RaftStateMachine<TypeConfig> for StateMachine {
     type SnapshotBuilder = Self;
 
@@ -168,19 +179,12 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
             .map_err(|e| sm_err(ErrorVerb::Write, e))?;
         self.applied
             .send_replace(meta.last_log_id.map_or(0, |l| l.index));
-        *self
-            .current
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((meta.clone(), data));
+        *lock_unpoisoned(&self.current) = Some((meta.clone(), data));
         Ok(())
     }
 
     async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot<TypeConfig>>, StorageError> {
-        let cur = self
-            .current
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+        let cur = lock_unpoisoned(&self.current).clone();
         Ok(cur.map(|(meta, data)| Snapshot {
             meta,
             snapshot: Box::new(Cursor::new(data)),

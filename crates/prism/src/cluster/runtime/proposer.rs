@@ -24,7 +24,7 @@ impl Proposer {
             .ok_or_else(|| StateError::Degraded("raft is not running".into()))?;
         for _ in 0..3 {
             match raft.write(command.clone()).await {
-                Ok((result, _)) => return Ok(result),
+                Ok(outcome) => return Ok(outcome.result),
                 Err(ClusterError::ForwardToLeader(Some((_, leader)))) => {
                     let ch = self.cluster.channels.get(&leader.addr).map_err(|e| {
                         StateError::Degraded(format!("cannot reach the leader: {e}"))
@@ -65,9 +65,9 @@ impl Proposer {
                 Err(ClusterError::ForwardToLeader(None)) => {
                     return Err(StateError::Degraded("no hub or leader is reachable".into()));
                 }
-                Err(ClusterError::Degraded(m)) => return Err(StateError::Degraded(m)),
-                Err(ClusterError::Other(m)) => {
-                    return Err(StateError::Internal(anyhow::anyhow!(m)));
+                Err(ClusterError::Degraded(r)) => return Err(StateError::Degraded(r.to_string())),
+                Err(ClusterError::Raft(e)) => {
+                    return Err(StateError::Internal(anyhow::anyhow!(e)));
                 }
             }
             tokio::time::sleep(Duration::from_millis(200)).await;

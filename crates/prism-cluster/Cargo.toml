@@ -11,7 +11,6 @@ workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-futures = "0.3.34"
 openraft = { version = "0.9", features = ["serde", "storage-v2"] }
 prism-proto = { version = "0.1.0", path = "../prism-proto" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }

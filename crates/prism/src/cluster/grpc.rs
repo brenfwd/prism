@@ -91,15 +91,15 @@ impl ClusterRpc for ClusterService {
         let command = String::from_utf8(req.into_inner().command)
             .map_err(|_| Status::invalid_argument("command is not UTF-8"))?;
         match self.cluster.write_local(command).await {
-            Ok((result, log_index)) => Ok(Response::new(WriteReply {
-                result: result.into_bytes(),
-                log_index,
+            Ok(outcome) => Ok(Response::new(WriteReply {
+                result: outcome.result.into_bytes(),
+                log_index: outcome.index,
             })),
             Err(ClusterError::ForwardToLeader(_)) => {
                 Err(Status::failed_precondition("not the leader"))
             }
-            Err(ClusterError::Degraded(m)) => Err(Status::unavailable(m)),
-            Err(ClusterError::Other(m)) => Err(Status::internal(m)),
+            Err(ClusterError::Degraded(r)) => Err(Status::unavailable(r.to_string())),
+            Err(ClusterError::Raft(e)) => Err(Status::internal(e.to_string())),
         }
     }
 }
@@ -153,7 +153,7 @@ pub async fn serve(cluster: Arc<Cluster>, raft: prism_cluster::Raft) {
                 cluster: Arc::clone(&cluster),
             }))
             .add_service(RaftServer::new(GuardedRaft {
-                inner: RaftService { raft: raft.clone() },
+                inner: RaftService::new(raft.clone()),
                 cluster: Arc::clone(&cluster),
             }))
             .add_service(EventsServer::new(super::peers::EventsService {

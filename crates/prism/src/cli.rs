@@ -1,16 +1,31 @@
-//! `prism cluster …` and `prism join`: thin clients of the local daemon's API.
+//! `prism cluster ...` and `prism join`: thin clients of the local daemon.
+//!
+//! Each subcommand sends one or two requests to the daemon named by
+//! `http.listen` in `prism.toml` (see [`client`]) and prints a short report to
+//! stdout. Errors go to stderr through `main`, with a non-zero exit status.
+//! The responses are read into the small structs below; a field the daemon
+//! leaves out prints as an empty string, `false` or `-`.
+
+mod client;
 
 use std::io::Write as _;
-use std::net::SocketAddr;
 use std::path::Path;
 
-use anyhow::{Context, bail};
+use anyhow::bail;
+use axum::http::Method;
 use clap::Subcommand;
-use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use serde::Deserialize;
+use serde_json::json;
 
+use crate::cluster::model::ClusterMode;
 use crate::config::Config;
 
+pub(crate) use client::call;
+
+/// Seconds an invite stays valid when `--ttl` is not given.
+const DEFAULT_INVITE_TTL_SECS: u64 = 3600;
+
+/// Subcommands of `prism cluster`.
 #[derive(Debug, Subcommand)]
 pub enum ClusterCmd {
     /// Turn this node into the hub of a new cluster.
@@ -51,252 +66,272 @@ pub enum ClusterCmd {
     Removed,
 }
 
-/// The daemon's API address: a loopback listener if there is one.
-fn api_addr(cfg: &Config) -> anyhow::Result<SocketAddr> {
-    cfg.http
-        .listen
-        .iter()
-        .find(|a| a.ip().is_loopback())
-        .or_else(|| cfg.http.listen.first())
-        .copied()
-        .context("http.listen is empty")
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Status {
+    clustered: bool,
+    role: String,
+    degraded: bool,
+    cluster: ClusterInfo,
+    members: Vec<Member>,
 }
 
-/// One JSON request over HTTP/1.1 to the local daemon.
-pub(crate) async fn call(
-    cfg: &Config,
-    method: &str,
-    path: &str,
-    body: Option<Value>,
-) -> anyhow::Result<Value> {
-    let addr = api_addr(cfg)?;
-    let mut sock = tokio::net::TcpStream::connect(addr)
-        .await
-        .with_context(|| format!("connecting to prism at {addr}; is `prism serve` running?"))?;
-    let body = body.map(|b| b.to_string()).unwrap_or_default();
-    let req = format!(
-        "{method} /api/v1{path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    sock.write_all(req.as_bytes()).await?;
-    let mut raw = Vec::new();
-    sock.read_to_end(&mut raw).await?;
-    let text = String::from_utf8_lossy(&raw);
-    let (head, mut content) = text
-        .split_once("\r\n\r\n")
-        .context("malformed HTTP response")?;
-    let status: u16 = head
-        .split_whitespace()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .context("malformed HTTP status")?;
-    let decoded;
-    if head
-        .to_ascii_lowercase()
-        .contains("transfer-encoding: chunked")
-    {
-        decoded = dechunk(content);
-        content = &decoded;
-    }
-    let value: Value = if content.trim().is_empty() {
-        Value::Null
-    } else {
-        serde_json::from_str(content)?
-    };
-    if status >= 400 {
-        bail!(
-            "{}",
-            value["detail"]
-                .as_str()
-                .map_or_else(|| format!("HTTP {status}"), str::to_string)
-        );
-    }
-    Ok(value)
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ClusterInfo {
+    name: String,
+    mode: String,
 }
 
-fn dechunk(s: &str) -> String {
-    let mut out = String::new();
-    let mut rest = s;
-    while let Some((len, tail)) = rest.split_once("\r\n") {
-        let Ok(n) = usize::from_str_radix(len.trim(), 16) else {
-            break;
-        };
-        if n == 0 || tail.len() < n {
-            break;
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Member {
+    node_id: String,
+    name: String,
+    state: String,
+    mesh_addr: String,
+    endpoints: Vec<String>,
+    voter: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct AcceptPreview {
+    name: String,
+    endpoints: Vec<String>,
+    fingerprint: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct Removed {
+    node_id: String,
+    mesh_addr: String,
+    wg_pubkey: String,
+    #[serde(rename = "removed_index")]
+    log_index: u64,
+    pending: Vec<PendingMember>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct PendingMember {
+    name: String,
+    applied_index: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct JoinReply {
+    cluster_name: String,
+    sponsor: String,
+    reply: String,
+    fingerprint: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct InviteReply {
+    blob: String,
+}
+
+/// Runs one `prism cluster` subcommand against the daemon.
+pub async fn cluster(dir: &Path, cmd: ClusterCmd) -> anyhow::Result<()> {
+    let cfg = Config::load(dir)?;
+    match cmd {
+        ClusterCmd::Init { name, consensus } => init(&cfg, dir, &name, consensus).await,
+        ClusterCmd::Status => status(&cfg).await,
+        ClusterCmd::Invite { name, ttl, revoke } => invite(&cfg, name, ttl, revoke).await,
+        ClusterCmd::Accept { reply, yes } => accept(&cfg, &reply, yes).await,
+        ClusterCmd::Removed => removed(&cfg).await,
+        ClusterCmd::Promote { node } => {
+            let id = resolve_member(&cfg, &node).await?;
+            call(
+                &cfg,
+                Method::POST,
+                "/cluster/hub",
+                Some(json!({"node": id})),
+            )
+            .await?;
+            println!("{node} is now the hub. This node is a spoke and can leave.");
+            Ok(())
         }
-        out.push_str(&tail[..n]);
-        rest = tail[n..].trim_start_matches("\r\n");
+        ClusterCmd::Remove { node } => {
+            let id = resolve_member(&cfg, &node).await?;
+            call(
+                &cfg,
+                Method::DELETE,
+                &format!("/cluster/members/{id}"),
+                None,
+            )
+            .await?;
+            println!("Removed {node}.");
+            Ok(())
+        }
+    }
+}
+
+async fn init(cfg: &Config, dir: &Path, name: &str, consensus: bool) -> anyhow::Result<()> {
+    let mode = if consensus {
+        ClusterMode::Consensus
+    } else {
+        ClusterMode::HubSpoke
+    };
+    let s: Status = serde_json::from_value(
+        call(
+            cfg,
+            Method::POST,
+            "/cluster",
+            Some(json!({"name": name, "mode": mode})),
+        )
+        .await?,
+    )?;
+    let addr = s.members.first().map_or("", |m| m.mesh_addr.as_str());
+    println!(
+        "Created cluster {:?}; this node is the hub at {addr}.",
+        s.cluster.name
+    );
+    println!(
+        "Next: `prism cluster invite --config {}` and paste the result into `prism join` on the new node.",
+        dir.display()
+    );
+    Ok(())
+}
+
+async fn status(cfg: &Config) -> anyhow::Result<()> {
+    let s: Status = serde_json::from_value(call(cfg, Method::GET, "/cluster", None).await?)?;
+    print!("{}", render_status(&s));
+    Ok(())
+}
+
+fn render_status(s: &Status) -> String {
+    use std::fmt::Write as _;
+    if !s.clustered {
+        return "Standalone (not in a cluster).\n".into();
+    }
+    let mut out = format!(
+        "Cluster {} ({}), this node: {}{}\n",
+        s.cluster.name,
+        s.cluster.mode,
+        s.role,
+        if s.degraded {
+            " - DEGRADED (read-only)"
+        } else {
+            ""
+        }
+    );
+    for m in &s.members {
+        let _ = writeln!(
+            out,
+            "  {:<16} {:<8} {:<26} {}{}",
+            m.name,
+            m.state,
+            m.mesh_addr,
+            m.endpoints.first().map_or("-", String::as_str),
+            if m.voter { "  (voter)" } else { "" }
+        );
     }
     out
 }
 
-fn confirm(question: &str) -> bool {
-    print!("{question} [y/N] ");
-    let _ = std::io::stdout().flush();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).is_ok() && matches!(line.trim(), "y" | "Y" | "yes")
+async fn invite(
+    cfg: &Config,
+    name: Option<String>,
+    ttl: Option<u64>,
+    revoke: Option<String>,
+) -> anyhow::Result<()> {
+    if let Some(id) = revoke {
+        call(cfg, Method::DELETE, &format!("/cluster/invites/{id}"), None).await?;
+        println!("Revoked invite {id}.");
+        return Ok(());
+    }
+    let v: InviteReply = serde_json::from_value(
+        call(
+            cfg,
+            Method::POST,
+            "/cluster/invites",
+            Some(json!({"name": name, "ttl_secs": ttl})),
+        )
+        .await?,
+    )?;
+    println!("Run this on the new node:\n");
+    println!("  prism join --config <dir> {}\n", v.blob);
+    println!(
+        "The invite is valid for {} minutes.",
+        ttl.unwrap_or(DEFAULT_INVITE_TTL_SECS) / 60
+    );
+    Ok(())
 }
 
-pub async fn cluster(dir: &Path, cmd: ClusterCmd) -> anyhow::Result<()> {
-    let cfg = Config::load(dir)?;
-    match cmd {
-        ClusterCmd::Init { name, consensus } => {
-            let mode = if consensus { "consensus" } else { "hub_spoke" };
-            let s = call(
-                &cfg,
-                "POST",
-                "/cluster",
-                Some(json!({"name": name, "mode": mode})),
-            )
-            .await?;
-            println!(
-                "Created cluster {:?}; this node is the hub at {}.",
-                s["cluster"]["name"].as_str().unwrap_or_default(),
-                s["members"][0]["mesh_addr"].as_str().unwrap_or_default()
-            );
-            println!(
-                "Next: `prism cluster invite --config {}` and paste the result into `prism join` on the new node.",
-                dir.display()
-            );
+async fn accept(cfg: &Config, reply: &str, yes: bool) -> anyhow::Result<()> {
+    let p: AcceptPreview = serde_json::from_value(
+        call(
+            cfg,
+            Method::POST,
+            "/cluster/accept",
+            Some(json!({"reply": reply, "confirm": false})),
+        )
+        .await?,
+    )?;
+    let endpoints = if p.endpoints.is_empty() {
+        "behind NAT".to_string()
+    } else {
+        p.endpoints.join(", ")
+    };
+    let question = format!("Admit {} ({endpoints}, key {})?", p.name, p.fingerprint);
+    if !yes && !confirm(&question)? {
+        println!("Not admitted.");
+        return Ok(());
+    }
+    call(
+        cfg,
+        Method::POST,
+        "/cluster/accept",
+        Some(json!({"reply": reply, "confirm": true})),
+    )
+    .await?;
+    println!("Admitted {}. It finishes joining by itself.", p.name);
+    Ok(())
+}
+
+async fn removed(cfg: &Config) -> anyhow::Result<()> {
+    let list: Vec<Removed> =
+        serde_json::from_value(call(cfg, Method::GET, "/cluster/removed", None).await?)?;
+    if list.is_empty() {
+        println!("No members have been removed.");
+    }
+    for m in list {
+        println!(
+            "  {}  {}  key {}  (log index {})",
+            m.node_id, m.mesh_addr, m.wg_pubkey, m.log_index
+        );
+        if m.pending.is_empty() {
+            println!("    applied by every member");
         }
-        ClusterCmd::Status => {
-            let s = call(&cfg, "GET", "/cluster", None).await?;
-            if !s["clustered"].as_bool().unwrap_or(false) {
-                println!("Standalone (not in a cluster).");
-                return Ok(());
-            }
-            println!(
-                "Cluster {} ({}), this node: {}{}",
-                s["cluster"]["name"].as_str().unwrap_or_default(),
-                s["cluster"]["mode"].as_str().unwrap_or_default(),
-                s["role"].as_str().unwrap_or_default(),
-                if s["degraded"].as_bool().unwrap_or(false) {
-                    " — DEGRADED (read-only)"
-                } else {
-                    ""
-                }
-            );
-            for m in s["members"].as_array().into_iter().flatten() {
-                println!(
-                    "  {:<16} {:<8} {:<26} {}{}",
-                    m["name"].as_str().unwrap_or_default(),
-                    m["state"].as_str().unwrap_or_default(),
-                    m["mesh_addr"].as_str().unwrap_or_default(),
-                    m["endpoints"]
-                        .as_array()
-                        .and_then(|e| e.first())
-                        .and_then(Value::as_str)
-                        .unwrap_or("-"),
-                    if m["voter"].as_bool().unwrap_or(false) {
-                        "  (voter)"
-                    } else {
-                        ""
-                    }
-                );
-            }
-        }
-        ClusterCmd::Invite { name, ttl, revoke } => {
-            if let Some(id) = revoke {
-                call(&cfg, "DELETE", &format!("/cluster/invites/{id}"), None).await?;
-                println!("Revoked invite {id}.");
-                return Ok(());
-            }
-            let v = call(
-                &cfg,
-                "POST",
-                "/cluster/invites",
-                Some(json!({"name": name, "ttl_secs": ttl})),
-            )
-            .await?;
-            println!("Run this on the new node:\n");
-            println!(
-                "  prism join --config <dir> {}\n",
-                v["blob"].as_str().unwrap_or_default()
-            );
-            println!(
-                "The invite is valid for {} minutes.",
-                ttl.unwrap_or(3600) / 60
-            );
-        }
-        ClusterCmd::Accept { reply, yes } => {
-            let p = call(
-                &cfg,
-                "POST",
-                "/cluster/accept",
-                Some(json!({"reply": reply, "confirm": false})),
-            )
-            .await?;
-            let endpoints = p["endpoints"].as_array().map(|e| {
-                e.iter()
-                    .filter_map(Value::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            });
-            let question = format!(
-                "Admit {} ({}, key {})?",
-                p["name"].as_str().unwrap_or_default(),
-                endpoints
-                    .filter(|e| !e.is_empty())
-                    .unwrap_or_else(|| "behind NAT".into()),
-                p["fingerprint"].as_str().unwrap_or_default()
-            );
-            if !yes && !confirm(&question) {
-                println!("Not admitted.");
-                return Ok(());
-            }
-            call(
-                &cfg,
-                "POST",
-                "/cluster/accept",
-                Some(json!({"reply": reply, "confirm": true})),
-            )
-            .await?;
-            println!(
-                "Admitted {}. It finishes joining by itself.",
-                p["name"].as_str().unwrap_or_default()
-            );
-        }
-        ClusterCmd::Removed => {
-            let t = call(&cfg, "GET", "/cluster/removed", None).await?;
-            let list = t.as_array().cloned().unwrap_or_default();
-            if list.is_empty() {
-                println!("No members have been removed.");
-            }
-            for m in list {
-                println!(
-                    "  {}  {}  key {}  (log index {})",
-                    m["node_id"].as_str().unwrap_or_default(),
-                    m["mesh_addr"].as_str().unwrap_or_default(),
-                    m["wg_pubkey"].as_str().unwrap_or_default(),
-                    m["removed_index"]
-                );
-                let pending = m["pending"].as_array().cloned().unwrap_or_default();
-                if pending.is_empty() {
-                    println!("    applied by every member");
-                }
-                for p in pending {
-                    let applied = p["applied_index"]
-                        .as_u64()
-                        .map_or("unreachable".to_string(), |a| format!("at index {a}"));
-                    println!(
-                        "    still trusts it: {} ({applied})",
-                        p["name"].as_str().unwrap_or_default()
-                    );
-                }
-            }
-        }
-        ClusterCmd::Promote { node } => {
-            let id = resolve_member(&cfg, &node).await?;
-            call(&cfg, "POST", "/cluster/hub", Some(json!({"node": id}))).await?;
-            println!("{node} is now the hub. This node is a spoke and can leave.");
-        }
-        ClusterCmd::Remove { node } => {
-            let id = resolve_member(&cfg, &node).await?;
-            call(&cfg, "DELETE", &format!("/cluster/members/{id}"), None).await?;
-            println!("Removed {node}.");
+        for p in m.pending {
+            let applied = p
+                .applied_index
+                .map_or("unreachable".to_string(), |a| format!("at index {a}"));
+            println!("    still trusts it: {} ({applied})", p.name);
         }
     }
     Ok(())
+}
+
+/// Asks a yes/no question on stdout and reads the answer from stdin.
+///
+/// Only `y`, `Y` and `yes` count as yes. Fails when stdout or stdin cannot be
+/// used, so a closed terminal does not read as a refusal.
+fn confirm(question: &str) -> anyhow::Result<bool> {
+    print!("{question} [y/N] ");
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(is_yes(&line))
+}
+
+fn is_yes(answer: &str) -> bool {
+    matches!(answer.trim(), "y" | "Y" | "yes")
 }
 
 /// Maps a member name (or an ID, passed through) to its node ID.
@@ -304,47 +339,99 @@ async fn resolve_member(cfg: &Config, node: &str) -> anyhow::Result<String> {
     if node.parse::<uuid::Uuid>().is_ok() {
         return Ok(node.to_string());
     }
-    let v = call(cfg, "GET", "/cluster", None).await?;
-    v["members"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|m| m["name"].as_str() == Some(node))
-        .and_then(|m| m["node_id"].as_str())
-        .map(str::to_string)
-        .ok_or_else(|| anyhow::anyhow!("no cluster member named {node:?}"))
+    let s: Status = serde_json::from_value(call(cfg, Method::GET, "/cluster", None).await?)?;
+    match find_member(&s.members, node) {
+        Some(id) => Ok(id.to_string()),
+        None => bail!("no cluster member named {node:?}"),
+    }
 }
 
+fn find_member<'a>(members: &'a [Member], name: &str) -> Option<&'a str> {
+    members
+        .iter()
+        .find(|m| m.name == name)
+        .map(|m| m.node_id.as_str())
+}
+
+/// Runs `prism join`: asks the local daemon to start joining with `invite`
+/// and prints the reply to paste into `prism cluster accept` on the sponsor.
 pub async fn join(dir: &Path, invite: &str) -> anyhow::Result<()> {
     let cfg = Config::load(dir)?;
-    let r = call(
-        &cfg,
-        "POST",
-        "/cluster/join",
-        Some(json!({"invite": invite})),
-    )
-    .await?;
+    let r: JoinReply = serde_json::from_value(
+        call(
+            &cfg,
+            Method::POST,
+            "/cluster/join",
+            Some(json!({"invite": invite})),
+        )
+        .await?,
+    )?;
     println!(
         "Joining cluster {:?} via {}. Paste this into `prism cluster accept` on {} (or the Cluster page):\n",
-        r["cluster_name"].as_str().unwrap_or_default(),
-        r["sponsor"].as_str().unwrap_or_default(),
-        r["sponsor"].as_str().unwrap_or_default()
+        r.cluster_name, r.sponsor, r.sponsor
     );
-    println!("  {}\n", r["reply"].as_str().unwrap_or_default());
+    println!("  {}\n", r.reply);
     println!(
-        "Key fingerprint: {} — check it matches what the member shows.",
-        r["fingerprint"].as_str().unwrap_or_default()
+        "Key fingerprint: {}. Check it matches what the member shows.",
+        r.fingerprint
     );
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn member(name: &str, id: &str) -> Member {
+        Member {
+            name: name.into(),
+            node_id: id.into(),
+            ..Member::default()
+        }
+    }
+
     #[test]
-    fn dechunks() {
+    fn yes_answers() {
+        for yes in ["y\n", "Y", " yes \n"] {
+            assert!(is_yes(yes), "{yes:?}");
+        }
+        for no in ["", "n", "no", "YES", "yep"] {
+            assert!(!is_yes(no), "{no:?}");
+        }
+    }
+
+    #[test]
+    fn finds_members_by_name() {
+        let members = [member("a", "1"), member("b", "2")];
+        assert_eq!(find_member(&members, "b"), Some("2"));
+        assert_eq!(find_member(&members, "c"), None);
+    }
+
+    #[test]
+    fn standalone_status() {
         assert_eq!(
-            super::dechunk("5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"),
-            "hello world"
+            render_status(&Status::default()),
+            "Standalone (not in a cluster).\n"
         );
+    }
+
+    #[test]
+    fn member_table() {
+        let s: Status = serde_json::from_value(json!({
+            "clustered": true, "role": "hub", "degraded": true,
+            "cluster": {"name": "lab", "mode": "hub_spoke"},
+            "members": [{"name": "n1", "state": "active", "mesh_addr": "fd00::1",
+                         "endpoints": [], "voter": true}],
+        }))
+        .unwrap();
+        let text = render_status(&s);
+        assert!(text.starts_with("Cluster lab (hub_spoke), this node: hub - DEGRADED"));
+        assert!(text.contains("n1") && text.contains("-  (voter)"));
+    }
+
+    #[test]
+    fn cluster_mode_wire_names() {
+        assert_eq!(json!(ClusterMode::HubSpoke), "hub_spoke");
+        assert_eq!(json!(ClusterMode::Consensus), "consensus");
     }
 }

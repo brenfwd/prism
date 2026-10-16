@@ -38,6 +38,9 @@ pub enum Ipv6Source {
         addrs: Vec<Ipv6Addr>,
         /// The network the addresses belong to; other addresses in it may not be claimed.
         prefix: Ipv6Net,
+        /// Addresses of the network's routers (the nodes). No guest may send neighbour
+        /// messages from them or claim them.
+        gateways: Vec<Ipv6Addr>,
     },
 }
 
@@ -62,7 +65,13 @@ pub struct GuestPort {
 /// another MAC; redirects are dropped. Neighbour solicitations and advertisements from the
 /// network's prefix pass whatever their source, so the host can see which addresses the
 /// guest uses; the checks before them have already tied those messages to the guest's MAC.
-fn guard_ipv6(c: &mut Chain, port: &GuestPort, addrs: &[Ipv6Addr], prefix: Ipv6Net) {
+fn guard_ipv6(
+    c: &mut Chain,
+    port: &GuestPort,
+    addrs: &[Ipv6Addr],
+    prefix: Ipv6Net,
+    gateways: &[Ipv6Addr],
+) {
     let f = Family::Bridge;
     let tap = port.tap.as_str();
     let mut claim = Rule::new(f)
@@ -72,27 +81,67 @@ fn guard_ipv6(c: &mut Chain, port: &GuestPort, addrs: &[Ipv6Addr], prefix: Ipv6N
     for a in addrs {
         claim = claim.icmpv6_target_ne(*a);
     }
-    c.push(claim.drop())
-        .push(
-            Rule::new(f)
-                .iifname(tap)
-                .icmpv6_type(ICMPV6_NEIGHBOR_SOLICIT)
-                .icmpv6_lladdr_ne(OPT_SOURCE_LLADDR, port.mac)
-                .drop(),
-        )
-        .push(
+    c.push(claim.drop());
+    for g in gateways.iter().filter(|g| !addrs.contains(g)) {
+        // Gateway addresses include link-local ones, which the prefix check above misses.
+        c.push(
             Rule::new(f)
                 .iifname(tap)
                 .icmpv6_type(ICMPV6_NEIGHBOR_ADVERT)
-                .icmpv6_lladdr_ne(OPT_TARGET_LLADDR, port.mac)
-                .drop(),
-        )
-        .push(
-            Rule::new(f)
-                .iifname(tap)
-                .icmpv6_type(ICMPV6_REDIRECT)
+                .icmpv6_target_eq(*g)
                 .drop(),
         );
+        for kind in [ICMPV6_NEIGHBOR_SOLICIT, ICMPV6_NEIGHBOR_ADVERT] {
+            c.push(
+                Rule::new(f)
+                    .iifname(tap)
+                    .ip6_saddr(Ipv6Net::from(*g))
+                    .icmpv6_type(kind)
+                    .drop(),
+            );
+        }
+    }
+    // Duplicate address detection comes from `::`, carries no link-layer option and may
+    // carry a nonce option, so it passes before the option checks.
+    c.push(
+        Rule::new(f)
+            .iifname(tap)
+            .ip6_saddr(Ipv6Net::from(Ipv6Addr::UNSPECIFIED))
+            .icmpv6_type(ICMPV6_NEIGHBOR_SOLICIT)
+            .accept(),
+    );
+    for (kind, option) in [
+        (ICMPV6_NEIGHBOR_SOLICIT, OPT_SOURCE_LLADDR),
+        (ICMPV6_NEIGHBOR_ADVERT, OPT_TARGET_LLADDR),
+    ] {
+        c.push(
+            Rule::new(f)
+                .iifname(tap)
+                .icmpv6_type(kind)
+                .icmpv6_first_option_ne(option)
+                .drop(),
+        );
+    }
+    c.push(
+        Rule::new(f)
+            .iifname(tap)
+            .icmpv6_type(ICMPV6_NEIGHBOR_SOLICIT)
+            .icmpv6_lladdr_ne(OPT_SOURCE_LLADDR, port.mac)
+            .drop(),
+    )
+    .push(
+        Rule::new(f)
+            .iifname(tap)
+            .icmpv6_type(ICMPV6_NEIGHBOR_ADVERT)
+            .icmpv6_lladdr_ne(OPT_TARGET_LLADDR, port.mac)
+            .drop(),
+    )
+    .push(
+        Rule::new(f)
+            .iifname(tap)
+            .icmpv6_type(ICMPV6_REDIRECT)
+            .drop(),
+    );
     for kind in [ICMPV6_NEIGHBOR_SOLICIT, ICMPV6_NEIGHBOR_ADVERT] {
         c.push(
             Rule::new(f)
@@ -186,8 +235,13 @@ pub fn bridge_guard_ruleset(ports: &[GuestPort]) -> Table {
                     .drop(),
             )
             .push(Rule::new(f).iifname(tap).ether_type(ETH_P_8021AD).drop());
-        if let Ipv6Source::Only { addrs, prefix } = &p.ipv6 {
-            guard_ipv6(c, p, addrs, *prefix);
+        if let Ipv6Source::Only {
+            addrs,
+            prefix,
+            gateways,
+        } = &p.ipv6
+        {
+            guard_ipv6(c, p, addrs, *prefix, gateways);
         }
         if p.trunk {
             c.push(
@@ -216,7 +270,7 @@ pub fn bridge_guard_ruleset(ports: &[GuestPort]) -> Table {
                     .tagged_icmpv6_type(ICMPV6_ROUTER_ADVERT)
                     .drop(),
             );
-            if let Ipv6Source::Only { addrs, prefix } = &p.ipv6 {
+            if let Ipv6Source::Only { addrs, prefix, .. } = &p.ipv6 {
                 guard_ipv6_tagged(c, tap, addrs, *prefix);
             }
         } else {
@@ -244,6 +298,7 @@ mod tests {
         Ipv6Source::Only {
             addrs: addrs.iter().map(|a| a.parse().unwrap()).collect(),
             prefix: "fd00:1::/64".parse().unwrap(),
+            gateways: vec!["fd00:1::ffff".parse().unwrap()],
         }
     }
 
@@ -261,14 +316,15 @@ mod tests {
 
     #[test]
     fn ipv6_adds_claim_solicit_advert_redirect_learn_and_source_rules() {
-        // claim, 2 lladdr, redirect, 2 learning accepts, source
-        assert_eq!(rules(&port(false, only(&["fd00:1::1"]))), 8 + 7);
+        // claim, 2 lladdr, redirect, 2 learning accepts, source, then per gateway (one in
+        // the test) a target claim and 2 source drops, a DAD accept and 2 option checks
+        assert_eq!(rules(&port(false, only(&["fd00:1::1"]))), 8 + 7 + 6);
     }
 
     #[test]
     fn trunk_gets_tagged_ipv4_and_ipv6_rules() {
-        // base 7 (no 8021q drop) + ipv4 tagged 5 + ipv6 untagged 7 + ipv6 tagged 3
-        assert_eq!(rules(&port(true, only(&["fd00:1::1"]))), 7 + 5 + 7 + 3);
+        // base 7 (no 8021q drop) + ipv4 tagged 5 + ipv6 untagged 13 + ipv6 tagged 3
+        assert_eq!(rules(&port(true, only(&["fd00:1::1"]))), 7 + 5 + 13 + 3);
         assert_eq!(rules(&port(true, Ipv6Source::Any)), 7 + 5);
     }
 

@@ -248,11 +248,18 @@ fn ipv6_networks_advertise_and_nat() {
     assert_eq!(p.firewall.nat6[0].egress, "eth1");
     assert!(p.forwarding6);
     assert_eq!(p.firewall.switches[0].vip6, Some(own.addr()));
+    let Ipv6Source::Only { gateways, .. } = &p.firewall.ports[0].ipv6 else {
+        panic!("expected a source check");
+    };
+    // One bridge address and one link-local address for the node.
+    assert_eq!(gateways.len(), 2);
+    let gateways = gateways.clone();
     assert_eq!(
         p.firewall.ports[0].ipv6,
         Ipv6Source::Only {
             addrs: vec![addr],
-            prefix: "fd01:203:405:7::/64".parse().unwrap()
+            prefix: "fd01:203:405:7::/64".parse().unwrap(),
+            gateways: gateways.clone(),
         }
     );
     assert_eq!(p.firewall.routed[0].out, vec!["eth0", "eth1"]);
@@ -454,11 +461,18 @@ fn learned_addresses_outside_the_prefix_or_reserved_are_ignored() {
     );
     // Nothing usable: the SLAAC address stays.
     let slaac: Ipv6Addr = "fd01:203:405:7:5054:ff:fe00:1".parse().unwrap();
+    let Ipv6Source::Only { gateways, .. } = &p.firewall.ports[0].ipv6 else {
+        panic!("expected a source check");
+    };
+    // One bridge address and one link-local address for the node.
+    assert_eq!(gateways.len(), 2);
+    let gateways = gateways.clone();
     assert_eq!(
         p.firewall.ports[0].ipv6,
         Ipv6Source::Only {
             addrs: vec![slaac],
-            prefix: "fd01:203:405:7::/64".parse().unwrap()
+            prefix: "fd01:203:405:7::/64".parse().unwrap(),
+            gateways: gateways.clone(),
         }
     );
     assert_eq!(p.firewall.dnat[0].guest, IpAddr::V6(slaac));

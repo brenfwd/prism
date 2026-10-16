@@ -39,6 +39,24 @@ pub(super) fn reserved(
     out
 }
 
+/// The addresses of the network's routers: each node's address on the bridge and its
+/// link-local address. Guests may neither send neighbour messages from them nor claim them.
+pub(super) fn gateways(
+    net: &NetworkDoc,
+    node: Uuid,
+    members: &[MemberDoc],
+    link_local: impl Fn(Uuid) -> Ipv6Addr,
+) -> Vec<Ipv6Addr> {
+    let Some(prefix) = net.subnet6 else {
+        return Vec::new();
+    };
+    let nodes: BTreeSet<Uuid> = members.iter().map(|m| m.node_id).chain([node]).collect();
+    nodes
+        .into_iter()
+        .flat_map(|n| [ipam::node_addr6(prefix, n), link_local(n)])
+        .collect()
+}
+
 /// The learned addresses of one NIC that it may use: inside the network's prefix and not
 /// reserved for someone else. The NIC's own SLAAC address `eui` is always acceptable.
 pub(super) fn for_nic(

@@ -220,6 +220,7 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
         };
         let gateway6 = link_local_of(input.node);
         let reserved6 = learned::reserved(net, input.node, input.vms, input.members);
+        let node_addrs6 = learned::gateways(net, input.node, input.members, link_local_of);
         for vm in input.vms {
             for nic in &vm.nics {
                 let NicNetwork::Network {
@@ -283,6 +284,7 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                             Some(prefix) if !v6s.is_empty() => Ipv6Source::Only {
                                 addrs: learned::allowed(&v6s, eui),
                                 prefix,
+                                gateways: node_addrs6.clone(),
                             },
                             _ => Ipv6Source::Any,
                         },

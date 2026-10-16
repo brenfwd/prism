@@ -108,6 +108,9 @@ impl std::ops::BitOr for CtState {
     }
 }
 
+/// The routing table's address type for addresses of this host (`RTN_LOCAL`).
+pub const FIB_ADDRTYPE_LOCAL: u32 = 2;
+
 /// One nftables expression. Registers use the 16-byte `NFT_REG_1`; the verdict register is 0.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expr {
@@ -141,6 +144,9 @@ pub enum Expr {
     },
     /// `ct state` load.
     CtState,
+    /// Loads the address type of the destination address (`fib daddr type`) into the
+    /// register, as a native-endian `u32` such as [`FIB_ADDRTYPE_LOCAL`].
+    FibDaddrType,
     /// Counts packets and bytes that reach this point.
     Counter,
     /// Source NAT to the address of the outgoing interface.

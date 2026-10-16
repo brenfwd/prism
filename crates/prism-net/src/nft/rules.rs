@@ -253,7 +253,9 @@ impl DnatRule {
         let rule = match self.host_addr {
             Some(IpAddr::V4(a)) => rule.ip_daddr_eq(a),
             Some(IpAddr::V6(a)) => rule.ip6_daddr(Ipv6Net::from(a)),
-            None => rule,
+            // Without an address the forward is for this host only, not for
+            // transit traffic or a guest's connections to other hosts.
+            None => rule.daddr_local(),
         };
         if self.udp {
             rule.udp_dport(self.host_port)
@@ -405,6 +407,19 @@ mod dnat_tests {
             rule(&["eth0", "eth1"], false).prerouting(Family::Ip).len(),
             2
         );
+    }
+
+    #[test]
+    fn a_forward_without_an_address_matches_local_destinations_only() {
+        let r = rule(&["eth0"], true);
+        for rule in r.prerouting(Family::Ip) {
+            assert!(rule.exprs().contains(&crate::nft::Expr::FibDaddrType));
+        }
+        let mut bound = r;
+        bound.host_addr = Some("192.0.2.1".parse().unwrap());
+        for rule in bound.prerouting(Family::Ip) {
+            assert!(!rule.exprs().contains(&crate::nft::Expr::FibDaddrType));
+        }
     }
 
     #[test]

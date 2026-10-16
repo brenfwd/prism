@@ -50,15 +50,22 @@ impl GuestAddrs {
     pub fn observe(&self, entries: &[(Ipv6Addr, MacAddr)], now: Instant) {
         let mut map = self.lock();
         for (addr, mac) in entries {
-            let held_elsewhere = map
-                .iter()
-                .any(|(m, e)| m != mac && e.seen.iter().any(|(a, t)| a == addr && fresh(*t, now)));
+            // The guest agent is the authority on what a guest holds; a neighbour entry
+            // behind another MAC never takes such an address over.
+            let held_elsewhere = map.iter().any(|(m, e)| {
+                m != mac
+                    && (e.agent.contains(addr)
+                        || e.seen.iter().any(|(a, t)| a == addr && fresh(*t, now)))
+            });
             if held_elsewhere {
                 continue;
             }
             let e = map.entry(*mac).or_default();
+            let full = e.seen.len() >= MAX_PER_NIC;
             match e.seen.iter_mut().find(|(a, _)| a == addr) {
                 Some((_, t)) => *t = now,
+                // A full list keeps what it has, so junk addresses cannot push out real ones.
+                None if full => {}
                 None => e.seen.push((*addr, now)),
             }
         }
@@ -131,6 +138,27 @@ mod tests {
         g.observe(&[(ip("fd00::2"), mac(1))], t);
         g.observe(&[(ip("fd00::2"), mac(1))], t + RETAIN / 2 * 3);
         assert_eq!(g.snapshot(t + RETAIN * 2)[&mac(1)], vec![ip("fd00::2")]);
+    }
+
+    #[test]
+    fn an_address_the_agent_reports_stays_with_that_nic() {
+        let g = GuestAddrs::default();
+        let t = Instant::now();
+        g.set_agent(mac(1), vec![ip("fd00::2")]);
+        g.observe(&[(ip("fd00::2"), mac(2))], t);
+        assert!(!g.snapshot(t).contains_key(&mac(2)));
+    }
+
+    #[test]
+    fn a_full_list_ignores_new_addresses() {
+        let g = GuestAddrs::default();
+        let t = Instant::now();
+        let first: Vec<_> = (1..=MAX_PER_NIC as u16)
+            .map(|n| (Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, n), mac(1)))
+            .collect();
+        g.observe(&first, t);
+        g.observe(&[(ip("fd00::ffff"), mac(1))], t);
+        assert!(!g.snapshot(t)[&mac(1)].contains(&ip("fd00::ffff")));
     }
 
     #[test]

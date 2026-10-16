@@ -14,7 +14,7 @@ mod rule;
 mod rules;
 mod wire;
 
-pub use expr::{CmpOp, CtState, Expr, MetaKey, PayloadBase, Verdict};
+pub use expr::{CmpOp, CtState, Expr, FIB_ADDRTYPE_LOCAL, MetaKey, PayloadBase, Verdict};
 pub use guard::{GuestPort, Ipv6Source, bridge_guard_ruleset};
 pub use rule::Rule;
 pub use rules::{

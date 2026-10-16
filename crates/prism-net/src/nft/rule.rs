@@ -167,6 +167,12 @@ impl Rule {
         self.tagged_payload_ne(ETH_P_IP, 12, addr.octets().to_vec())
     }
 
+    /// `fib daddr type local`: the destination is an address of this host.
+    pub fn daddr_local(self) -> Self {
+        self.expr(Expr::FibDaddrType)
+            .cmp(CmpOp::Eq, super::FIB_ADDRTYPE_LOCAL.to_ne_bytes().to_vec())
+    }
+
     /// `arp saddr ip != <addr>` for a VLAN-tagged frame.
     pub fn tagged_arp_saddr_ip_ne(self, addr: Ipv4Addr) -> Self {
         self.tagged_payload_ne(ETH_P_ARP, 14, addr.octets().to_vec())
@@ -376,6 +382,20 @@ impl Rule {
     pub fn icmpv6_target_ne(self, addr: Ipv6Addr) -> Self {
         self.payload(PayloadBase::Transport, 8, 16)
             .cmp(CmpOp::Neq, addr.octets().to_vec())
+    }
+
+    /// `icmpv6` neighbour message whose target address is `addr`.
+    pub fn icmpv6_target_eq(self, addr: Ipv6Addr) -> Self {
+        self.payload(PayloadBase::Transport, 8, 16)
+            .cmp(CmpOp::Eq, addr.octets().to_vec())
+    }
+
+    /// A neighbour message with a first option whose type is not `option`. Linux parses the
+    /// options after the first too, so a guest could put a harmless option first and its
+    /// own link-layer address second; messages like that are matched here and dropped.
+    pub fn icmpv6_first_option_ne(self, option: u8) -> Self {
+        self.payload(PayloadBase::Transport, 24, 1)
+            .cmp(CmpOp::Neq, vec![option])
     }
 
     /// A neighbour solicitation or advertisement whose first option is a link-layer address

@@ -109,6 +109,11 @@ fn expr(m: &mut Msg, e: &Expr) {
             m.str(NFTA_EXPR_NAME, "ct").begin(NFTA_EXPR_DATA);
             m.be32(1, NFT_REG_1).be32(2, 0).end(); // NFT_CT_STATE
         }
+        Expr::FibDaddrType => {
+            // NFTA_FIB_DREG, NFTA_FIB_RESULT = NFT_FIB_RESULT_ADDRTYPE, NFTA_FIB_FLAGS = NFTA_FIB_F_DADDR
+            m.str(NFTA_EXPR_NAME, "fib").begin(NFTA_EXPR_DATA);
+            m.be32(1, NFT_REG_1).be32(2, 3).be32(3, 2).end();
+        }
         Expr::Counter => {
             m.str(NFTA_EXPR_NAME, "counter").begin(NFTA_EXPR_DATA);
             m.attr(1, &0u64.to_be_bytes())

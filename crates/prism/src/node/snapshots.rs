@@ -626,6 +626,6 @@ mod tests {
             snapshot_overlays(xml),
             [std::path::PathBuf::from("/p/web.s1.qcow2")]
         );
-        assert!(snapshot_overlays(XML).is_empty());
+        assert_eq!(snapshot_overlays(XML).len(), 0);
     }
 }

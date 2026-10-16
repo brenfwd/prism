@@ -35,15 +35,20 @@ const META_PENDING: &str = "cluster.pending";
 /// How long a follower waits to see its own forwarded write.
 const READ_YOUR_WRITES: Duration = Duration::from_secs(10);
 const RECONCILE_EVERY: Duration = Duration::from_secs(2);
+/// How long an invite lasts when the operator gives no time: one hour.
 pub const DEFAULT_INVITE_TTL: Duration = Duration::from_secs(3600);
 
 /// This node's place in the cluster, persisted in `state.db` meta (never
 /// replicated).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LocalMember {
+    /// Id of the cluster this node belongs to.
     pub cluster_id: Uuid,
+    /// This node's raft id.
     pub raft_id: RaftId,
+    /// This node's mesh address.
     pub mesh_addr: Ipv6Addr,
+    /// MTU of the `WireGuard` interface.
     pub wg_mtu: u16,
 }
 
@@ -94,16 +99,25 @@ fn decode_key(s: &str) -> anyhow::Result<[u8; 32]> {
 pub struct ClusterConfig {
     /// Underlay hosts peers can reach this node at, preference-ordered.
     pub advertise: Vec<String>,
+    /// UDP port of the `WireGuard` interface.
     pub wireguard_port: u16,
+    /// Directory for raft logs and other cluster files.
     pub data_dir: PathBuf,
 }
 
+/// The cluster runtime of one node: raft, the gRPC service, the `WireGuard` mesh and the data plane around the replicated [`State`].
 pub struct Cluster {
+    /// This node's id.
     pub me: Uuid,
+    /// This node's name.
     pub name: String,
+    /// The replicated state.
     pub state: State,
+    /// The `WireGuard` mesh.
     pub mesh: Arc<dyn Mesh>,
+    /// The configuration the node started with.
     pub cfg: ClusterConfig,
+    /// Cached gRPC channels to peers.
     pub channels: Channels,
     raft: Mutex<Option<ClusterNode>>,
     local: Mutex<Option<LocalMember>>,
@@ -111,6 +125,7 @@ pub struct Cluster {
     pub node: std::sync::OnceLock<std::sync::Weak<crate::node::Node>>,
     /// The HTTP API, for requests tunnelled from peers.
     pub http: std::sync::OnceLock<axum::Router>,
+    /// The data plane session table.
     pub dataplane: Arc<super::dataplane::DataPlane>,
 }
 
@@ -125,20 +140,31 @@ impl std::fmt::Debug for Cluster {
 /// Status for the API and `Cluster.Status`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterStatus {
+    /// Whether this node is in a cluster.
     pub clustered: bool,
+    /// The cluster document, once the node is clustered.
     pub cluster: Option<ClusterDoc>,
+    /// This node's id.
     pub me: Uuid,
+    /// This node's raft id, once clustered.
     pub raft_id: Option<RaftId>,
+    /// The node's raft role, such as leader or follower.
     pub role: String,
+    /// The current leader, if one is known.
     pub leader: Option<Uuid>,
+    /// Index of the last raft entry applied locally.
     pub applied_index: u64,
+    /// All members.
     pub members: Vec<MemberDoc>,
+    /// Whether the cluster has no leader or no quorum and is read-only.
     pub degraded: bool,
+    /// Whether this node is waiting to be admitted.
     pub pending_join: bool,
     /// Highest feature level this binary supports.
     pub supported_feature_level: u32,
 }
 impl Cluster {
+    /// Creates the runtime for node `me`. It does not start raft; `init` and `join` do.
     pub fn new(
         me: Uuid,
         name: String,
@@ -173,6 +199,7 @@ impl Cluster {
             .clone()
     }
 
+    /// The membership recorded for this node, if it is in a cluster.
     pub fn local(&self) -> Option<LocalMember> {
         self.local
             .lock()
@@ -275,6 +302,7 @@ impl Cluster {
             .map(|a| SocketAddr::new(a.into(), prism_proto::GRPC_PORT))
     }
 
+    /// A snapshot of the cluster for the API.
     pub fn status(&self) -> anyhow::Result<ClusterStatus> {
         let members = self.state.members()?;
         let raft = self.raft();

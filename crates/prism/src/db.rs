@@ -82,6 +82,7 @@ impl Sqlite {
         })
     }
 
+    /// The connection, locked for the duration of the guard. A poisoned lock is recovered, since a panic cannot leave a half-written statement behind.
     pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
         self.conn
             .lock()
@@ -101,6 +102,7 @@ pub struct Docs<'a> {
 }
 
 impl Docs<'_> {
+    /// Reads document `id` of `collection`, or `None` if it does not exist. Fails if the stored JSON does not match `T`.
     pub fn get<T: DeserializeOwned>(
         &self,
         collection: &str,
@@ -109,10 +111,12 @@ impl Docs<'_> {
         get(self.tx, collection, id)
     }
 
+    /// Reads every document of `collection`, in id order. Fails if any body does not match `T`.
     pub fn list<T: DeserializeOwned>(&self, collection: &str) -> anyhow::Result<Vec<T>> {
         list(self.tx, collection)
     }
 
+    /// Serialises `body` to JSON and stores it as document `id`, replacing any existing one.
     pub fn put<T: Serialize>(&self, collection: &str, id: &str, body: &T) -> anyhow::Result<()> {
         self.tx.execute(
             "INSERT INTO docs (collection, id, body) VALUES (?1, ?2, ?3)
@@ -138,6 +142,7 @@ impl Docs<'_> {
         Ok(())
     }
 
+    /// Sets a metadata key, replacing its value.
     pub fn set_meta(&self, key: &str, value: &str) -> anyhow::Result<()> {
         set_meta(self.tx, key, value)
     }
@@ -190,6 +195,7 @@ fn set_meta(conn: &Connection, key: &str, value: &str) -> anyhow::Result<()> {
 }
 
 impl StateDb {
+    /// Opens or creates the database at `path` and applies pending migrations.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         Ok(Self {
             db: Sqlite::open(path, STATE_MIGRATIONS)?,
@@ -203,6 +209,7 @@ impl StateDb {
         })
     }
 
+    /// Reads a metadata value, or `None` if the key is unset.
     pub fn meta(&self, key: &str) -> anyhow::Result<Option<String>> {
         Ok(self
             .db
@@ -211,10 +218,12 @@ impl StateDb {
             .optional()?)
     }
 
+    /// Sets a metadata key outside any transaction.
     pub fn set_meta(&self, key: &str, value: &str) -> anyhow::Result<()> {
         set_meta(&self.db.conn(), key, value)
     }
 
+    /// Deletes a metadata key. Deleting a missing key is not an error.
     pub fn delete_meta(&self, key: &str) -> anyhow::Result<()> {
         self.db
             .conn()
@@ -222,6 +231,7 @@ impl StateDb {
         Ok(())
     }
 
+    /// Reads document `id` of `collection`, or `None` if it does not exist.
     pub fn get<T: DeserializeOwned>(
         &self,
         collection: &str,
@@ -230,6 +240,7 @@ impl StateDb {
         get(&self.db.conn(), collection, id)
     }
 
+    /// Reads every document of `collection`, in id order.
     pub fn list<T: DeserializeOwned>(&self, collection: &str) -> anyhow::Result<Vec<T>> {
         list(&self.db.conn(), collection)
     }
@@ -263,6 +274,7 @@ pub struct NodeDb {
 }
 
 impl NodeDb {
+    /// Opens or creates the node-local database at `path` and applies pending migrations.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         Ok(Self {
             db: Sqlite::open(path, NODE_MIGRATIONS)?,
@@ -276,6 +288,7 @@ impl NodeDb {
         })
     }
 
+    /// Stores or replaces task `id` with its JSON body and a creation time used for pruning.
     pub fn put_task<T: Serialize>(
         &self,
         id: &str,
@@ -290,6 +303,7 @@ impl NodeDb {
         Ok(())
     }
 
+    /// Reads task `id`, or `None` if it does not exist or was pruned.
     pub fn task<T: DeserializeOwned>(&self, id: &str) -> anyhow::Result<Option<T>> {
         let body: Option<String> = self
             .db

@@ -15,7 +15,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 /// How far one member has applied the replicated log.
 #[derive(Debug, Clone, Serialize)]
 pub struct MemberProgress {
+    /// Node id of the member.
     pub node_id: Uuid,
+    /// Member name.
     pub name: String,
     /// `None` when the member did not answer.
     pub applied_index: Option<u64>,
@@ -29,6 +31,7 @@ pub struct RemovalStatus {
     /// Members whose `applied_index` is below the removal's log index, or
     /// that could not be reached. Catch them up or isolate them.
     pub pending: Vec<MemberProgress>,
+    /// Whether the operation has finished.
     pub complete: bool,
 }
 

@@ -6,6 +6,7 @@ use futures::future::BoxFuture;
 
 /// Interface name of the mesh.
 pub const INTERFACE: &str = "wg-prism";
+/// UDP port `WireGuard` listens on unless `[cluster]` overrides it.
 pub const DEFAULT_PORT: u16 = 51820;
 /// Default `wg-prism` MTU: 1420 suits a 1500-byte underlay over IPv6.
 pub const DEFAULT_MTU: u16 = 1420;
@@ -13,7 +14,9 @@ pub const DEFAULT_MTU: u16 = 1420;
 /// A peer as configured on `wg-prism`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeshPeer {
+    /// The node's `WireGuard` public key.
     pub pubkey: [u8; 32],
+    /// The node's address inside the mesh.
     pub mesh_addr: Ipv6Addr,
     /// First reachable underlay endpoint, if known; peers learn the rest by
     /// roaming.
@@ -23,11 +26,15 @@ pub struct MeshPeer {
 /// Live state of one peer.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct PeerStatus {
+    /// The peer's `WireGuard` public key, base64.
     pub pubkey: String,
+    /// The peer's last known UDP endpoint, if it has one.
     pub endpoint: Option<String>,
     /// Seconds since the last handshake.
     pub handshake_age_secs: Option<u64>,
+    /// Bytes received from the peer.
     pub rx_bytes: u64,
+    /// Bytes sent to the peer.
     pub tx_bytes: u64,
 }
 

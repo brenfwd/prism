@@ -1,3 +1,5 @@
+//! Tests for applying commands to [`State`].
+
 use super::*;
 use crate::cluster::model::{ClusterMode, MemberState};
 use crate::spec::tests::sample_spec;

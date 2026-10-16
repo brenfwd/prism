@@ -13,7 +13,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ciborium::Value;
 use uuid::Uuid;
 
+/// Text prefix of an encoded invite; the digit is the format version.
 pub const INVITE_PREFIX: &str = "prism-invite1.";
+/// Text prefix of an encoded reply; the digit is the format version.
 pub const REPLY_PREFIX: &str = "prism-reply1.";
 const MINOR: u64 = 0;
 
@@ -36,40 +38,65 @@ pub enum BlobError {
 /// The sponsor: the member the new node first peers with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sponsor {
+    /// The sponsor's node id.
     pub node_id: Uuid,
+    /// The sponsor's display name.
     pub name: String,
+    /// The sponsor's `WireGuard` public key.
     pub wg_pubkey: [u8; 32],
+    /// The sponsor's mesh address.
     pub mesh_addr: Ipv6Addr,
+    /// Addresses the joining node can reach the sponsor at.
     pub endpoints: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invite {
+    /// Id of the cluster being joined.
     pub cluster_id: Uuid,
+    /// Name of the cluster being joined.
     pub cluster_name: String,
     #[allow(clippy::struct_field_names)] // the protocol's name for it
     pub invite_id: [u8; 16],
+    /// Expiry time, in Unix seconds.
     pub exp: i64,
+    /// The /48 mesh prefix of the cluster.
     pub mesh_prefix: Ipv6Addr,
+    /// The mesh address reserved for the joining node.
     pub assigned_addr: Ipv6Addr,
+    /// `WireGuard` MTU of the mesh.
     pub wg_mtu: u16,
+    /// The node that issued the invite.
     pub sponsor: Sponsor,
+    /// Feature level of the issuing node.
     pub feature_level: u32,
+    /// prism version of the issuing node.
     pub version: String,
+    /// Suggested name for the joining node.
     pub name_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
+    /// Id of the cluster being joined.
     pub cluster_id: Uuid,
+    /// Id of the invite being answered.
     pub invite_id: [u8; 16],
+    /// The mesh address taken from the invite.
     pub assigned_addr: Ipv6Addr,
+    /// The joining node's id.
     pub node_id: Uuid,
+    /// The joining node's name.
     pub name: String,
+    /// The joining node's `WireGuard` public key.
     pub wg_pubkey: [u8; 32],
+    /// Addresses the sponsor can reach the joining node at.
     pub endpoints: Vec<String>,
+    /// Feature level of the joining node.
     pub feature_level: u32,
+    /// prism version of the joining node.
     pub version: String,
+    /// CPU architecture of the joining node, as in `std::env::consts::ARCH`.
     pub arch: String,
 }
 
@@ -222,6 +249,7 @@ fn versions(feature_level: u32, version: &str, arch: Option<&str>) -> Value {
 }
 
 impl Invite {
+    /// Encodes the invite as `prism-invite1.` followed by base64url of the CBOR body and a 4-byte BLAKE3 checksum.
     pub fn encode(&self) -> String {
         let s = &self.sponsor;
         let sponsor = Value::Map(vec![
@@ -249,6 +277,7 @@ impl Invite {
         encode(INVITE_PREFIX, f)
     }
 
+    /// Decodes an invite blob. Fails on a wrong prefix, bad base64, a checksum mismatch or a malformed body.
     pub fn decode(blob: &str) -> Result<Self, BlobError> {
         let mut f = Fields(decode(blob, INVITE_PREFIX)?);
         let mut s = f.map(8)?;
@@ -277,12 +306,14 @@ impl Invite {
         })
     }
 
+    /// The invite id as 32 lowercase hex digits.
     pub fn invite_id_hex(&self) -> String {
         hex(&self.invite_id)
     }
 }
 
 impl Reply {
+    /// Encodes the reply as `prism-reply1.` followed by base64url of the CBOR body and a 4-byte BLAKE3 checksum.
     pub fn encode(&self) -> String {
         encode(
             REPLY_PREFIX,
@@ -303,6 +334,7 @@ impl Reply {
         )
     }
 
+    /// Decodes a reply blob. Fails on a wrong prefix, bad base64, a checksum mismatch or a malformed body.
     pub fn decode(blob: &str) -> Result<Self, BlobError> {
         let mut f = Fields(decode(blob, REPLY_PREFIX)?);
         let mut v = f.map(8)?;
@@ -320,11 +352,13 @@ impl Reply {
         })
     }
 
+    /// The invite id as 32 lowercase hex digits.
     pub fn invite_id_hex(&self) -> String {
         hex(&self.invite_id)
     }
 }
 
+/// Formats bytes as lowercase hex, two digits per byte.
 pub fn hex(b: &[u8]) -> String {
     use std::fmt::Write;
     b.iter().fold(String::new(), |mut s, x| {

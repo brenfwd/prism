@@ -255,7 +255,9 @@ pub fn migration_dir(migration: uuid::Uuid) -> std::path::PathBuf {
 
 /// `DataPlane.Open`: registers a session for the calling member.
 pub struct DataPlaneService {
+    /// The cluster the service belongs to.
     pub cluster: Arc<super::Cluster>,
+    /// The session table that incoming connections are matched against.
     pub plane: Arc<DataPlane>,
 }
 

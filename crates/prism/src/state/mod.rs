@@ -40,7 +40,9 @@ use apply::apply_command;
 pub use timers::ArchiveTimers;
 use timers::{ARCHIVE_TIMERS_ID, TIMERS};
 
+/// Collection holding VM specs, keyed by VM id.
 pub const VMS: &str = "vm";
+/// Collection holding API-created pools, keyed by `node/name`, or by name alone for nil owners.
 pub const POOLS: &str = "pool";
 const CLUSTER_ID: &str = "cluster";
 const APPLIED_META: &str = "raft.applied";
@@ -48,8 +50,11 @@ const APPLIED_META: &str = "raft.applied";
 /// An API-created directory pool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PoolDoc {
+    /// The pool name, unique per node.
     pub name: String,
+    /// The directory the pool stores volumes in.
     pub path: PathBuf,
+    /// The default volume format, such as `qcow2`.
     pub format: String,
     /// Owning node; nil in documents written before clustering existed.
     #[serde(default)]
@@ -111,6 +116,7 @@ impl std::fmt::Debug for State {
 }
 
 impl State {
+    /// Wraps an open state database for the node `node`.
     pub fn new(db: StateDb, node: Uuid) -> Self {
         Self {
             db: Arc::new(db),
@@ -208,12 +214,14 @@ impl State {
         vm
     }
 
+    /// All VMs sorted by name, with nil owners resolved to this node.
     pub fn vms(&self) -> anyhow::Result<Vec<VmSpec>> {
         let mut vms: Vec<VmSpec> = self.db.list(VMS)?;
         vms.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(vms.into_iter().map(|v| self.resolve_vm(v)).collect())
     }
 
+    /// The VM with id `id`, if any.
     pub fn vm(&self, id: Uuid) -> anyhow::Result<Option<VmSpec>> {
         Ok(self
             .db
@@ -221,6 +229,7 @@ impl State {
             .map(|v| self.resolve_vm(v)))
     }
 
+    /// The VM named `name`, if any.
     pub fn vm_by_name(&self, name: &str) -> anyhow::Result<Option<VmSpec>> {
         Ok(self.vms()?.into_iter().find(|v| v.name == name))
     }
@@ -246,32 +255,39 @@ impl State {
         Ok(self.db.get(TIMERS, ARCHIVE_TIMERS_ID)?.unwrap_or_default())
     }
 
+    /// The cluster document, or `None` on a node that is not clustered.
     pub fn cluster(&self) -> anyhow::Result<Option<ClusterDoc>> {
         self.db.get(CLUSTER, CLUSTER_ID)
     }
 
+    /// All members sorted by raft id.
     pub fn members(&self) -> anyhow::Result<Vec<MemberDoc>> {
         let mut m: Vec<MemberDoc> = self.db.list(MEMBERS)?;
         m.sort_by_key(|m| m.raft_id);
         Ok(m)
     }
 
+    /// All invites, expired or not.
     pub fn invites(&self) -> anyhow::Result<Vec<InviteDoc>> {
         self.db.list(INVITES)
     }
 
+    /// Records of removed members, kept so that raft ids and mesh addresses are not reused.
     pub fn tombstones(&self) -> anyhow::Result<Vec<TombstoneDoc>> {
         self.db.list(TOMBSTONES)
     }
 
+    /// All archive pools.
     pub fn archive_pools(&self) -> anyhow::Result<Vec<ArchivePoolDoc>> {
         self.db.list(ARCHIVE_POOLS)
     }
 
+    /// All archive members.
     pub fn archive_members(&self) -> anyhow::Result<Vec<ArchiveMemberDoc>> {
         self.db.list(ARCHIVE_MEMBERS)
     }
 
+    /// The archive file at `path` in `pool`, if any.
     pub fn archive_file(&self, pool: &str, path: &str) -> anyhow::Result<Option<ArchiveFileDoc>> {
         self.db.get(ARCHIVE_FILES, &ArchiveFileDoc::key(pool, path))
     }
@@ -286,6 +302,7 @@ impl State {
             .collect())
     }
 
+    /// All networks sorted by name.
     pub fn networks(&self) -> anyhow::Result<Vec<NetworkDoc>> {
         let mut n: Vec<NetworkDoc> = self.db.list(NETWORKS)?;
         n.sort_by(|a, b| a.name.cmp(&b.name));

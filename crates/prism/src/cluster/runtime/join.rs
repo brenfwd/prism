@@ -43,29 +43,43 @@ async fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
 /// The preview shown before admitting a node.
 #[derive(Debug, Clone, Serialize)]
 pub struct AcceptPreview {
+    /// Node id of the joining node.
     pub node_id: Uuid,
+    /// Name the joining node chose.
     pub name: String,
+    /// Addresses the joining node advertises.
     pub endpoints: Vec<String>,
+    /// Short form of the joining node's `WireGuard` key, for comparing out of band.
     pub fingerprint: String,
+    /// Id of the invite the reply answers.
     pub invite_id: String,
+    /// Whether the node was admitted by this call.
     pub admitted: bool,
 }
 
 /// What a joining node shows the operator.
 #[derive(Debug, Clone, Serialize)]
 pub struct JoinReply {
+    /// The reply blob to paste into the sponsor's accept form.
     pub reply: String,
+    /// Short form of this node's `WireGuard` key.
     pub fingerprint: String,
+    /// Name of the cluster being joined.
     pub cluster_name: String,
+    /// Name of the sponsoring node.
     pub sponsor: String,
 }
 
 /// An invite as returned to the operator.
 #[derive(Debug, Clone, Serialize)]
 pub struct InviteView {
+    /// Id of the invite, as 32 hex digits.
     pub invite_id: String,
+    /// The invite blob to paste on the joining node.
     pub blob: String,
+    /// Expiry time, in Unix seconds.
     pub expires: i64,
+    /// The mesh address reserved for the joining node.
     pub assigned_addr: Ipv6Addr,
 }
 

@@ -55,7 +55,9 @@ fn require_active(cluster: &Cluster, remote: Option<SocketAddr>) -> Result<(), S
     }
 }
 
+/// The cluster gRPC service: bootstrap, raft transport and data plane session setup.
 pub struct ClusterService {
+    /// The cluster the service answers for.
     pub cluster: Arc<Cluster>,
 }
 

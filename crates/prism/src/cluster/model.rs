@@ -6,9 +6,13 @@ use std::net::Ipv6Addr;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Collection holding the single cluster document.
 pub const CLUSTER: &str = "cluster";
+/// Collection holding member documents, keyed by node id.
 pub const MEMBERS: &str = "member";
+/// Collection holding invite documents, keyed by invite id.
 pub const INVITES: &str = "invite";
+/// Collection holding tombstones of removed members.
 pub const TOMBSTONES: &str = "tombstone";
 
 /// Cluster feature level; peers must be within one of each other.
@@ -39,14 +43,19 @@ pub enum ClusterMode {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterDoc {
+    /// Unique id of the cluster.
     pub cluster_id: Uuid,
+    /// The cluster's name.
     pub name: String,
+    /// Whether the cluster has a hub or elects a leader.
     pub mode: ClusterMode,
     /// The ULA `/48`, as its first 48 bits (for example `fd12:3456:789a::`).
     pub mesh_prefix: Ipv6Addr,
     /// `wg-prism` MTU, the same on every member.
     pub wg_mtu: u16,
+    /// The level that every member's commands are limited to.
     pub feature_level: u32,
+    /// Creation time, in Unix seconds.
     pub created: i64,
 }
 
@@ -79,22 +88,29 @@ pub enum MemberState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemberDoc {
+    /// Node id.
     pub node_id: Uuid,
+    /// Raft id, also encoded in the mesh address.
     pub raft_id: u64,
+    /// Display name.
     pub name: String,
     /// `WireGuard` public key, base64.
     pub wg_pubkey: String,
+    /// The member's mesh address.
     pub mesh_addr: Ipv6Addr,
     /// Underlay `host:port` endpoints, preference-ordered; may be empty.
     pub endpoints: Vec<String>,
+    /// Where the member is in its life cycle.
     pub state: MemberState,
     /// Votes in raft (the hub, or a consensus voter).
     pub voter: bool,
+    /// prism version the member runs.
     pub version: String,
     /// Highest feature level this member's binary supports; documents from
     /// before levels were tracked read as 1.
     #[serde(default = "one")]
     pub feature_level: u32,
+    /// Time the member was admitted, in Unix seconds.
     pub joined: i64,
 }
 
@@ -106,10 +122,15 @@ fn one() -> u32 {
 pub struct InviteDoc {
     /// 128-bit random, hex. Names the reservation; not a secret.
     pub invite_id: String,
+    /// Raft id reserved for the invited node.
     pub raft_id: u64,
+    /// Mesh address reserved for the invited node.
     pub assigned_addr: Ipv6Addr,
+    /// Expiry time, in Unix seconds.
     pub exp: i64,
+    /// Node that created the invite.
     pub created_by: Uuid,
+    /// Suggested name for the joining node.
     pub name_hint: Option<String>,
     /// The node that consumed it, making replays idempotent.
     pub consumed_by: Option<Uuid>,
@@ -117,9 +138,13 @@ pub struct InviteDoc {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TombstoneDoc {
+    /// Node id of the removed member.
     pub node_id: Uuid,
+    /// The removed member's `WireGuard` public key, base64.
     pub wg_pubkey: String,
+    /// The mesh address that stays reserved.
     pub mesh_addr: Ipv6Addr,
+    /// Removal time, in Unix seconds.
     pub removed: i64,
     /// Log index of the removal; a member has applied it once its
     /// `applied_index` reaches this.

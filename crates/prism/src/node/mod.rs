@@ -16,6 +16,7 @@ mod guest;
 mod iso_cache;
 mod libvirt;
 mod migrate;
+mod migrate_dest;
 mod migrate_setup;
 mod model;
 mod moves;

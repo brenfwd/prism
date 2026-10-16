@@ -9,7 +9,6 @@
 //! `owner_epoch + 1` for the destination after `Confirm3`.
 
 use std::collections::HashMap;
-use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -161,7 +160,7 @@ impl Node {
                     node.restore_snapshots(&spec, &xmls).await;
                 }
                 // Whatever happened, drop the intent and the socket directory.
-                let _ = std::fs::remove_dir_all(migration_dir(migration));
+                remove_migration_dir(migration);
                 if let Err(e) = &res {
                     tracing::error!(vm = %spec.name, "migration failed: {e:#}");
                     if let Ok(mut cur) = node.spec(spec.id)
@@ -171,14 +170,17 @@ impl Node {
                         let base = cur.generation;
                         cur.migrating = None;
                         cur.generation += 1;
-                        let _ = node.put_spec(&cur, Some(base)).await;
+                        if let Err(e) = node.put_spec(&cur, Some(base)).await {
+                            tracing::warn!(vm = %spec.name, "could not clear the migration intent: {e:#}");
+                        }
                     }
                 }
                 res
             }))
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Runs the migration phases in order; any phase may fail, and
+    /// `migrate_vm` then rolls back the intent and the snapshot metadata.
     async fn run_migration(
         &self,
         cluster: &crate::cluster::Cluster,
@@ -202,49 +204,10 @@ impl Node {
         intent.generation += 1;
         self.put_spec(&intent, Some(spec.generation)).await?;
 
-        // 2. Read-only backing layers go over the data plane first.
-        let mut images = Vec::new();
-        let mut copied = Vec::new();
-        for disk in spec.disks.iter().filter(|d| d.device == DiskDevice::Disk) {
-            let pool = self.storage.get(&disk.pool)?;
-            for b in &disk.backing {
-                ctx.progress(Some(0.0), format!("copying {b} to {}", dst.name));
-                crate::cluster::dataplane::send_volume(
-                    cluster,
-                    dst,
-                    pool.open_read(b)?,
-                    &req.pool,
-                    b,
-                    Arc::new(|_, _| {}),
-                )
-                .await?;
-                copied.push(b.clone());
-            }
-            let top = disk.volume.clone().unwrap_or_default();
-            images.push(ImageReq {
-                format: pool
-                    .image_format(&top)
-                    .unwrap_or_else(|| disk.format.clone()),
-                size: pool.volume(&top)?.size_bytes,
-                backing: disk.backing.last().cloned(),
-                name: top,
-            });
-        }
-
-        // Saved-memory images of snapshots travel with the chain.
-        for (mpool, mem) in &memory {
-            ctx.progress(Some(0.0), format!("copying {mem} to {}", dst.name));
-            crate::cluster::dataplane::send_volume(
-                cluster,
-                dst,
-                self.storage.get(mpool)?.open_read(mem)?,
-                &req.pool,
-                mem,
-                Arc::new(|_, _| {}),
-            )
+        // 2. Read-only layers and saved-memory images go over the data plane.
+        let (images, copied) = self
+            .copy_static_files(cluster, spec, dst, req, &memory, ctx)
             .await?;
-            copied.push(mem.clone());
-        }
 
         // 3. Begin on the source.
         let flags = mf::LIVE
@@ -279,9 +242,10 @@ impl Node {
             }
         };
 
-        // 4–5. Begin opened a migration job on the source; if setup fails
-        // before Perform, Confirm with `cancelled` closes it, or every later
-        // attempt fails with "another migration job is already running".
+        // 4. Prepare the destination. Begin opened a migration job on the
+        // source; if setup fails before Perform, Confirm with `cancelled`
+        // closes it, or every later attempt fails with "another migration
+        // job is already running".
         let setup = self
             .prepare_migration(
                 cluster,
@@ -318,8 +282,132 @@ impl Node {
             .chain(copied)
             .collect();
 
-        // 6. Perform, with progress from job stats.
-        let _ = c.migrate_set_max_downtime(&dom, MAX_DOWNTIME_MS).await;
+        // 5. Perform, then 6. Finish on the destination and Confirm on the
+        // source.
+        let perform = self
+            .perform_transfer(&c, &dom, &params, &prep, flags, ctx)
+            .await?;
+        let fin: FinishResp = self
+            .call_peer(
+                cluster,
+                dst,
+                &format!("/api/v1/internal/migrations/{migration}/finish"),
+                &FinishReq {
+                    params: prep.params.clone(),
+                    cookie: B64.encode(&perform.finish_cookie),
+                    flags,
+                    cancelled: perform.error.is_some(),
+                    pool: req.pool.clone(),
+                    images: image_names,
+                    snapshot_xml,
+                    vm: Some(Box::new(on_destination(spec, dst.node_id, &req.pool))),
+                },
+            )
+            .await?;
+        for s in splicers {
+            s.abort();
+        }
+        let succeeded = perform.error.is_none() && fin.ok;
+        let confirm_cookie = B64.decode(&fin.cookie).unwrap_or_default();
+        if let Err(e) = c
+            .migrate_confirm3(&dom, &params, &confirm_cookie, flags, !succeeded)
+            .await
+        {
+            // The destination may already run the guest: never resume the
+            // source here; the intent stays until resolved.
+            if succeeded {
+                tracing::warn!(vm = %spec.name, "confirm on the source failed: {e}");
+            } else {
+                anyhow::bail!("migration failed and the source could not resume: {e}");
+            }
+        }
+        if !succeeded {
+            anyhow::bail!(
+                "migration failed: {}",
+                perform
+                    .error
+                    .or(fin.error)
+                    .unwrap_or_else(|| "unknown error".into())
+            );
+        }
+
+        // 7. Ownership moves to the destination.
+        self.hand_over(spec, dst, &req.pool, &memory).await?;
+        tracing::info!(vm = %spec.name, to = %dst.name, "live migration complete");
+        Ok(serde_json::json!({ "node": dst.node_id }))
+    }
+
+    /// Sends the read-only backing layers and snapshot memory images to the
+    /// destination pool. Returns the image requests for each disk's top layer
+    /// and the names already copied (for cleanup on failure).
+    async fn copy_static_files(
+        &self,
+        cluster: &crate::cluster::Cluster,
+        spec: &VmSpec,
+        dst: &MemberDoc,
+        req: &MigrateVm,
+        memory: &[(String, String)],
+        ctx: &crate::tasks::TaskCtx,
+    ) -> anyhow::Result<(Vec<ImageReq>, Vec<String>)> {
+        let mut images = Vec::new();
+        let mut copied = Vec::new();
+        for disk in spec.disks.iter().filter(|d| d.device == DiskDevice::Disk) {
+            let pool = self.storage.get(&disk.pool)?;
+            for b in &disk.backing {
+                ctx.progress(Some(0.0), format!("copying {b} to {}", dst.name));
+                crate::cluster::dataplane::send_volume(
+                    cluster,
+                    dst,
+                    pool.open_read(b)?,
+                    &req.pool,
+                    b,
+                    Arc::new(|_, _| {}),
+                )
+                .await?;
+                copied.push(b.clone());
+            }
+            let top = disk.volume.clone().unwrap_or_default();
+            images.push(ImageReq {
+                format: pool
+                    .image_format(&top)
+                    .unwrap_or_else(|| disk.format.clone()),
+                size: pool.volume(&top)?.size_bytes,
+                backing: disk.backing.last().cloned(),
+                name: top,
+            });
+        }
+        // Saved-memory images of snapshots travel with the chain.
+        for (mpool, mem) in memory {
+            ctx.progress(Some(0.0), format!("copying {mem} to {}", dst.name));
+            crate::cluster::dataplane::send_volume(
+                cluster,
+                dst,
+                self.storage.get(mpool)?.open_read(mem)?,
+                &req.pool,
+                mem,
+                Arc::new(|_, _| {}),
+            )
+            .await?;
+            copied.push(mem.clone());
+        }
+        Ok((images, copied))
+    }
+
+    /// Runs `Perform3Params` with progress from job stats. A failed or
+    /// cancelled transfer is reported in the result rather than as an
+    /// error, because Finish and Confirm must still run to clean up.
+    async fn perform_transfer(
+        &self,
+        c: &prism_libvirt::Client,
+        dom: &prism_libvirt::Domain,
+        params: &[TypedParam],
+        prep: &PrepareResp,
+        flags: u32,
+        ctx: &crate::tasks::TaskCtx,
+    ) -> anyhow::Result<Transfer> {
+        if let Err(e) = c.migrate_set_max_downtime(dom, MAX_DOWNTIME_MS).await {
+            tracing::warn!("could not set the maximum migration downtime: {e}");
+        }
         let perform_cookie = B64.decode(&prep.cookie)?;
         let progress = {
             let (c, dom, ctx) = (c.clone(), dom.clone(), ctx.clone());
@@ -342,70 +430,41 @@ impl Node {
             })
         };
         let perform = tokio::select! {
-            r = c.migrate_perform3(&dom, &params, &perform_cookie, flags) => r,
+            r = c.migrate_perform3(dom, params, &perform_cookie, flags) => r,
             () = ctx.cancel.cancelled() => {
-                let _ = c.abort_job(&dom).await;
+                if let Err(e) = c.abort_job(dom).await {
+                    tracing::warn!("could not abort the migration job: {e}");
+                }
                 Err(prism_libvirt::Error::Decode("cancelled".into()))
             }
         };
         progress.abort();
-        let (perform_ok, finish_cookie) = match &perform {
-            Ok(cookie) => (true, cookie.clone()),
+        Ok(match perform {
+            Ok(finish_cookie) => Transfer {
+                finish_cookie,
+                error: None,
+            },
             Err(e) => {
-                tracing::warn!(vm = %spec.name, "perform failed: {e}");
-                (false, Vec::new())
+                tracing::warn!(vm = %dom.name, "perform failed: {e}");
+                Transfer {
+                    finish_cookie: Vec::new(),
+                    error: Some(e.to_string()),
+                }
             }
-        };
+        })
+    }
 
-        // 7. Finish on the destination; 8. Confirm on the source.
-        let fin: FinishResp = self
-            .call_peer(
-                cluster,
-                dst,
-                &format!("/api/v1/internal/migrations/{migration}/finish"),
-                &FinishReq {
-                    params: prep.params.clone(),
-                    cookie: B64.encode(&finish_cookie),
-                    flags,
-                    cancelled: !perform_ok,
-                    pool: req.pool.clone(),
-                    images: image_names,
-                    snapshot_xml,
-                    vm: Some(Box::new(on_destination(spec, dst.node_id, &req.pool))),
-                },
-            )
-            .await?;
-        for s in splicers {
-            s.abort();
-        }
-        let succeeded = perform_ok && fin.ok;
-        let confirm_cookie = B64.decode(&fin.cookie).unwrap_or_default();
-        if let Err(e) = c
-            .migrate_confirm3(&dom, &params, &confirm_cookie, flags, !succeeded)
-            .await
-        {
-            // The destination may already run the guest: never resume the
-            // source here; the intent stays until resolved.
-            if succeeded {
-                tracing::warn!(vm = %spec.name, "confirm on the source failed: {e}");
-            } else {
-                anyhow::bail!("migration failed and the source could not resume: {e}");
-            }
-        }
-        if !succeeded {
-            anyhow::bail!(
-                "migration failed: {}",
-                perform
-                    .err()
-                    .map(|e| e.to_string())
-                    .or(fin.error)
-                    .unwrap_or_else(|| "unknown error".into())
-            );
-        }
-
-        // 9. Ownership moves to the destination.
+    /// Records the destination as owner (epoch + 1) and removes the source's
+    /// disks, saved-memory images and runtime state.
+    async fn hand_over(
+        &self,
+        spec: &VmSpec,
+        dst: &MemberDoc,
+        pool: &str,
+        memory: &[(String, String)],
+    ) -> anyhow::Result<()> {
         let cur = self.spec(spec.id)?;
-        let mut moved = on_destination(&cur, dst.node_id, &req.pool);
+        let mut moved = on_destination(&cur, dst.node_id, pool);
         moved.owner_epoch += 1;
         moved.generation += 1;
         moved.migrating = None;
@@ -417,15 +476,14 @@ impl Node {
                 }
             }
         }
-        for (mpool, mem) in &memory {
+        for (mpool, mem) in memory {
             if let Ok(pool) = self.storage.get(mpool) {
                 pool.delete_volume_best_effort(mem);
             }
         }
         self.remove_seed_iso(spec);
         super::lock(&self.runtime).remove(&spec.id);
-        tracing::info!(vm = %spec.name, to = %dst.name, "live migration complete");
-        Ok(serde_json::json!({ "node": dst.node_id }))
+        Ok(())
     }
 
     pub(super) async fn call_peer<T: Serialize, R: serde::de::DeserializeOwned>(
@@ -452,122 +510,23 @@ impl Node {
         }
         Ok(serde_json::from_slice(&bytes)?)
     }
+}
 
-    /// Destination: create images, the seed ISO and the socket directory,
-    /// then `Prepare3Params`.
-    pub async fn migration_prepare(&self, migration: Uuid, req: PrepareReq) -> Result<PrepareResp> {
-        let c = self.client()?;
-        let pool = self.storage.get(&req.pool)?;
-        let mut created = Vec::new();
-        for img in &req.images {
-            match pool
-                .create_image(
-                    &self.cfg.libvirt.qemu_img,
-                    &img.name,
-                    &img.format,
-                    img.size,
-                    img.backing.as_deref(),
-                )
-                .await
-            {
-                Ok(_) => created.push(img.name.clone()),
-                Err(e) => {
-                    for n in &created {
-                        pool.delete_volume_best_effort(n);
-                    }
-                    return Err(e.into());
-                }
-            }
-        }
-        let seed = self.seed_iso(&req.vm)?;
-        let dir = migration_dir(migration);
-        // Parents must be traversable by QEMU's user.
-        crate::storage::create_traversable(&dir).map_err(anyhow::Error::from)?;
-        // QEMU (its own user) creates the listening sockets here.
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
-            .map_err(anyhow::Error::from)?;
+/// The outcome of the RAM and disk transfer.
+struct Transfer {
+    /// Cookie from `Perform3Params`, passed to Finish; empty on failure.
+    finish_cookie: Vec<u8>,
+    /// Why the transfer failed or was cancelled, if it did.
+    error: Option<String>,
+}
 
-        // Point every source pool path at the destination pool, and the
-        // seed ISO at the one just written.
-        let mut xml = req.begin_xml.clone();
-        let dst_path = pool.path.to_string_lossy().into_owned();
-        for src in req.src_pools.values() {
-            xml = xml.replace(&format!("'{src}/"), &format!("'{dst_path}/"));
-            xml = xml.replace(&format!("\"{src}/"), &format!("\"{dst_path}/"));
-        }
-        // Revert leaves the seed CD-ROM on qcow2 overlays that never travel;
-        // point it at the plain ISO just written here.
-        if let Some(seed) = seed {
-            xml = super::seed_xml::flatten_seed_cdroms(&xml, &seed.to_string_lossy());
-        }
-        let mem = format!("unix://{}", dir.join("mem.sock").display());
-        let nbd = format!("unix://{}", dir.join("nbd.sock").display());
-        // Finish looks the incoming domain up by DEST_NAME; libvirt's own
-        // client always sets it, so Prism must too.
-        let pairs = vec![
-            (mp::DEST_NAME.to_string(), req.vm.name.clone()),
-            (mp::DEST_XML.to_string(), xml.clone()),
-            (mp::PERSIST_XML.to_string(), xml),
-            (mp::URI.to_string(), mem),
-            (mp::DISKS_URI.to_string(), nbd),
-        ];
-        let cookie = B64.decode(&req.cookie).map_err(anyhow::Error::from)?;
-        let mut params = to_params(&pairs);
-        params.extend(
-            req.vm
-                .disks
-                .iter()
-                .filter(|d| d.device == DiskDevice::Disk)
-                .map(|d| TypedParam::string(mp::MIGRATE_DISKS, d.target.clone())),
-        );
-        let (cookie_out, _uri) = match c.migrate_prepare3(&params, &cookie, req.flags).await {
-            Ok(r) => r,
-            Err(e) => {
-                for n in &created {
-                    pool.delete_volume_best_effort(n);
-                }
-                return Err(e.into());
-            }
-        };
-        Ok(PrepareResp {
-            cookie: B64.encode(cookie_out),
-            params: pairs,
-        })
-    }
-
-    /// Destination: `Finish3Params`; cleans up on cancel.
-    pub async fn migration_finish(&self, migration: Uuid, req: FinishReq) -> Result<FinishResp> {
-        let c = self.client()?;
-        let cookie = B64.decode(&req.cookie).map_err(anyhow::Error::from)?;
-        let res = c
-            .migrate_finish3(&to_params(&req.params), &cookie, req.flags, req.cancelled)
-            .await;
-        let _ = std::fs::remove_dir_all(migration_dir(migration));
-        match res {
-            Ok((_, cookie_out)) if !req.cancelled => {
-                if let Some(vm) = &req.vm {
-                    self.import_migrated_snapshots(vm.id, &req.pool, vm, &req.snapshot_xml)
-                        .await;
-                }
-                Ok(FinishResp {
-                    cookie: B64.encode(cookie_out),
-                    ok: true,
-                    error: None,
-                })
-            }
-            other => {
-                if let Ok(pool) = self.storage.get(&req.pool) {
-                    for n in &req.images {
-                        pool.delete_volume_best_effort(n);
-                    }
-                }
-                Ok(FinishResp {
-                    cookie: String::new(),
-                    ok: false,
-                    error: other.err().map(|e| e.to_string()),
-                })
-            }
-        }
+/// Removes the socket directory of a migration. A directory that is
+/// already gone is not an error.
+pub(super) fn remove_migration_dir(migration: Uuid) {
+    if let Err(e) = std::fs::remove_dir_all(migration_dir(migration))
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%migration, "could not remove the migration socket directory: {e}");
     }
 }
 

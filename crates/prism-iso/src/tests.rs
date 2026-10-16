@@ -1,6 +1,11 @@
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use std::collections::BTreeSet;
+
+use crate::names::primary_name;
+use crate::timestamp::Timestamp;
 
 use super::*;
 
@@ -324,4 +329,16 @@ fn external_tools() {
         std::fs::remove_dir_all(&dir).unwrap();
     }
     eprintln!("external ISO checks run with: {checked:?}");
+}
+
+#[test]
+fn times_before_1970_are_recorded_as_the_epoch() {
+    let t = Timestamp::from_system_time(UNIX_EPOCH - Duration::from_secs(86_400));
+    assert_eq!((t.year, t.month, t.day), (1970, 1, 1));
+}
+
+#[test]
+fn far_future_years_are_clamped_in_records() {
+    let t = Timestamp::from_system_time(UNIX_EPOCH + Duration::from_secs(300 * 365 * 86_400));
+    assert_eq!(t.record()[0], 255);
 }

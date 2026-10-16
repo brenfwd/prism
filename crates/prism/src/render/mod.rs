@@ -221,7 +221,6 @@ fn write_devices(w: &mut String, spec: &VmSpec, ctx: &RenderCtx<'_>) -> Result<(
         w,
         "    <rng model='virtio'>\n      <backend model='random'>/dev/urandom</backend>\n    </rng>"
     );
-    line!(w, "  </devices>");
     Ok(())
 }
 

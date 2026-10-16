@@ -5,7 +5,7 @@ use super::{DomainChild, LIST_MAX};
 use crate::Error;
 use crate::client::Client;
 use crate::proto::{Domain, procs};
-use crate::xdr::Decoder;
+use crate::xdr::{Decoder, Encoder};
 
 impl Client {
     async fn child_create(
@@ -74,6 +74,25 @@ impl Client {
             .await
     }
 
+    /// Like [`Self::snapshot_create`], with no call timeout. A snapshot that
+    /// saves memory or quiesces a busy guest can take as long as the disks
+    /// need, so the caller bounds it: it watches the domain job, calls
+    /// `abort_job` to stop it, or drops the future.
+    pub async fn snapshot_create_unbounded(
+        &self,
+        dom: &Domain,
+        xml: &str,
+        flags: u32,
+    ) -> Result<DomainChild, Error> {
+        let mut e = Encoder::new();
+        dom.encode(&mut e);
+        e.string(xml).u32(flags);
+        let r = self
+            .call_unbounded(procs::DOMAIN_SNAPSHOT_CREATE_XML, e.into_inner())
+            .await?;
+        DomainChild::decode(&mut Decoder::new(&r))
+    }
+
     /// `virDomainListAllSnapshots`: every snapshot of the domain.
     pub async fn snapshots(&self, dom: &Domain) -> Result<Vec<DomainChild>, Error> {
         self.child_list(procs::DOMAIN_LIST_ALL_SNAPSHOTS, dom).await
@@ -113,6 +132,22 @@ impl Client {
     pub async fn snapshot_revert(&self, snap: &DomainChild, flags: u32) -> Result<(), Error> {
         self.child_flagged(procs::DOMAIN_REVERT_TO_SNAPSHOT, snap, flags)
             .await
+    }
+
+    /// Like [`Self::snapshot_revert`], with no call timeout. Restoring saved
+    /// memory of a large guest can take minutes; the caller bounds it as for
+    /// [`Self::snapshot_create_unbounded`].
+    pub async fn snapshot_revert_unbounded(
+        &self,
+        snap: &DomainChild,
+        flags: u32,
+    ) -> Result<(), Error> {
+        let mut e = Encoder::new();
+        snap.encode(&mut e);
+        e.u32(flags);
+        self.call_unbounded(procs::DOMAIN_REVERT_TO_SNAPSHOT, e.into_inner())
+            .await
+            .map(drop)
     }
 
     /// `virDomainCheckpointCreateXML`; `flags` are `CHECKPOINT_CREATE_*`

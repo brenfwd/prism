@@ -225,6 +225,7 @@ allowed_origins = []
 socket = "auto"          # virtqemud-sock, then libvirt-sock
 uri = "qemu:///system"
 domain_type = "auto"     # kvm when /dev/kvm exists, else qemu (TCG)
+job_stall_timeout_secs = 300   # abort a snapshot, revert or migration that makes no progress this long; 0 = never
 
 [storage]
 pool_roots = ["/var/lib/prism/pools"]   # where the API may create pools

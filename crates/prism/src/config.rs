@@ -182,6 +182,10 @@ impl Default for LibvirtConfig {
         }
     }
 }
+    /// Seconds a snapshot, a revert or a live migration may go without
+    /// progress before Prism aborts it. 0 turns the check off. There is no
+    /// limit on the total time.
+    pub job_stall_timeout_secs: u64,
 
 /// `[storage]` settings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -193,6 +197,7 @@ pub struct StorageConfig {
 
 /// `[pools.<name>]`: a disk pool defined in the config file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+            job_stall_timeout_secs: 300,
 #[serde(deny_unknown_fields)]
 pub struct PoolConfig {
     /// Pool type; only `dir` exists.
@@ -288,6 +293,12 @@ impl Config {
 /// The `prism.toml` text written by `prism init`, with the default pool at
 /// `pool_path`.
 pub fn default_toml(pool_path: &Path) -> String {
+    /// How long a libvirt job may go without progress before it is aborted;
+    /// zero means never.
+    pub fn job_stall_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.libvirt.job_stall_timeout_secs)
+    }
+
     format!(
         r#"[http]
 # Loopback by default. Reach the UI with `tailscale serve`, an SSH tunnel or a

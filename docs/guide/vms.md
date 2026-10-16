@@ -85,6 +85,8 @@ To go back, choose Revert on a snapshot. A snapshot with memory resumes the runn
 
 Revert and delete need libvirt 9.9 or newer on the host, and fail with `reverting and deleting external snapshots needs libvirt 9.9 or newer` otherwise. Only one task runs on a VM at a time (`another task is running on this VM`). After a VM has moved between nodes, reverting to a snapshot with memory needs `confirm_memory=true`, because that path has crashed libvirtd in testing. The UI asks for confirmation. Shutting the VM down first and reverting avoids it.
 
+Taking and reverting a snapshot has no time limit, because a large disk or a memory image can take many minutes. Cancelling the task stops the libvirt job. A job that reports no progress for `job_stall_timeout_secs` (in `[libvirt]`, 300 by default, 0 turns it off) is aborted and the task fails. Progress comes from the libvirt job and shows only while the job reports it.
+
 The API calls are `GET` and `POST /vms/{id}/snapshots`, `DELETE /vms/{id}/snapshots/{name}` and `POST /vms/{id}/snapshots/{name}/revert`.
 
 ## Clone
@@ -124,7 +126,7 @@ curl -X POST http://127.0.0.1:8080/api/v1/vms/$VM/migrate \
 3. Set `postcopy` to `true` to let Prism switch to post-copy when pre-copy does not converge. The destination then always wins.
 4. Follow the `vm.migrate` task. The VM must be running (`<name> is not running; use move for stopped VMs`).
 
-When a migration fails, Prism restores the source's snapshot metadata and clears the migration intent. `host_passthrough` VMs only migrate between hosts with identical CPUs.
+When a migration fails, stalls or is cancelled, Prism aborts the migration job on the source, removes the half-built copy on the destination, resumes the source if it was running before, restores its snapshot metadata and clears the migration intent. A migration stalls when its job shows no progress for `job_stall_timeout_secs` (in `[libvirt]`, 300 by default). If the transfer finished but the destination cannot be reached for the final step, the source is left alone, because the guest may already run on the destination, and the intent stays until you resolve it. `host_passthrough` VMs only migrate between hosts with identical CPUs.
 
 ## Delete a VM
 

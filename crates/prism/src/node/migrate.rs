@@ -14,8 +14,8 @@ use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use prism_libvirt::TypedParam;
 use prism_libvirt::migrate::{flags as mf, params as mp};
-use prism_libvirt::{Params, TypedParam};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -25,8 +25,18 @@ use crate::cluster::model::{MemberDoc, MemberState};
 use crate::spec::{DiskDevice, Migration, VmSpec};
 use crate::tasks::Task;
 
-/// Maximum pause at switch-over.
-const MAX_DOWNTIME_MS: u64 = 300;
+/// What a failed migration needs to put back.
+#[derive(Default)]
+struct Rollback {
+    /// Snapshot XML taken off the source domain for the migration.
+    detached: std::sync::Mutex<Option<Vec<String>>>,
+    /// Set while the destination may already run the guest, in which case
+    /// the source must stay as it is.
+    dest_may_run: std::sync::atomic::AtomicBool,
+}
+
+/// Tries at the Finish call to the destination.
+const FINISH_TRIES: u32 = 3;
 
 /// Request body for live-migrating a running VM to another node.
 #[derive(Debug, Clone, Deserialize)]
@@ -158,13 +168,22 @@ impl Node {
             .tasks
             .spawn("vm.migrate", resource, move |ctx| async move {
                 let migration = ctx.task_id();
-                let detached = std::sync::Mutex::new(None);
+                let rollback = Rollback::default();
+                let was_running = node.runtime(spec.id).state == VmState::Running;
                 let res = node
-                    .run_migration(&cluster, &spec, &dst, &req, &ctx, &detached)
+                    .run_migration(&cluster, &spec, &dst, &req, &ctx, &rollback)
                     .await;
+                // Every failure must leave the source running, unless the
+                // destination may already have taken the guest over.
+                if res.is_err()
+                    && was_running
+                    && !rollback.dest_may_run.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    node.resume_source(&spec).await;
+                }
                 // The source domain lost its snapshot metadata for the
                 // migration; a failed attempt gives it back.
-                let stash = super::lock(&detached).take();
+                let stash = super::lock(&rollback.detached).take();
                 if let (Err(_), Some(xmls)) = (&res, stash) {
                     node.restore_snapshots(&spec, &xmls).await;
                 }
@@ -197,7 +216,7 @@ impl Node {
         dst: &MemberDoc,
         req: &MigrateVm,
         ctx: &crate::tasks::TaskCtx,
-        detached: &std::sync::Mutex<Option<Vec<String>>>,
+        rollback: &Rollback,
     ) -> anyhow::Result<serde_json::Value> {
         let migration = ctx.task_id();
         let c = self.client()?;
@@ -241,7 +260,7 @@ impl Node {
         // travels in the request and is redefined on the destination.
         if !snapshot_xml.is_empty() {
             self.detach_snapshots(spec).await?;
-            *super::lock(detached) = Some(snapshot_xml.clone());
+            *super::lock(&rollback.detached) = Some(snapshot_xml.clone());
         }
         let (cookie, xml) = match c.migrate_begin3(&dom, &begin_params, flags).await {
             Ok(r) => r,
@@ -295,24 +314,61 @@ impl Node {
         // source.
         let perform = self
             .perform_transfer(&c, &dom, &params, &prep, flags, ctx)
-            .await?;
-        let fin: FinishResp = self
-            .call_peer(
-                cluster,
-                dst,
-                &format!("/api/v1/internal/migrations/{migration}/finish"),
-                &FinishReq {
-                    params: prep.params.clone(),
-                    cookie: B64.encode(&perform.finish_cookie),
-                    flags,
-                    cancelled: perform.error.is_some(),
-                    pool: req.pool.clone(),
-                    images: image_names,
-                    snapshot_xml,
-                    vm: Some(Box::new(on_destination(spec, dst.node_id, &req.pool))),
-                },
-            )
-            .await?;
+            .await;
+        // Until Finish and Confirm settle it, a transfer that completed may
+        // have left the guest running on the destination.
+        rollback
+            .dest_may_run
+            .store(perform.error.is_none(), std::sync::atomic::Ordering::SeqCst);
+        let finish_req = FinishReq {
+            params: prep.params.clone(),
+            cookie: B64.encode(&perform.finish_cookie),
+            flags,
+            cancelled: perform.error.is_some(),
+            pool: req.pool.clone(),
+            images: image_names,
+            snapshot_xml,
+            vm: Some(Box::new(on_destination(spec, dst.node_id, &req.pool))),
+        };
+        let finish_path = format!("/api/v1/internal/migrations/{migration}/finish");
+        let mut fin: Result<FinishResp, _> = Err(anyhow::anyhow!("not attempted"));
+        // A failed transfer is cleaned up with a few tries, because the
+        // destination keeps its half-built domain and images until Finish
+        // runs. A finished transfer is retried too: only the destination can
+        // say whether it took the guest over.
+        for attempt in 0..FINISH_TRIES {
+            fin = self
+                .call_peer(cluster, dst, &finish_path, &finish_req)
+                .await;
+            if fin.is_ok() {
+                break;
+            }
+            if attempt + 1 < FINISH_TRIES {
+                tokio::time::sleep(Duration::from_secs(2 << attempt)).await;
+            }
+        }
+        let fin = match fin {
+            Ok(f) => f,
+            Err(e) if perform.error.is_some() => {
+                // The transfer failed, so the destination never owned the
+                // guest. Close the source job and resume it below anyway.
+                tracing::warn!(vm = %spec.name, "destination cleanup failed: {e:#}");
+                FinishResp {
+                    cookie: String::new(),
+                    ok: false,
+                    error: Some(format!("{e:#}")),
+                }
+            }
+            Err(e) => {
+                // The transfer finished but the destination cannot be
+                // reached: the guest may run there. The source stays as it
+                // is and the intent stays until an operator resolves it.
+                for s in splicers {
+                    s.abort();
+                }
+                return Err(e.context("could not confirm the migration on the destination"));
+            }
+        };
         for s in splicers {
             s.abort();
         }
@@ -327,8 +383,17 @@ impl Node {
             if succeeded {
                 tracing::warn!(vm = %spec.name, "confirm on the source failed: {e}");
             } else {
-                anyhow::bail!("migration failed and the source could not resume: {e}");
+                // The destination never took the guest over (Finish said so
+                // or the transfer failed), so resuming the source is safe.
+                rollback
+                    .dest_may_run
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                anyhow::bail!("migration failed and the source job could not be closed: {e}");
             }
+        } else if !succeeded {
+            rollback
+                .dest_may_run
+                .store(false, std::sync::atomic::Ordering::SeqCst);
         }
         if !succeeded {
             anyhow::bail!(
@@ -402,67 +467,6 @@ impl Node {
         Ok((images, copied))
     }
 
-    /// Runs `Perform3Params` with progress from job stats. A failed or
-    /// cancelled transfer is reported in the result rather than as an
-    /// error, because Finish and Confirm must still run to clean up.
-    async fn perform_transfer(
-        &self,
-        c: &prism_libvirt::Client,
-        dom: &prism_libvirt::Domain,
-        params: &[TypedParam],
-        prep: &PrepareResp,
-        flags: u32,
-        ctx: &crate::tasks::TaskCtx,
-    ) -> anyhow::Result<Transfer> {
-        if let Err(e) = c.migrate_set_max_downtime(dom, MAX_DOWNTIME_MS).await {
-            tracing::warn!("could not set the maximum migration downtime: {e}");
-        }
-        let perform_cookie = B64.decode(&prep.cookie)?;
-        let progress = {
-            let (c, dom, ctx) = (c.clone(), dom.clone(), ctx.clone());
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    let Ok((_, stats)) = c.job_stats(&dom, 0).await else {
-                        continue;
-                    };
-                    let total = stats.u64("data_total").unwrap_or(0);
-                    let done = stats.u64("data_processed").unwrap_or(0);
-                    let iter = stats.u64("memory_iteration").unwrap_or(0);
-                    if total > 0 {
-                        ctx.progress(
-                            Some(done as f64 / total as f64),
-                            format!("migrating (pass {iter})"),
-                        );
-                    }
-                }
-            })
-        };
-        let perform = tokio::select! {
-            r = c.migrate_perform3(dom, params, &perform_cookie, flags) => r,
-            () = ctx.cancel.cancelled() => {
-                if let Err(e) = c.abort_job(dom).await {
-                    tracing::warn!("could not abort the migration job: {e}");
-                }
-                Err(prism_libvirt::Error::Decode("cancelled".into()))
-            }
-        };
-        progress.abort();
-        Ok(match perform {
-            Ok(finish_cookie) => Transfer {
-                finish_cookie,
-                error: None,
-            },
-            Err(e) => {
-                tracing::warn!(vm = %dom.name, "perform failed: {e}");
-                Transfer {
-                    finish_cookie: Vec::new(),
-                    error: Some(e.to_string()),
-                }
-            }
-        })
-    }
-
     /// Records the destination as owner (epoch + 1) and removes the source's
     /// disks, saved-memory images and runtime state.
     async fn hand_over(
@@ -519,12 +523,4 @@ impl Node {
         }
         Ok(serde_json::from_slice(&bytes)?)
     }
-}
-
-/// The outcome of the RAM and disk transfer.
-struct Transfer {
-    /// Cookie from `Perform3Params`, passed to Finish; empty on failure.
-    finish_cookie: Vec<u8>,
-    /// Why the transfer failed or was cancelled, if it did.
-    error: Option<String>,
 }

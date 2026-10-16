@@ -264,16 +264,39 @@ impl Node {
                 fl |= op::SNAPSHOT_CREATE_QUIESCE;
             }
         }
-        match c.snapshot_create(&dom, &xml, fl).await {
+        let saving = if memory_file.is_some() {
+            "saving memory and disks"
+        } else {
+            "freezing disks into overlays"
+        };
+        match self
+            .watched(
+                &c,
+                &dom,
+                ctx,
+                (0.2, 0.8),
+                saving,
+                c.snapshot_create_unbounded(&dom, &xml, fl),
+            )
+            .await
+        {
             Ok(_) => {}
             // Quiescing needs a cooperative agent; fall back to crash-consistent.
-            Err(e) if fl & op::SNAPSHOT_CREATE_QUIESCE != 0 => {
+            Err(e) if fl & op::SNAPSHOT_CREATE_QUIESCE != 0 && !ctx.cancel.is_cancelled() => {
                 tracing::warn!(vm = %spec.name, "quiesced snapshot failed ({e}); retrying without");
                 ctx.progress(Some(0.4), "guest agent could not quiesce; retrying");
-                c.snapshot_create(&dom, &xml, fl & !op::SNAPSHOT_CREATE_QUIESCE)
-                    .await?;
+                let fl = fl & !op::SNAPSHOT_CREATE_QUIESCE;
+                self.watched(
+                    &c,
+                    &dom,
+                    ctx,
+                    (0.4, 0.8),
+                    saving,
+                    c.snapshot_create_unbounded(&dom, &xml, fl),
+                )
+                .await?;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e),
         }
         ctx.progress(Some(0.85), "updating disk chains");
         tracing::info!(vm = %spec.name, snapshot = name, "snapshot created");
@@ -330,9 +353,15 @@ impl Node {
                     Ok(VmState::Paused) => op::SNAPSHOT_REVERT_PAUSED,
                     _ => 0,
                 };
-                c.snapshot_revert(&snap, flags)
-                    .await
-                    .map_err(NodeError::from)?;
+                node.watched(
+                    &c,
+                    &domain_ref(&spec),
+                    &ctx,
+                    (0.1, 0.9),
+                    &format!("reverting to {name}"),
+                    c.snapshot_revert_unbounded(&snap, flags),
+                )
+                .await?;
                 node.sync_disk_chains(spec.id).await?;
                 node.refresh(&spec).await;
                 Ok(serde_json::json!({ "name": name }))

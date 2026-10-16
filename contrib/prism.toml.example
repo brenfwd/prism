@@ -32,6 +32,10 @@
 # UEFI firmware image, loaded as a read-only ROM instead of libvirt's
 # firmware auto-selection.
 # uefi_loader = "/usr/share/OVMF/OVMF_CODE.fd"
+# Snapshots, reverts and live migrations have no time limit. Prism aborts
+# one when its job reports no progress for this many seconds; 0 turns the
+# check off. Cancelling the task also aborts the job.
+# job_stall_timeout_secs = 300
 
 [storage]
 # Directories under which the API may create pools.

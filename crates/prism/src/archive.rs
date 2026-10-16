@@ -14,59 +14,86 @@ use uuid::Uuid;
 
 use crate::storage::{StorageError, valid_name};
 
+/// Replicated-state collection holding [`ArchivePoolDoc`] records.
 pub const ARCHIVE_POOLS: &str = "archive_pool";
+/// Replicated-state collection holding [`ArchiveMemberDoc`] records.
 pub const ARCHIVE_MEMBERS: &str = "archive_member";
+/// Replicated-state collection holding the file records and their replicas.
 pub const ARCHIVE_FILES: &str = "archive_file";
 const PARTIAL_DIR: &str = ".prism-partial";
 const MAX_DEPTH: usize = 16;
 
+/// An archive pool as stored in replicated state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArchivePoolDoc {
+    /// Pool name, unique in the cluster.
     pub name: String,
     /// Copies of each file, on distinct nodes.
     pub replicas: u8,
 }
 
+/// Whether a member accepts new files and keeps its existing ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemberState {
+    /// Takes new files and keeps its replicas.
     Active,
+    /// Takes no new files; a drain is moving its replicas elsewhere.
     Draining,
+    /// Drained: holds no replicas and takes no new files.
     Disabled,
 }
 
+/// A member directory that one node contributes to an archive pool.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArchiveMemberDoc {
+    /// Node that holds the directory.
     pub node: Uuid,
+    /// Member name, unique on that node.
     pub name: String,
+    /// Pool the member belongs to.
     pub pool: String,
+    /// Relative share of new files, used by [`place`].
     pub weight: f64,
+    /// Bytes that placement leaves free on the filesystem.
     pub reserve: u64,
+    /// Current state.
     pub state: MemberState,
 }
 
 impl ArchiveMemberDoc {
+    /// Replicated-state key, `<node id>/<member name>`.
     pub fn key(&self) -> String {
         format!("{}/{}", self.node, self.name)
     }
 }
 
+/// One stored copy of a file: the node and the member directory holding it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Replica {
+    /// Node holding the copy.
     pub node: Uuid,
+    /// Name of the member directory on that node.
     pub member: String,
 }
 
+/// What an archive file is, guessed from its extension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileKind {
+    /// An installation image (`.iso`).
     Iso,
+    /// A disk image (`.qcow2`, `.img` or `.raw`).
     Disk,
+    /// A VM backup.
     Backup,
+    /// Anything else.
     Other,
 }
 
 impl FileKind {
+    /// Kind for `path`, by case-insensitive extension. Never returns `Backup`;
+    /// backups are labelled when they are created.
     pub fn guess(path: &str) -> Self {
         let ext = Path::new(path)
             .extension()
@@ -80,19 +107,27 @@ impl FileKind {
     }
 }
 
+/// A file in an archive pool, with its replicas.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArchiveFileDoc {
+    /// Pool holding the file.
     pub pool: String,
+    /// Relative path inside the pool, validated by [`valid_path`].
     pub path: String,
+    /// Size in bytes.
     pub size: u64,
     /// BLAKE3 of the content, hex; the integrity anchor.
     pub blake3: String,
+    /// Kind of file.
     pub kind: FileKind,
+    /// Creation time, Unix seconds.
     pub created: i64,
+    /// Where the copies are.
     pub replicas: Vec<Replica>,
 }
 
 impl ArchiveFileDoc {
+    /// Replicated-state key, `<pool>/<path>`.
     pub fn key(pool: &str, path: &str) -> String {
         format!("{pool}/{path}")
     }
@@ -101,9 +136,13 @@ impl ArchiveFileDoc {
 /// Free space of a member, reported by its node.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemberCapacity {
+    /// Member name.
     pub name: String,
+    /// Pool the member belongs to.
     pub pool: String,
+    /// Filesystem size in bytes.
     pub total: u64,
+    /// Bytes available to unprivileged writers.
     pub free: u64,
 }
 
@@ -164,12 +203,18 @@ fn resolve() -> ResolveFlags {
 /// A member directory on this node, with confined file access.
 #[derive(Debug)]
 pub struct LocalMember {
+    /// Member name.
     pub name: String,
+    /// Pool the member belongs to.
     pub pool: String,
     root: OwnedFd,
 }
 
 impl LocalMember {
+    /// Opens the member directory at `path`, creating it with its partial
+    /// upload directory if missing, and removes uploads a crash left behind.
+    ///
+    /// Fails if the directory or the partial directory cannot be created or opened.
     pub fn open(name: &str, pool: &str, path: &Path) -> Result<Self, StorageError> {
         std::fs::create_dir_all(path)?;
         let root = rustix::fs::open(
@@ -182,27 +227,55 @@ impl LocalMember {
             pool: pool.into(),
             root,
         };
-        let _ = rustix::fs::mkdirat(&m.root, PARTIAL_DIR, Mode::from_raw_mode(0o700));
-        // Partial uploads left by a crash.
-        if let Ok(dir) = rustix::fs::openat2(
-            &m.root,
-            PARTIAL_DIR,
-            OFlags::DIRECTORY | OFlags::RDONLY,
-            Mode::empty(),
-            resolve(),
-        ) && let Ok(entries) = rustix::fs::Dir::read_from(&dir)
-        {
-            for e in entries.flatten() {
-                if let Ok(n) = e.file_name().to_str()
-                    && n.starts_with("up-")
-                {
-                    let _ = rustix::fs::unlinkat(&dir, n, AtFlags::empty());
-                }
-            }
+        match rustix::fs::mkdirat(&m.root, PARTIAL_DIR, Mode::from_raw_mode(0o700)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(e) => return Err(e.into()),
         }
+        m.remove_crashed_partials();
         Ok(m)
     }
 
+    /// Deletes `up-*` files that a crash left in the partial directory.
+    /// Failures are logged, since a leftover file only wastes space.
+    fn remove_crashed_partials(&self) {
+        let dir = match rustix::fs::openat2(
+            &self.root,
+            PARTIAL_DIR,
+            OFlags::DIRECTORY | OFlags::RDONLY | OFlags::CLOEXEC,
+            Mode::empty(),
+            resolve(),
+        ) {
+            Ok(dir) => dir,
+            Err(e) => {
+                tracing::warn!(member = %self.name, "could not open the partial upload directory: {e}");
+                return;
+            }
+        };
+        let entries = match rustix::fs::Dir::read_from(&dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                tracing::warn!(member = %self.name, "could not list the partial upload directory: {e}");
+                return;
+            }
+        };
+        for e in entries.flatten() {
+            if let Ok(n) = e.file_name().to_str()
+                && n.starts_with("up-")
+                && let Err(e) = rustix::fs::unlinkat(&dir, n, AtFlags::empty())
+            {
+                tracing::warn!(member = %self.name, file = n, "could not remove a partial upload: {e}");
+            }
+        }
+    }
+
+    /// Deletes a partial upload after a failed write, logging on failure.
+    fn remove_partial(&self, partial: &str) {
+        if let Err(e) = rustix::fs::unlinkat(&self.root, partial, AtFlags::empty()) {
+            tracing::warn!(member = %self.name, partial, "could not remove a partial upload: {e}");
+        }
+    }
+
+    /// Total and available bytes of the filesystem under the member; both are 0 if `fstatvfs` fails.
     pub fn capacity(&self) -> MemberCapacity {
         let (total, free) = rustix::fs::fstatvfs(&self.root).map_or((0, 0), |s| {
             (s.f_blocks * s.f_frsize, s.f_bavail * s.f_frsize)
@@ -254,6 +327,10 @@ impl LocalMember {
 
     /// Streams `body` into `path`, returning `(size, blake3 hex)`. Refuses
     /// to overwrite.
+    ///
+    /// The data goes to a temporary file in the partial directory, is synced,
+    /// and is renamed into place, so readers never see a half-written file.
+    /// Fails with `Exists` if the path is taken and `Invalid` if the stream errors.
     pub async fn write<S, E>(&self, path: &str, mut body: S) -> Result<(u64, String), StorageError>
     where
         S: futures::Stream<Item = Result<bytes::Bytes, E>> + Unpin,
@@ -289,7 +366,7 @@ impl LocalMember {
         .await;
         drop(file);
         if let Err(e) = res {
-            let _ = rustix::fs::unlinkat(&self.root, &partial, AtFlags::empty());
+            self.remove_partial(&partial);
             return Err(e);
         }
         if let Err(e) = rustix::fs::renameat_with(
@@ -299,7 +376,7 @@ impl LocalMember {
             path,
             RenameFlags::NOREPLACE,
         ) {
-            let _ = rustix::fs::unlinkat(&self.root, &partial, AtFlags::empty());
+            self.remove_partial(&partial);
             return Err(match e {
                 rustix::io::Errno::EXIST => StorageError::Exists(path.into()),
                 e => e.into(),
@@ -308,6 +385,8 @@ impl LocalMember {
         Ok((size, hasher.finalize().to_hex().to_string()))
     }
 
+    /// Opens the stored file read-only. Fails with `NoVolume` if it is missing
+    /// and `InvalidName` if `path` is not a valid relative path.
     pub fn open_read(&self, path: &str) -> Result<std::fs::File, StorageError> {
         Self::check(path)?;
         let fd = rustix::fs::openat2(
@@ -349,6 +428,7 @@ impl LocalMember {
         }
     }
 
+    /// Removes the stored file. Fails with `NoVolume` if it is missing.
     pub fn delete(&self, path: &str) -> Result<(), StorageError> {
         Self::check(path)?;
         rustix::fs::unlinkat(&self.root, path, AtFlags::empty()).map_err(|e| match e {
@@ -361,14 +441,17 @@ impl LocalMember {
 /// This node's archive members, by name.
 #[derive(Debug, Default)]
 pub struct Archive {
+    /// Members keyed by name.
     pub members: BTreeMap<String, Arc<LocalMember>>,
 }
 
 impl Archive {
+    /// The member named `name`, if this node has one.
     pub fn member(&self, name: &str) -> Option<Arc<LocalMember>> {
         self.members.get(name).cloned()
     }
 
+    /// Capacity of every member on this node.
     pub fn capacity(&self) -> Vec<MemberCapacity> {
         self.members.values().map(|m| m.capacity()).collect()
     }

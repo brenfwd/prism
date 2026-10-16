@@ -1,13 +1,13 @@
 //! `WireGuard`: keys, the `wg-prism` interface and its peer set (generic netlink).
 
+mod keys;
+
+pub use keys::{KeyPair, PrivateKey, PublicKey};
+
 use std::collections::BTreeMap;
-use std::fmt;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
 use futures::StreamExt;
 use ipnet::{IpNet, Ipv6Net};
 use netlink_packet_core::{NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST, NetlinkMessage, NetlinkPayload};
@@ -28,120 +28,6 @@ pub const DEFAULT_PORT: u16 = 51820;
 pub const DEFAULT_MTU: u32 = 1420;
 /// Persistent keepalive Prism uses for every peer.
 pub const KEEPALIVE_SECS: u16 = 25;
-
-const KEY_LEN: usize = 32;
-
-/// A Curve25519 public key.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PublicKey([u8; KEY_LEN]);
-
-/// A Curve25519 private key. Debug output is redacted; memory is zeroed on drop.
-#[derive(Clone, PartialEq, Eq)]
-pub struct PrivateKey([u8; KEY_LEN]);
-
-fn decode_key(s: &str) -> Result<[u8; KEY_LEN]> {
-    let bytes = B64
-        .decode(s.trim())
-        .map_err(|e| Error::InvalidKey(e.to_string()))?;
-    <[u8; KEY_LEN]>::try_from(bytes.as_slice())
-        .map_err(|_| Error::InvalidKey(format!("expected {KEY_LEN} bytes, got {}", bytes.len())))
-}
-
-impl PublicKey {
-    pub fn from_bytes(bytes: [u8; KEY_LEN]) -> Self {
-        Self(bytes)
-    }
-
-    pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
-        &self.0
-    }
-
-    pub fn to_base64(&self) -> String {
-        B64.encode(self.0)
-    }
-}
-
-impl fmt::Display for PublicKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_base64())
-    }
-}
-
-impl fmt::Debug for PublicKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "PublicKey({self})")
-    }
-}
-
-impl FromStr for PublicKey {
-    type Err = Error;
-    fn from_str(s: &str) -> Result<Self> {
-        decode_key(s).map(Self)
-    }
-}
-
-impl PrivateKey {
-    /// Generates a new clamped key from the OS CSPRNG.
-    pub fn generate() -> Self {
-        Self::from_bytes(x25519_dalek::StaticSecret::random().to_bytes())
-    }
-
-    /// Wraps raw key bytes, applying Curve25519 clamping as `wg genkey` does.
-    pub fn from_bytes(mut bytes: [u8; KEY_LEN]) -> Self {
-        bytes[0] &= 0b1111_1000;
-        bytes[31] &= 0b0111_1111;
-        bytes[31] |= 0b0100_0000;
-        Self(bytes)
-    }
-
-    pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
-        &self.0
-    }
-
-    pub fn public_key(&self) -> PublicKey {
-        let secret = x25519_dalek::StaticSecret::from(self.0);
-        PublicKey(x25519_dalek::PublicKey::from(&secret).to_bytes())
-    }
-
-    /// Base64, the format of `wg genkey` and `PrivateKey =` in wg-quick files.
-    pub fn to_base64(&self) -> String {
-        B64.encode(self.0)
-    }
-}
-
-impl FromStr for PrivateKey {
-    type Err = Error;
-    fn from_str(s: &str) -> Result<Self> {
-        decode_key(s).map(Self::from_bytes)
-    }
-}
-
-impl fmt::Debug for PrivateKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("PrivateKey(<redacted>)")
-    }
-}
-
-impl Drop for PrivateKey {
-    fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.0);
-    }
-}
-
-/// A private key and its public key.
-#[derive(Clone, Debug)]
-pub struct KeyPair {
-    pub private: PrivateKey,
-    pub public: PublicKey,
-}
-
-impl KeyPair {
-    pub fn generate() -> Self {
-        let private = PrivateKey::generate();
-        let public = private.public_key();
-        Self { private, public }
-    }
-}
 
 /// Configuration of the mesh interface.
 #[derive(Clone, Debug)]
@@ -292,7 +178,7 @@ impl Netlink {
         for cur in &current.peers {
             if !desired.contains_key(&cur.public_key) {
                 list.push(WireguardPeer(vec![
-                    WireguardPeerAttribute::PublicKey(cur.public_key.0),
+                    WireguardPeerAttribute::PublicKey(*cur.public_key.as_bytes()),
                     WireguardPeerAttribute::Flags(WireguardPeerFlags::RemoveMe),
                 ]));
                 changes.removed += 1;
@@ -314,7 +200,7 @@ impl Netlink {
                 None => changes.added += 1,
             }
             let mut attrs = vec![
-                WireguardPeerAttribute::PublicKey(key.0),
+                WireguardPeerAttribute::PublicKey(*key.as_bytes()),
                 WireguardPeerAttribute::Flags(WireguardPeerFlags::ReplaceAllowedIps),
                 WireguardPeerAttribute::PersistentKeepalive(keepalive),
                 WireguardPeerAttribute::AllowedIps(vec![allowed_ip(p.mesh_address)]),
@@ -357,7 +243,7 @@ impl Netlink {
                         match attr {
                             WireguardAttribute::IfIndex(i) => status.ifindex = i,
                             WireguardAttribute::PublicKey(k) => {
-                                status.public_key = Some(PublicKey(k));
+                                status.public_key = Some(PublicKey::from_bytes(k));
                             }
                             WireguardAttribute::ListenPort(p) => status.listen_port = p,
                             WireguardAttribute::Fwmark(m) => status.fwmark = m,
@@ -408,7 +294,7 @@ impl Netlink {
 
 fn merge_peer(peers: &mut Vec<PeerStatus>, peer: WireguardPeer) {
     let mut st = PeerStatus {
-        public_key: PublicKey([0; KEY_LEN]),
+        public_key: PublicKey::from_bytes([0; 32]),
         endpoint: None,
         allowed_ips: Vec::new(),
         last_handshake: None,
@@ -418,7 +304,7 @@ fn merge_peer(peers: &mut Vec<PeerStatus>, peer: WireguardPeer) {
     };
     for attr in peer.0 {
         match attr {
-            WireguardPeerAttribute::PublicKey(k) => st.public_key = PublicKey(k),
+            WireguardPeerAttribute::PublicKey(k) => st.public_key = PublicKey::from_bytes(k),
             WireguardPeerAttribute::Endpoint(e) => st.endpoint = Some(e),
             WireguardPeerAttribute::PersistentKeepalive(k) => st.keepalive = k,
             WireguardPeerAttribute::RxBytes(b) => st.rx_bytes = b,
@@ -453,39 +339,5 @@ fn merge_peer(peers: &mut Vec<PeerStatus>, peer: WireguardPeer) {
         existing.allowed_ips.extend(st.allowed_ips);
     } else {
         peers.push(st);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn keys_roundtrip_and_match_known_vector() {
-        // RFC 7748 section 6.1 (Alice), already clamped-compatible.
-        let private: PrivateKey = B64
-            .encode([
-                0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2,
-                0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5,
-                0x1d, 0xb9, 0x2c, 0x2a,
-            ])
-            .parse()
-            .unwrap();
-        assert_eq!(
-            private.public_key().as_bytes(),
-            &[
-                0x85, 0x20, 0xf0, 0x09, 0x89, 0x30, 0xa7, 0x54, 0x74, 0x8b, 0x7d, 0xdc, 0xb4, 0x3e,
-                0xf7, 0x5a, 0x0d, 0xbf, 0x3a, 0x0d, 0x26, 0x38, 0x1a, 0xf4, 0xeb, 0xa4, 0xa9, 0x8e,
-                0xaa, 0x9b, 0x4e, 0x6a
-            ]
-        );
-        let kp = KeyPair::generate();
-        let back: PrivateKey = kp.private.to_base64().parse().unwrap();
-        assert_eq!(back.public_key(), kp.public);
-        let pk: PublicKey = kp.public.to_string().parse().unwrap();
-        assert_eq!(pk, kp.public);
-        assert_eq!(kp.private.as_bytes()[0] & 7, 0);
-        assert!(format!("{:?}", kp.private).contains("redacted"));
-        assert!("short".parse::<PublicKey>().is_err());
     }
 }

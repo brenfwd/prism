@@ -15,7 +15,7 @@ use uuid::Uuid;
 use super::firewall::{Firewall, MeshBoundary};
 use super::plan::{NodePlan, PlanInput, SwitchPlan, plan};
 use super::services::Services;
-use super::{host, vni_of};
+use super::{host, vlan_interface_vni, vni_of};
 use crate::state::State;
 
 const RESYNC: Duration = Duration::from_secs(15);
@@ -161,6 +161,16 @@ async fn apply_switch(nl: &Netlink, sw: &SwitchPlan) -> anyhow::Result<()> {
     }
     nl.prune_v4_addresses(&sw.bridge, sw.address.map(IpNet::V4))
         .await?;
+    for v in &sw.vlan_nets {
+        host::lock_bridge6(&v.interface);
+        nl.ensure_vlan_interface(&v.interface, &sw.bridge, v.vlan, sw.mtu)
+            .await?;
+        if let Some(a) = v.address {
+            nl.ensure_address(&v.interface, IpNet::V4(a)).await?;
+        }
+        nl.prune_v4_addresses(&v.interface, v.address.map(IpNet::V4))
+            .await?;
+    }
     if sw.ra.is_some() {
         host::lock_bridge6(&sw.bridge);
     }
@@ -211,19 +221,21 @@ async fn apply_ports(nl: &Netlink, sw: &SwitchPlan) {
     }
 }
 
-/// Deletes bridges and VXLAN devices of networks that no longer exist, and
-/// VXLAN devices left over from a cluster this node has left.
+/// Deletes bridges and VXLAN devices of networks that no longer exist, VLAN interfaces of VLANs
+/// that lost their subnet, and VXLAN devices left over from a cluster this node has left.
 async fn remove_stale(nl: &Netlink, p: &NodePlan) {
     let want: BTreeSet<String> = p
         .switches
         .iter()
         .flat_map(|s| {
-            std::iter::once(s.bridge.clone()).chain(s.vxlan.iter().map(|v| v.name.clone()))
+            std::iter::once(s.bridge.clone())
+                .chain(s.vxlan.iter().map(|v| v.name.clone()))
+                .chain(s.vlan_nets.iter().map(|v| v.interface.clone()))
         })
         .collect();
     let Ok(links) = nl.links().await else { return };
     for l in links {
-        if vni_of(&l.name).is_some()
+        if (vni_of(&l.name).is_some() || vlan_interface_vni(&l.name).is_some())
             && !want.contains(&l.name)
             && let Err(e) = nl.delete_link(&l.name).await
         {

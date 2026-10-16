@@ -4,10 +4,10 @@ use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 
 use super::{ApiError, AppState, Json};
-use crate::network::{CheckNetwork, CreateNetwork, UpdateNetwork};
+use crate::network::{AddVlanSubnet, CheckNetwork, CreateNetwork, UpdateNetwork};
 use crate::node::{NetworkCheck, NetworkView};
 
 pub fn routes() -> Router<AppState> {
@@ -15,6 +15,9 @@ pub fn routes() -> Router<AppState> {
         .route("/networks", get(list).post(create))
         .route("/networks/check", post(check))
         .route("/networks/{id}", get(show).patch(update).delete(remove))
+        .route("/networks/{id}/vlans", post(add_vlan))
+        .route("/networks/{id}/vlans/{vlan}", delete(remove_vlan))
+        .route("/networks/{id}/vlan-suggestion", get(suggest_vlan))
 }
 
 async fn list(State(node): State<AppState>) -> Result<axum::Json<Vec<NetworkView>>, ApiError> {
@@ -62,4 +65,35 @@ async fn remove(
 ) -> Result<StatusCode, ApiError> {
     node.delete_network(&id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The subnet a new VLAN on the network would get.
+#[derive(serde::Serialize)]
+struct VlanSuggestion {
+    subnet: ipnet::Ipv4Net,
+}
+
+async fn suggest_vlan(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<axum::Json<VlanSuggestion>, ApiError> {
+    Ok(axum::Json(VlanSuggestion {
+        subnet: node.suggest_vlan_subnet(&id)?,
+    }))
+}
+
+async fn add_vlan(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AddVlanSubnet>,
+) -> Result<impl IntoResponse, ApiError> {
+    let net = node.add_vlan_subnet(&id, req).await?;
+    Ok((StatusCode::CREATED, axum::Json(net)))
+}
+
+async fn remove_vlan(
+    State(node): State<AppState>,
+    Path((id, vlan)): Path<(String, u16)>,
+) -> Result<axum::Json<NetworkView>, ApiError> {
+    Ok(axum::Json(node.remove_vlan_subnet(&id, vlan).await?))
 }

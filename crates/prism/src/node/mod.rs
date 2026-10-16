@@ -25,6 +25,7 @@ mod seed_xml;
 mod snapshot_move;
 mod snapshots;
 mod state_events;
+mod vlan_subnets;
 mod vlans;
 mod vm_delete;
 mod vms;

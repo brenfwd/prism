@@ -29,11 +29,27 @@ impl Node {
             .iter_mut()
             .find(|n| n.id == nic_id)
             .ok_or_else(|| NodeError::NotFound(format!("nic {nic_id}")))?;
-        let NicNetwork::Network { vlan, trunk, .. } = &mut nic.network else {
+        let NicNetwork::Network {
+            network,
+            ipv4,
+            vlan,
+            trunk,
+            ..
+        } = &mut nic.network
+        else {
             return Err(NodeError::Invalid(
                 "VLANs need a NIC on a Prism network".into(),
             ));
         };
+        // A VLAN with its own subnet needs an address from it; the state machine leases one.
+        let net = self
+            .state
+            .networks()?
+            .into_iter()
+            .find(|n| n.id == *network);
+        if net.is_some_and(|n| n.segment(*vlan) != n.segment(req.vlan)) {
+            *ipv4 = None;
+        }
         *vlan = req.vlan;
         *trunk = req.trunk;
         trunk.sort_unstable();

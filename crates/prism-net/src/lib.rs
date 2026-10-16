@@ -4,7 +4,8 @@
 //! (which switches exist, which peers belong to the mesh, ...) lives in the node.
 //!
 //! - [`Netlink`]: rtnetlink + generic netlink handles bound to the current network namespace.
-//! - [`link`]: bridges, VXLAN devices, bridge port VLANs, addresses and VXLAN FDB sync.
+//! - [`link`]: bridges, VXLAN devices, bridge port VLANs, VLAN interfaces, addresses and VXLAN
+//!   FDB sync.
 //! - [`wireguard`]: key generation, the `wg-prism` interface and its peer set.
 //! - [`nft`]: a minimal nftables netlink layer that replaces whole tables atomically.
 //! - [`dhcp`]: an embedded static-lease `DHCPv4` server bound to one interface.

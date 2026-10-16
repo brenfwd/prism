@@ -61,7 +61,7 @@ impl Node {
                 out.name_error = Some(format!("A network named {name} already exists."));
             }
         }
-        let mut taken: Vec<_> = nets.iter().map(|n| n.subnet).collect();
+        let mut taken: Vec<_> = nets.iter().flat_map(NetworkDoc::subnets).collect();
         let others = taken.len();
         taken.extend(host::foreign_subnets(&host::routes()));
         if let Some(s) = req.subnet {
@@ -212,7 +212,7 @@ impl Node {
             }
             s
         } else {
-            let mut taken: Vec<_> = nets.iter().map(|n| n.subnet).collect();
+            let mut taken: Vec<_> = nets.iter().flat_map(NetworkDoc::subnets).collect();
             taken.extend(host::foreign_subnets(&host::routes()));
             taken.push(ipam::CGNAT);
             ipam::pick_subnet(&taken)
@@ -236,6 +236,7 @@ impl Node {
             allow_prefixes: req.allow_prefixes,
             nat66: subnet6.is_some() && req.kind == NetworkKind::Nat && req.nat66.unwrap_or(true),
             subnet6,
+            vlan_subnets: BTreeMap::new(),
             created: unix_now(),
         };
         let id = doc.id;

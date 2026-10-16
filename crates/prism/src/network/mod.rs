@@ -12,6 +12,7 @@ pub mod host;
 pub mod ipam;
 pub mod plan;
 mod services;
+mod vlan;
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -22,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use agent::Agent;
+pub use vlan::{AddVlanSubnet, VLAN_RANGE, VlanSubnet, valid_vlan_subnets, vlan_interface_vni};
 
 /// Collection of [`NetworkDoc`]s.
 pub const NETWORKS: &str = "network";
@@ -85,6 +87,10 @@ pub struct NetworkDoc {
     /// the IPv6 internet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub nat66: bool,
+    /// A subnet for each VLAN that has its own gateway and DHCP scope, by VLAN ID.
+    /// A NIC on a VLAN without an entry shares the network's subnet.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vlan_subnets: BTreeMap<u16, VlanSubnet>,
     pub created: i64,
 }
 
@@ -110,16 +116,22 @@ impl NetworkDoc {
         format!("{}.prism", self.name)
     }
 
-    /// The gateway a NIC uses: its override, else the network's egress node,
+    /// The gateway a NIC on `segment` uses: its override, else the network's egress node,
     /// else the node the VM runs on; `None` on isolated networks.
-    pub fn router_for(&self, vm_node: Uuid, nic_egress: Option<Uuid>) -> Option<Ipv4Addr> {
+    pub fn router_for(
+        &self,
+        segment: Option<u16>,
+        vm_node: Uuid,
+        nic_egress: Option<Uuid>,
+    ) -> Option<Ipv4Addr> {
         if self.kind == NetworkKind::Isolated {
             return None;
         }
+        let gateways = self.gateways_of(segment);
         [nic_egress, self.egress, Some(vm_node)]
             .into_iter()
             .flatten()
-            .find_map(|n| self.gateways.get(&n).copied())
+            .find_map(|n| gateways.get(&n).copied())
     }
 }
 
@@ -313,6 +325,7 @@ mod tests {
             allow_prefixes: Vec::new(),
             subnet6: None,
             nat66: false,
+            vlan_subnets: BTreeMap::new(),
             created: 0,
         }
     }
@@ -338,19 +351,31 @@ mod tests {
     fn routers() {
         let mut d = doc();
         let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
-        assert_eq!(d.router_for(a, None), Some(Ipv4Addr::new(10, 88, 0, 1)));
-        assert_eq!(d.router_for(a, Some(b)), Some(Ipv4Addr::new(10, 88, 0, 2)));
+        assert_eq!(
+            d.router_for(None, a, None),
+            Some(Ipv4Addr::new(10, 88, 0, 1))
+        );
+        assert_eq!(
+            d.router_for(None, a, Some(b)),
+            Some(Ipv4Addr::new(10, 88, 0, 2))
+        );
         d.egress = Some(b);
-        assert_eq!(d.router_for(a, None), Some(Ipv4Addr::new(10, 88, 0, 2)));
-        assert_eq!(d.router_for(b, Some(a)), Some(Ipv4Addr::new(10, 88, 0, 1)));
+        assert_eq!(
+            d.router_for(None, a, None),
+            Some(Ipv4Addr::new(10, 88, 0, 2))
+        );
+        assert_eq!(
+            d.router_for(None, b, Some(a)),
+            Some(Ipv4Addr::new(10, 88, 0, 1))
+        );
         // An unknown override falls back.
         d.egress = None;
         assert_eq!(
-            d.router_for(a, Some(Uuid::from_u128(9))),
+            d.router_for(None, a, Some(Uuid::from_u128(9))),
             Some(Ipv4Addr::new(10, 88, 0, 1))
         );
         d.kind = NetworkKind::Isolated;
-        assert_eq!(d.router_for(a, None), None);
+        assert_eq!(d.router_for(None, a, None), None);
     }
 
     #[test]

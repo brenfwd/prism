@@ -9,6 +9,8 @@
 mod apply;
 mod backend;
 mod command;
+#[cfg(test)]
+mod network_tests;
 mod networks;
 #[cfg(test)]
 mod tests;

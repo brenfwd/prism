@@ -1,5 +1,6 @@
 use super::*;
 use crate::cluster::model::MemberState;
+use crate::network::VlanSubnet;
 use crate::spec::NicSpec;
 use crate::spec::tests::sample_spec;
 
@@ -22,6 +23,7 @@ fn net() -> NetworkDoc {
         allow_prefixes: Vec::new(),
         subnet6: None,
         nat66: false,
+        vlan_subnets: BTreeMap::new(),
         created: 0,
     }
 }
@@ -302,4 +304,76 @@ fn networks_without_ipv6_stay_as_they_were() {
     assert_eq!(p.firewall.ports[0].ipv6, Ipv6Source::Any);
     assert_eq!(p.firewall.nat6, vec![]);
     assert_eq!(sw.hosts["web"].len(), 1);
+}
+
+#[test]
+fn vlan_subnets_get_their_own_gateway_scope_and_rules() {
+    let mut doc = net();
+    doc.vlan_subnets.insert(
+        20,
+        VlanSubnet {
+            subnet: "10.88.1.0/24".parse().unwrap(),
+            gateways: BTreeMap::from([(A, Ipv4Addr::new(10, 88, 1, 1))]),
+        },
+    );
+    let mut guest = vm("db", A, "52:54:00:00:00:02", 3, None);
+    if let NicNetwork::Network { vlan, ipv4, .. } = &mut guest.nics[0].network {
+        *vlan = Some(20);
+        *ipv4 = Some(Ipv4Addr::new(10, 88, 1, 7));
+    }
+    let plain = vm("web", A, "52:54:00:00:00:01", 3, None);
+    let vms = [guest, plain];
+    let p = plan(&PlanInput {
+        node: A,
+        networks: std::slice::from_ref(&doc),
+        vms: &vms,
+        members: &[],
+        wg_mtu: None,
+        uplink: Some("eth0".into()),
+        uplink6: None,
+    });
+    let sw = &p.switches[0];
+    assert_eq!(sw.vlans.iter().copied().collect::<Vec<_>>(), vec![20]);
+    assert_eq!(sw.mtu, 1500 - VLAN_OVERHEAD);
+    let v = &sw.vlan_nets[0];
+    assert_eq!(v.interface, "ps100000.20");
+    assert_eq!(v.address, Some("10.88.1.1/24".parse().unwrap()));
+    // The VLAN guest leases from its own scope, the other from the bridge's.
+    let lease = &v.leases[&"52:54:00:00:00:02".parse().unwrap()];
+    assert_eq!(lease.ip, Ipv4Addr::new(10, 88, 1, 7));
+    assert_eq!(lease.router, Some(Ipv4Addr::new(10, 88, 1, 1)));
+    assert_eq!(lease.dns, vec![Ipv4Addr::new(10, 88, 1, 1)]);
+    assert_eq!(lease.prefix_len, 24);
+    assert_eq!(v.leases.len(), 1);
+    assert_eq!(sw.leases.len(), 1);
+    assert!(
+        sw.leases
+            .contains_key(&"52:54:00:00:00:01".parse().unwrap())
+    );
+    assert_eq!(v.hosts.len(), 1);
+    // NAT, input and forward rules cover the VLAN interface.
+    assert!(
+        p.firewall
+            .nat
+            .iter()
+            .any(|n| n.source == doc.vlan_subnets[&20].subnet)
+    );
+    assert!(
+        p.firewall
+            .switches
+            .iter()
+            .any(|s| s.bridge == "ps100000.20" && s.vip == Ipv4Addr::new(10, 88, 1, 1))
+    );
+    assert!(p.firewall.routed.iter().any(|r| r.bridge == "ps100000.20"));
+    // Another node has no address on the VLAN until it has a gateway there.
+    let other = plan(&PlanInput {
+        node: B,
+        networks: std::slice::from_ref(&doc),
+        vms: &vms,
+        members: &[],
+        wg_mtu: None,
+        uplink: Some("eth0".into()),
+        uplink6: None,
+    });
+    assert_eq!(other.switches[0].vlan_nets[0].address, None);
 }

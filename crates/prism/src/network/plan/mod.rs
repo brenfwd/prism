@@ -49,6 +49,8 @@ pub struct SwitchPlan {
     pub mtu: u32,
     /// This node's address on the bridge, with the subnet's prefix.
     pub address: Option<Ipv4Net>,
+    /// The VLANs with a subnet of their own: an interface on the bridge each.
+    pub vlan_nets: Vec<VlanPlan>,
     /// The VXLAN device and its peers; `None` while standalone.
     pub vxlan: Option<VxlanPlan>,
     /// DHCP leases for NICs of VMs on this node (empty when DHCP is off).
@@ -74,6 +76,21 @@ pub struct SwitchPlan {
     /// The zone origin, `<network>.prism`.
     pub domain: String,
     /// Every VM on the network, by name.
+    pub hosts: HashMap<String, Vec<IpAddr>>,
+}
+
+/// One VLAN with its own subnet on a switch: the interface that carries it on this node, with
+/// its gateway and DHCP scope. DHCP, DNS and the MTU follow the switch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VlanPlan {
+    pub vlan: u16,
+    /// The VLAN interface on the bridge, `ps<vni>.<vid>`.
+    pub interface: String,
+    /// This node's address on the interface, with the VLAN subnet's prefix.
+    pub address: Option<Ipv4Net>,
+    /// DHCP leases for NICs of VMs on this node that sit on the VLAN.
+    pub leases: HashMap<MacAddr, Lease>,
+    /// Every VM with a NIC on the VLAN, by name.
     pub hosts: HashMap<String, Vec<IpAddr>>,
 }
 
@@ -127,7 +144,8 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
     let base_mtu = switch_mtu(input.wg_mtu);
     let mut out = NodePlan::default();
     for net in input.networks {
-        let vlans = net_vlans(net.id, input.vms);
+        let mut vlans = net_vlans(net.id, input.vms);
+        vlans.extend(net.vlan_subnets.keys());
         let mtu = if vlans.is_empty() {
             base_mtu
         } else {
@@ -170,6 +188,20 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
             bridge: net.bridge(),
             mtu,
             address,
+            vlan_nets: net
+                .vlan_subnets
+                .iter()
+                .map(|(vid, vs)| VlanPlan {
+                    vlan: *vid,
+                    interface: net.interface_of(Some(*vid)),
+                    address: vs
+                        .gateways
+                        .get(&input.node)
+                        .map(|g| Ipv4Net::new_assert(*g, vs.subnet.prefix_len())),
+                    leases: HashMap::new(),
+                    hosts: HashMap::new(),
+                })
+                .collect(),
             vxlan,
             leases: HashMap::new(),
             dhcp: net.dhcp,
@@ -191,6 +223,7 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                     ipv6,
                     egress,
                     forwards,
+                    vlan,
                     ..
                 } = &nic.network
                 else {
@@ -203,11 +236,20 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                     continue;
                 };
                 let v6 = net.guest_v6(*ipv6, &nic.mac);
+                let segment = net.segment(*vlan);
+                let iface = net.interface_of(segment);
+                let nic_gateway = net.gateways_of(segment).get(&input.node).copied();
                 if let Some(ip) = ipv4 {
                     sw.hosts
                         .entry(vm.name.clone())
                         .or_default()
                         .push(IpAddr::V4(*ip));
+                    if let Some(vp) = sw.vlan_nets.iter_mut().find(|v| Some(v.vlan) == segment) {
+                        vp.hosts
+                            .entry(vm.name.clone())
+                            .or_default()
+                            .push(IpAddr::V4(*ip));
+                    }
                 }
                 if let Some(ip) = v6 {
                     sw.hosts
@@ -232,7 +274,7 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                         trunk: matches!(nic.network.port_vlans(), Some(PortVlans::Trunk { .. })),
                     });
                     // Forwards need this node to route into the network.
-                    if gateway.is_some() {
+                    if nic_gateway.is_some() {
                         for f in forwards {
                             let guests = [
                                 ipv4.map(IpAddr::V4)
@@ -252,7 +294,7 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                                 // Loopback destinations are only routable to the
                                 // bridge with route_localnet.
                                 if f.local && f.host_addr.is_none() && guest.is_ipv4() {
-                                    out.local_bridges.push(sw.bridge.clone());
+                                    out.local_bridges.push(iface.clone());
                                 }
                                 out.firewall.dnat.push(prism_net::nft::DnatRule {
                                     udp: f.proto == Proto::Udp,
@@ -260,7 +302,7 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                                     host_port: f.host_port,
                                     guest,
                                     guest_port: f.guest_port,
-                                    bridge: sw.bridge.clone(),
+                                    bridge: iface.clone(),
                                     local: f.local,
                                     hairpin: f.hairpin,
                                     snat6: Some(address6.map_or(gateway6, |a| a.addr())),
@@ -269,8 +311,11 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                         }
                     }
                     if let (Some(ip), true) = (ipv4, net.dhcp) {
-                        sw.leases
-                            .insert(mac, lease(net, vm, *ip, *egress, gateway, mtu));
+                        let l = lease(net, vm, *ip, *egress, (segment, nic_gateway), mtu);
+                        match sw.vlan_nets.iter_mut().find(|v| Some(v.vlan) == segment) {
+                            Some(vp) => vp.leases.insert(mac, l),
+                            None => sw.leases.insert(mac, l),
+                        };
                     }
                 } else if let (Some(v), Some(addr)) = (&mut sw.vxlan, mesh.get(&vm.node)) {
                     v.fdb.macs.insert(mac, IpAddr::V6(*addr));
@@ -286,6 +331,15 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                 vip: g,
                 vip6: address6.map(|a| a.addr()),
             });
+        }
+        for vp in &sw.vlan_nets {
+            if let Some(a) = vp.address {
+                out.firewall.switches.push(prism_net::nft::SwitchServices {
+                    bridge: vp.interface.clone(),
+                    vip: a.addr(),
+                    vip6: None,
+                });
+            }
         }
         let nat = net.kind == NetworkKind::Nat;
         let mut out_ifaces: Vec<String> = Vec::new();
@@ -304,6 +358,14 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                 egress: uplink.clone(),
             });
         }
+        if let (true, Some(uplink)) = (nat, &input.uplink) {
+            for vs in net.vlan_subnets.values() {
+                out.firewall.nat.push(prism_net::nft::NatRule {
+                    source: vs.subnet,
+                    egress: uplink.clone(),
+                });
+            }
+        }
         if let (true, Some(prefix), Some(uplink6)) = (router6, net.subnet6, &input.uplink6) {
             out.forwarding6 = true;
             out.firewall.nat6.push(prism_net::nft::Nat6Rule {
@@ -311,14 +373,22 @@ pub fn plan(input: &PlanInput<'_>) -> NodePlan {
                 egress: uplink6.clone(),
             });
         }
+        let allow = if nat && input.uplink.is_some() {
+            net.allow_prefixes.clone()
+        } else {
+            Vec::new()
+        };
+        for vp in &sw.vlan_nets {
+            out.firewall.routed.push(Routed {
+                bridge: vp.interface.clone(),
+                out: out_ifaces.clone(),
+                allow: allow.clone(),
+            });
+        }
         out.firewall.routed.push(Routed {
             bridge: sw.bridge.clone(),
             out: out_ifaces,
-            allow: if nat && input.uplink.is_some() {
-                net.allow_prefixes.clone()
-            } else {
-                Vec::new()
-            },
+            allow,
         });
         out.switches.push(sw);
     }
@@ -349,13 +419,13 @@ fn lease(
     vm: &VmSpec,
     ip: Ipv4Addr,
     egress: Option<Uuid>,
-    gateway: Option<Ipv4Addr>,
+    (segment, gateway): (Option<u16>, Option<Ipv4Addr>),
     mtu: u32,
 ) -> Lease {
     Lease {
         ip,
-        prefix_len: net.subnet.prefix_len(),
-        router: net.router_for(vm.node, egress),
+        prefix_len: net.subnet_of(segment).prefix_len(),
+        router: net.router_for(segment, vm.node, egress),
         dns: gateway.into_iter().collect(),
         domain: Some(net.domain()),
         hostname: Some(vm.name.clone()),

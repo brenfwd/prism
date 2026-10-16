@@ -1,8 +1,9 @@
-//! Links: bridges, VXLAN devices, bridge port VLANs, addresses and the VXLAN FDB.
+//! Links: bridges, VXLAN devices, bridge port VLANs, VLAN interfaces, addresses and the VXLAN FDB.
 //!
 //! Every `ensure_*` call is idempotent: it creates what is missing and corrects what drifted.
 
 mod fdb;
+mod subif;
 mod vlan;
 
 use std::net::{IpAddr, Ipv6Addr};

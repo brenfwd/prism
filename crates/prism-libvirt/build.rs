@@ -25,13 +25,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let num: u32 = num.trim().trim_end_matches(',').trim().parse()?;
         let ident = Ident::new(name.trim(), Span::call_site());
-        consts.push(quote! { pub const #ident: u32 = #num; });
+        let doc = format!("`REMOTE_PROC_{}`, procedure number {num}.", name.trim());
+        consts.push(quote! {
+            #[doc = #doc]
+            pub const #ident: u32 = #num;
+        });
     }
     if consts.is_empty() {
         return Err("no procedures parsed".into());
     }
     let file: syn::File = syn::parse2(quote! {
-        /// Every remote procedure number (generated from `remote_protocol.x`).
         #(#consts)*
     })?;
     let out = PathBuf::from(std::env::var("OUT_DIR")?).join("procs.rs");

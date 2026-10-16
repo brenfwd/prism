@@ -7,27 +7,43 @@
 use crate::Error;
 use crate::xdr::{Decoder, Encoder};
 
+/// RPC program number of the `remote` protocol.
 pub const REMOTE_PROGRAM: u32 = 0x2000_8086;
+/// Version of the `remote` program the client speaks.
 pub const REMOTE_PROTOCOL_VERSION: u32 = 1;
+/// RPC program number of the keepalive protocol.
 pub const KEEPALIVE_PROGRAM: u32 = 0x6b65_6570;
+/// Version of the keepalive program.
 pub const KEEPALIVE_PROTOCOL_VERSION: u32 = 1;
 
+/// Largest message the daemon accepts, in bytes, including the 4-byte length.
 pub const MESSAGE_MAX: usize = 33_554_432;
+/// Size of the encoded message header in bytes.
 pub const HEADER_LEN: usize = 24;
+/// Most domains one list reply may contain.
 pub const DOMAIN_LIST_MAX: usize = 16_384;
+/// Most entries a memory statistics reply may contain.
 pub const MEMORY_STATS_MAX: usize = 1024;
+/// Length of a domain UUID in bytes.
 pub const UUID_LEN: usize = 16;
 
 /// `virNetMessageType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum MessageType {
+    /// A request from the client.
     Call = 0,
+    /// The answer to a call, matched by serial.
     Reply = 1,
+    /// An unsolicited message such as an event or a keepalive ping.
     Message = 2,
+    /// Data or a status change on an open stream.
     Stream = 3,
+    /// A call that passes file descriptors (unused).
     CallWithFds = 4,
+    /// A reply that passes file descriptors (unused).
     ReplyWithFds = 5,
+    /// A sparse-stream hole marker (unused).
     StreamHole = 6,
 }
 
@@ -51,8 +67,11 @@ impl TryFrom<u32> for MessageType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum Status {
+    /// The call succeeded, or the stream ended normally.
     Ok = 0,
+    /// The call failed; the body is a [`RemoteError`].
     Error = 1,
+    /// A stream message that carries data.
     Continue = 2,
 }
 
@@ -71,15 +90,22 @@ impl TryFrom<u32> for Status {
 /// `virNetMessageHeader`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
+    /// RPC program number.
     pub prog: u32,
+    /// Program version.
     pub vers: u32,
+    /// Procedure number.
     pub proc: u32,
+    /// Message kind.
     pub ty: MessageType,
+    /// Call serial; replies and stream messages repeat the call's serial.
     pub serial: u32,
+    /// Outcome of the call, or the kind of stream message.
     pub status: Status,
 }
 
 impl Header {
+    /// Appends the 24-byte header.
     pub fn encode(&self, e: &mut Encoder) {
         e.u32(self.prog)
             .u32(self.vers)
@@ -89,6 +115,7 @@ impl Header {
             .u32(self.status as u32);
     }
 
+    /// Reads a header. Fails on an unknown message type or status.
     pub fn decode(d: &mut Decoder<'_>) -> Result<Self, Error> {
         Ok(Self {
             prog: d.u32()?,
@@ -108,6 +135,7 @@ pub mod procs {
 
 /// `virDomainEventID` values.
 pub mod event_ids {
+    #![allow(missing_docs)] // Names mirror `VIR_DOMAIN_EVENT_ID_*`.
     pub const LIFECYCLE: i32 = 0;
     pub const BALLOON_CHANGE: i32 = 13;
     pub const DEVICE_REMOVED: i32 = 15;
@@ -117,23 +145,29 @@ pub mod event_ids {
     pub const JOB_COMPLETED: i32 = 21;
 }
 
+/// Keepalive procedure: the sender asks the peer to answer.
 pub const KEEPALIVE_PROC_PING: u32 = 1;
+/// Keepalive procedure: the answer to a ping.
 pub const KEEPALIVE_PROC_PONG: u32 = 2;
 
 /// `remote_nonnull_domain`: a reference to a domain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Domain {
+    /// Domain name, unique on the host.
     pub name: String,
+    /// Domain UUID.
     pub uuid: [u8; UUID_LEN],
     /// Runtime ID, or -1 when the domain is not running.
     pub id: i32,
 }
 
 impl Domain {
+    /// Appends the domain reference.
     pub fn encode(&self, e: &mut Encoder) {
         e.string(&self.name).opaque_fixed(&self.uuid).i32(self.id);
     }
 
+    /// Reads a domain reference.
     pub fn decode(d: &mut Decoder<'_>) -> Result<Self, Error> {
         let name = d.string()?;
         let mut uuid = [0; UUID_LEN];
@@ -149,14 +183,23 @@ impl Domain {
 /// `virDomainState`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DomainState {
+    /// No state reported.
     NoState,
+    /// Running.
     Running,
+    /// Blocked on a resource.
     Blocked,
+    /// Paused by the user or the hypervisor.
     Paused,
+    /// Shutting down.
     Shutdown,
+    /// Powered off.
     Shutoff,
+    /// Crashed.
     Crashed,
+    /// Suspended by the guest's power management.
     PmSuspended,
+    /// A state code this client does not know.
     Unknown(i32),
 }
 
@@ -179,27 +222,41 @@ impl From<i32> for DomainState {
 /// `remote_domain_get_info_ret`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DomainInfo {
+    /// Current state.
     pub state: DomainState,
+    /// Maximum memory in KiB.
     pub max_mem_kib: u64,
+    /// Current memory in KiB.
     pub memory_kib: u64,
+    /// Number of virtual CPUs.
     pub nr_virt_cpu: u16,
+    /// CPU time used, in nanoseconds.
     pub cpu_time_ns: u64,
 }
 
 /// `remote_node_get_info_ret`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeInfo {
+    /// CPU model string, at most 31 characters.
     pub model: String,
+    /// Host memory in KiB.
     pub memory_kib: u64,
+    /// Number of active CPUs.
     pub cpus: i32,
+    /// CPU frequency in MHz.
     pub mhz: i32,
+    /// Number of NUMA nodes.
     pub nodes: i32,
+    /// Sockets per NUMA node.
     pub sockets: i32,
+    /// Cores per socket.
     pub cores: i32,
+    /// Threads per core.
     pub threads: i32,
 }
 
 impl NodeInfo {
+    /// Reads a node info reply.
     pub fn decode(d: &mut Decoder<'_>) -> Result<Self, Error> {
         // `char model[32]` is an XDR vector of chars, each a 4-byte unit.
         let mut model = Vec::with_capacity(32);
@@ -223,15 +280,25 @@ impl NodeInfo {
 /// `virDomainEventType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LifecycleEvent {
+    /// The domain definition was added or changed.
     Defined,
+    /// The domain definition was removed.
     Undefined,
+    /// The domain started.
     Started,
+    /// The domain was suspended.
     Suspended,
+    /// The domain resumed.
     Resumed,
+    /// The domain stopped.
     Stopped,
+    /// The guest began shutting down.
     Shutdown,
+    /// The guest was suspended by power management.
     PmSuspended,
+    /// The domain crashed.
     Crashed,
+    /// An event code this client does not know.
     Unknown(i32),
 }
 
@@ -255,13 +322,18 @@ impl From<i32> for LifecycleEvent {
 /// `virNetMessageError`, as returned in a reply with status `Error`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteError {
+    /// `virErrorNumber`; see [`error_codes`] for the ones Prism checks.
     pub code: i32,
+    /// `virErrorDomain`: the libvirt subsystem that raised the error.
     pub domain: i32,
+    /// Human-readable message, if the daemon sent one.
     pub message: Option<String>,
+    /// `virErrorLevel`.
     pub level: i32,
 }
 
 impl RemoteError {
+    /// Reads the leading fields of an error body.
     pub fn decode(d: &mut Decoder<'_>) -> Result<Self, Error> {
         // Trailing fields (str1..3, int1..2, dom, net) are not needed.
         Ok(Self {
@@ -287,12 +359,14 @@ impl std::fmt::Display for RemoteError {
 
 /// libvirt error codes Prism reacts to.
 pub mod error_codes {
+    #![allow(missing_docs)] // Names mirror `VIR_ERR_*`.
     pub const OPERATION_INVALID: i32 = 55;
     pub const NO_DOMAIN: i32 = 42;
 }
 
 /// Flag values used by Prism.
 pub mod flags {
+    #![allow(missing_docs)] // Names mirror `VIR_DOMAIN_*` flags.
     pub const DOMAIN_XML_SECURE: u32 = 1;
     pub const DOMAIN_XML_INACTIVE: u32 = 2;
     pub const DOMAIN_DEFINE_VALIDATE: u32 = 1;
@@ -310,6 +384,7 @@ pub mod flags {
 
 /// `virDomainMemoryStatTags`.
 pub mod memory_stat {
+    #![allow(missing_docs)] // Names mirror `VIR_DOMAIN_MEMORY_STAT_*`.
     pub const SWAP_IN: i32 = 0;
     pub const MAJOR_FAULT: i32 = 2;
     pub const UNUSED: i32 = 4;
@@ -320,6 +395,24 @@ pub mod memory_stat {
     pub const DISK_CACHES: i32 = 10;
 }
 
+/// One `(tag, value)` entry of a memory statistics reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryStat {
+    /// A [`memory_stat`] tag.
+    pub tag: i32,
+    /// The statistic, in KiB except for fault counters.
+    pub value: u64,
+}
+
+/// A domain's state with the reason libvirt gives for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateInfo {
+    /// Current state.
+    pub state: DomainState,
+    /// The `virDomain*Reason` code that goes with `state`.
+    pub reason: i32,
+}
+
 #[cfg(test)]
 mod procs_tests {
     use super::procs;
@@ -328,5 +421,100 @@ mod procs_tests {
     fn generated_procedure_numbers_match_the_protocol() {
         assert_eq!(procs::CONNECT_OPEN, 1);
         assert_eq!(procs::CONNECT_CLOSE, 2);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header() -> Header {
+        Header {
+            prog: REMOTE_PROGRAM,
+            vers: REMOTE_PROTOCOL_VERSION,
+            proc: 7,
+            ty: MessageType::Reply,
+            serial: 9,
+            status: Status::Error,
+        }
+    }
+
+    #[test]
+    fn header_round_trips_in_24_bytes() {
+        let mut e = Encoder::new();
+        header().encode(&mut e);
+        let buf = e.into_inner();
+        assert_eq!(buf.len(), HEADER_LEN);
+        assert_eq!(Header::decode(&mut Decoder::new(&buf)).unwrap(), header());
+    }
+
+    #[test]
+    fn header_rejects_unknown_type_and_status() {
+        for (ty, status) in [(9, 0), (1, 9)] {
+            let mut e = Encoder::new();
+            e.u32(REMOTE_PROGRAM)
+                .u32(1)
+                .u32(1)
+                .u32(ty)
+                .u32(1)
+                .u32(status);
+            let buf = e.into_inner();
+            assert!(Header::decode(&mut Decoder::new(&buf)).is_err());
+        }
+    }
+
+    #[test]
+    fn domain_round_trips() {
+        let dom = Domain {
+            name: "vm".into(),
+            uuid: [3; UUID_LEN],
+            id: -1,
+        };
+        let mut e = Encoder::new();
+        dom.encode(&mut e);
+        let buf = e.into_inner();
+        assert_eq!(Domain::decode(&mut Decoder::new(&buf)).unwrap(), dom);
+    }
+
+    #[test]
+    fn node_info_reads_char_vector_model() {
+        let mut e = Encoder::new();
+        for i in 0..32u32 {
+            e.u32(if i < 3 {
+                u32::from(b"abc"[i as usize])
+            } else {
+                0
+            });
+        }
+        e.u64(16_777_216)
+            .i32(8)
+            .i32(3000)
+            .i32(1)
+            .i32(1)
+            .i32(4)
+            .i32(2);
+        let buf = e.into_inner();
+        let info = NodeInfo::decode(&mut Decoder::new(&buf)).unwrap();
+        assert_eq!(info.model, "abc");
+        assert_eq!(info.memory_kib, 16_777_216);
+        assert_eq!((info.cpus, info.cores, info.threads), (8, 4, 2));
+    }
+
+    #[test]
+    fn remote_error_display_falls_back_without_message() {
+        let e = RemoteError {
+            code: 1,
+            domain: 2,
+            message: None,
+            level: 0,
+        };
+        assert_eq!(e.to_string(), "unknown libvirt error (code 1, domain 2)");
+    }
+
+    #[test]
+    fn unknown_state_codes_are_kept() {
+        assert_eq!(DomainState::from(5), DomainState::Shutoff);
+        assert_eq!(DomainState::from(99), DomainState::Unknown(99));
+        assert_eq!(LifecycleEvent::from(2), LifecycleEvent::Started);
     }
 }

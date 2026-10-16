@@ -1,6 +1,9 @@
-//! Connects to a libvirt socket and prints basic information.
+//! Connects to a libvirt socket, then prints the library version, host name,
+//! host CPU and memory, and every domain with its UUID and state.
 //!
-//! Usage: `probe <socket> <uri>`
+//! Usage: `cargo run -p prism-libvirt --example probe [socket] [uri]`. The
+//! socket defaults to `/run/libvirt/virtqemud-sock` and the URI to
+//! `qemu:///system`.
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), prism_libvirt::Error> {

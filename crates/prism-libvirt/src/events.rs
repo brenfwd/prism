@@ -8,10 +8,15 @@ use crate::xdr::Decoder;
 /// `virConnectDomainEventBlockJobStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockJobStatus {
+    /// The job finished.
     Completed,
+    /// The job failed.
     Failed,
+    /// The job was cancelled.
     Canceled,
+    /// A mirror job is in sync and can be pivoted.
     Ready,
+    /// A status code this client does not know.
     Unknown(i32),
 }
 
@@ -27,43 +32,69 @@ impl From<i32> for BlockJobStatus {
     }
 }
 
+/// An event the daemon sends for a domain, after the matching
+/// `register_event` call.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DomainEvent {
+    /// A lifecycle change (`VIR_DOMAIN_EVENT_ID_LIFECYCLE`).
     Lifecycle {
+        /// The domain.
         domain: Domain,
+        /// What happened.
         event: LifecycleEvent,
+        /// The event-specific detail code.
         detail: i32,
     },
+    /// A block job changed status.
     BlockJob {
+        /// The domain.
         domain: Domain,
         /// Disk target (for example `vda`).
         disk: String,
+        /// `virDomainBlockJobType`.
         job_type: i32,
+        /// The new status.
         status: BlockJobStatus,
     },
+    /// A domain job (migration, backup) finished.
     JobCompleted {
+        /// The domain.
         domain: Domain,
+        /// Final job statistics.
         stats: Vec<TypedParam>,
     },
+    /// The balloon driver reached a new size.
     BalloonChange {
+        /// The domain.
         domain: Domain,
+        /// Current balloon size in KiB.
         actual_kib: u64,
     },
+    /// A hot-unplugged device is gone from the guest.
     DeviceRemoved {
+        /// The domain.
         domain: Domain,
+        /// Device alias, such as `virtio-disk1`.
         alias: String,
     },
+    /// The QEMU guest agent connected or disconnected.
     AgentLifecycle {
+        /// The domain.
         domain: Domain,
+        /// Whether the agent is connected.
         connected: bool,
     },
+    /// A live migration finished another memory copy pass.
     MigrationIteration {
+        /// The domain.
         domain: Domain,
+        /// Pass number, starting at 1.
         iteration: i32,
     },
 }
 
 impl DomainEvent {
+    /// The domain the event is about.
     pub fn domain(&self) -> &Domain {
         match self {
             Self::Lifecycle { domain, .. }
@@ -136,5 +167,80 @@ impl DomainEvent {
             _ => return Ok(None),
         };
         Ok(Some(ev))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xdr::Encoder;
+
+    fn dom() -> Domain {
+        Domain {
+            name: "vm".into(),
+            uuid: [1; 16],
+            id: 2,
+        }
+    }
+
+    fn body(f: impl FnOnce(&mut Encoder)) -> Vec<u8> {
+        let mut e = Encoder::new();
+        e.i32(1);
+        dom().encode(&mut e);
+        f(&mut e);
+        e.into_inner()
+    }
+
+    #[test]
+    fn decodes_block_job() {
+        let b = body(|e| {
+            e.string("vda").i32(2).i32(3);
+        });
+        let ev = DomainEvent::decode(procs::DOMAIN_EVENT_BLOCK_JOB_2, &b)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            ev,
+            DomainEvent::BlockJob {
+                domain: dom(),
+                disk: "vda".into(),
+                job_type: 2,
+                status: BlockJobStatus::Ready,
+            }
+        );
+        assert_eq!(ev.domain(), &dom());
+    }
+
+    #[test]
+    fn decodes_balloon_and_agent_events() {
+        let b = body(|e| {
+            e.u64(1024);
+        });
+        let ev = DomainEvent::decode(procs::DOMAIN_EVENT_CALLBACK_BALLOON_CHANGE, &b).unwrap();
+        assert_eq!(
+            ev,
+            Some(DomainEvent::BalloonChange {
+                domain: dom(),
+                actual_kib: 1024
+            })
+        );
+        let b = body(|e| {
+            e.i32(1).i32(1);
+        });
+        let ev = DomainEvent::decode(procs::DOMAIN_EVENT_CALLBACK_AGENT_LIFECYCLE, &b).unwrap();
+        assert!(matches!(
+            ev,
+            Some(DomainEvent::AgentLifecycle {
+                connected: true,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn unknown_procedure_is_ignored_and_short_body_fails() {
+        assert_eq!(DomainEvent::decode(1, &[]).unwrap(), None);
+        let err = DomainEvent::decode(procs::DOMAIN_EVENT_CALLBACK_LIFECYCLE, &[0, 0, 0, 1]);
+        assert!(err.is_err());
     }
 }

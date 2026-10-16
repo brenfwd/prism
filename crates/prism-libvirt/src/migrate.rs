@@ -10,7 +10,9 @@ use crate::xdr::{Decoder, Encoder};
 
 const COOKIE_MAX: usize = 4_194_304;
 
+/// Procedure numbers of the migration calls.
 pub mod procs {
+    #![allow(missing_docs)] // Names mirror `REMOTE_PROC_DOMAIN_MIGRATE_*`.
     pub const BEGIN3_PARAMS: u32 = 302;
     pub const PREPARE3_PARAMS: u32 = 303;
     pub const PERFORM3_PARAMS: u32 = 305;
@@ -22,6 +24,7 @@ pub mod procs {
 
 /// `virDomainMigrateFlags`.
 pub mod flags {
+    #![allow(missing_docs)] // Names mirror `VIR_MIGRATE_*`.
     pub const LIVE: u32 = 1;
     pub const PERSIST_DEST: u32 = 8;
     pub const UNDEFINE_SOURCE: u32 = 16;
@@ -38,6 +41,7 @@ pub mod flags {
 
 /// `VIR_MIGRATE_PARAM_*` names.
 pub mod params {
+    #![allow(missing_docs)] // Names mirror `VIR_MIGRATE_PARAM_*`.
     pub const URI: &str = "migrate_uri";
     pub const DEST_NAME: &str = "destination_name";
     pub const DEST_XML: &str = "destination_xml";
@@ -157,6 +161,7 @@ impl Client {
         .map(drop)
     }
 
+    /// Switches a running live migration to post-copy mode.
     pub async fn migrate_start_post_copy(&self, dom: &Domain) -> Result<(), Error> {
         self.call_with(procs::START_POST_COPY, |e| {
             dom.encode(e);

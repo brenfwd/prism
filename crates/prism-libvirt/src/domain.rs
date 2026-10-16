@@ -3,7 +3,9 @@
 
 use crate::Error;
 use crate::client::Client;
-use crate::proto::{self, Domain, DomainInfo, DomainState, NodeInfo, flags, procs};
+use crate::proto::{
+    self, Domain, DomainInfo, DomainState, MemoryStat, NodeInfo, StateInfo, flags, procs,
+};
 use crate::xdr::Decoder;
 
 impl Client {
@@ -15,11 +17,13 @@ impl Client {
         Decoder::new(&r).u64()
     }
 
+    /// `virConnectGetHostname`.
     pub async fn hostname(&self) -> Result<String, Error> {
         let r = self.call(procs::CONNECT_GET_HOSTNAME, Vec::new()).await?;
         Decoder::new(&r).string()
     }
 
+    /// `virConnectGetCapabilities`: the host and hypervisor capabilities XML.
     pub async fn capabilities(&self) -> Result<String, Error> {
         let r = self
             .call(procs::CONNECT_GET_CAPABILITIES, Vec::new())
@@ -27,6 +31,7 @@ impl Client {
         Decoder::new(&r).string()
     }
 
+    /// `virNodeGetInfo`: CPU model, count and memory of the host.
     pub async fn node_info(&self) -> Result<NodeInfo, Error> {
         let r = self.call(procs::NODE_GET_INFO, Vec::new()).await?;
         NodeInfo::decode(&mut Decoder::new(&r))
@@ -49,6 +54,8 @@ impl Client {
         d.array(proto::DOMAIN_LIST_MAX, Domain::decode)
     }
 
+    /// `virDomainLookupByUUID`. Fails with `NO_DOMAIN` when no domain has
+    /// that UUID.
     pub async fn lookup_by_uuid(&self, uuid: [u8; 16]) -> Result<Domain, Error> {
         let r = self
             .call_with(procs::DOMAIN_LOOKUP_BY_UUID, |e| {
@@ -58,6 +65,8 @@ impl Client {
         Domain::decode(&mut Decoder::new(&r))
     }
 
+    /// `virDomainDefineXMLFlags`: defines or updates a persistent domain from
+    /// its XML. `flags` are `DOMAIN_DEFINE_*` values from [`proto::flags`].
     pub async fn define_xml(&self, xml: &str, flags: u32) -> Result<Domain, Error> {
         let r = self
             .call_with(procs::DOMAIN_DEFINE_XML_FLAGS, |e| {
@@ -67,6 +76,8 @@ impl Client {
         Domain::decode(&mut Decoder::new(&r))
     }
 
+    /// `virDomainUndefineFlags`: removes the persistent definition. `flags`
+    /// are `DOMAIN_UNDEFINE_*` values from [`proto::flags`].
     pub async fn undefine(&self, dom: &Domain, flags: u32) -> Result<(), Error> {
         self.call_dom(procs::DOMAIN_UNDEFINE_FLAGS, dom, Some(flags))
             .await
@@ -95,32 +106,38 @@ impl Client {
             .map(drop)
     }
 
+    /// `virDomainReboot`; `flags` is a `virDomainRebootFlagValues` mask, 0
+    /// for the hypervisor default.
     pub async fn reboot(&self, dom: &Domain, flags: u32) -> Result<(), Error> {
         self.call_dom(procs::DOMAIN_REBOOT, dom, Some(flags))
             .await
             .map(drop)
     }
 
+    /// `virDomainReset`: a hard reset without a guest shutdown.
     pub async fn reset(&self, dom: &Domain) -> Result<(), Error> {
         self.call_dom(procs::DOMAIN_RESET, dom, Some(0))
             .await
             .map(drop)
     }
 
+    /// `virDomainSuspend`: pauses the domain's vCPUs.
     pub async fn suspend(&self, dom: &Domain) -> Result<(), Error> {
         self.call_dom(procs::DOMAIN_SUSPEND, dom, None)
             .await
             .map(drop)
     }
 
+    /// `virDomainResume`: resumes a paused domain.
     pub async fn resume(&self, dom: &Domain) -> Result<(), Error> {
         self.call_dom(procs::DOMAIN_RESUME, dom, None)
             .await
             .map(drop)
     }
 
+    /// `virDomainGetInfo`: state, memory, vCPU count and CPU time.
     pub async fn get_info(&self, dom: &Domain) -> Result<DomainInfo, Error> {
-        let r = self.call_dom(16, dom, None).await?;
+        let r = self.call_dom(procs::DOMAIN_GET_INFO, dom, None).await?;
         let mut d = Decoder::new(&r);
         // `unsigned char` and `unsigned short` are 4-byte units in XDR.
         Ok(DomainInfo {
@@ -132,13 +149,18 @@ impl Client {
         })
     }
 
-    /// Returns `(state, reason)`.
-    pub async fn get_state(&self, dom: &Domain) -> Result<(DomainState, i32), Error> {
+    /// `virDomainGetState`: the state and the reason for it.
+    pub async fn get_state(&self, dom: &Domain) -> Result<StateInfo, Error> {
         let r = self.call_dom(procs::DOMAIN_GET_STATE, dom, Some(0)).await?;
         let mut d = Decoder::new(&r);
-        Ok((DomainState::from(d.i32()?), d.i32()?))
+        Ok(StateInfo {
+            state: DomainState::from(d.i32()?),
+            reason: d.i32()?,
+        })
     }
 
+    /// `virDomainGetXMLDesc`; `flags` are `DOMAIN_XML_*` values from
+    /// [`proto::flags`].
     pub async fn get_xml_desc(&self, dom: &Domain, flags: u32) -> Result<String, Error> {
         let r = self
             .call_dom(procs::DOMAIN_GET_XML_DESC, dom, Some(flags))
@@ -156,15 +178,21 @@ impl Client {
         .map(drop)
     }
 
-    /// Returns `(tag, value)` pairs; see [`proto::memory_stat`].
-    pub async fn memory_stats(&self, dom: &Domain) -> Result<Vec<(i32, u64)>, Error> {
+    /// `virDomainMemoryStats`: the balloon statistics the guest reports.
+    /// Tags are listed in [`proto::memory_stat`].
+    pub async fn memory_stats(&self, dom: &Domain) -> Result<Vec<MemoryStat>, Error> {
         let r = self
             .call_with(procs::DOMAIN_MEMORY_STATS, |e| {
                 dom.encode(e);
                 e.u32(flags::DOMAIN_MEMORY_STAT_NR).u32(0);
             })
             .await?;
-        Decoder::new(&r).array(proto::MEMORY_STATS_MAX, |d| Ok((d.i32()?, d.u64()?)))
+        Decoder::new(&r).array(proto::MEMORY_STATS_MAX, |d| {
+            Ok(MemoryStat {
+                tag: d.i32()?,
+                value: d.u64()?,
+            })
+        })
     }
 
     /// Asks the daemon to deliver lifecycle events for all domains on this

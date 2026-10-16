@@ -131,9 +131,9 @@ impl Node {
     }
 }
 
-fn parse_mem_stats(stats: &[(i32, u64)]) -> MemoryStats {
+fn parse_mem_stats(stats: &[prism_libvirt::MemoryStat]) -> MemoryStats {
     let mut m = MemoryStats::default();
-    for &(tag, val) in stats {
+    for &prism_libvirt::MemoryStat { tag, value: val } in stats {
         match tag {
             memory_stat::ACTUAL_BALLOON => m.actual_kib = Some(val),
             memory_stat::UNUSED => m.unused_kib = Some(val),
@@ -155,11 +155,12 @@ mod tests {
 
     #[test]
     fn mem_stats() {
+        let stat = |tag, value| prism_libvirt::MemoryStat { tag, value };
         let m = parse_mem_stats(&[
-            (memory_stat::ACTUAL_BALLOON, 1024),
-            (memory_stat::USABLE, 512),
-            (memory_stat::MAJOR_FAULT, 3),
-            (99, 1),
+            stat(memory_stat::ACTUAL_BALLOON, 1024),
+            stat(memory_stat::USABLE, 512),
+            stat(memory_stat::MAJOR_FAULT, 3),
+            stat(99, 1),
         ]);
         assert_eq!(m.actual_kib, Some(1024));
         assert_eq!(m.usable_kib, Some(512));

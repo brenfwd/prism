@@ -176,6 +176,19 @@ export interface Volume {
   kind: "disk" | "iso" | "file";
 }
 
+export interface DeleteItem {
+  pool: string;
+  volume: string;
+  kind: "disk" | "snapshot";
+  size_bytes: number;
+  /** Other VMs that use the file; a delete keeps it. */
+  shared_with: string[];
+}
+
+export interface DeletePlan {
+  items: DeleteItem[];
+}
+
 export interface CloudInit {
   user_data: string;
   network_config?: string;
@@ -332,6 +345,7 @@ export const api = {
   updateVm: (id: string, req: UpdateVm) => request<Vm>("PATCH", `/vms/${id}`, req),
   deleteVm: (id: string, deleteDisks: boolean) =>
     request<void>("DELETE", `/vms/${id}?delete_disks=${deleteDisks}`),
+  deletePlan: (id: string) => request<DeletePlan>("GET", `/vms/${id}/delete-plan`),
   action: (id: string, action: VmAction) => request<Vm>("POST", `/vms/${id}/actions/${action}`),
 
   cloneVm: (id: string, name: string) => request<Task>("POST", `/vms/${id}/clone`, { name }),

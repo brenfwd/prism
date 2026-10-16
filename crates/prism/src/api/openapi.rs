@@ -22,7 +22,18 @@ pub const OPERATIONS: &[(&str, &str, &str, &str)] = &[
     ("post", "/vms", "vms", "Create a VM"),
     ("get", "/vms/{id}", "vms", "Show a VM"),
     ("patch", "/vms/{id}", "vms", "Update a VM"),
-    ("delete", "/vms/{id}", "vms", "Delete a VM"),
+    (
+        "delete",
+        "/vms/{id}",
+        "vms",
+        "Delete a VM and, unless delete_disks=false, its own disk files",
+    ),
+    (
+        "get",
+        "/vms/{id}/delete-plan",
+        "vms",
+        "List the files a delete would remove",
+    ),
     (
         "post",
         "/vms/{id}/actions/{action}",

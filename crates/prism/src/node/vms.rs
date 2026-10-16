@@ -5,9 +5,7 @@ use std::path::PathBuf;
 use prism_libvirt::proto::flags;
 use uuid::Uuid;
 
-use super::{
-    Action, Node, NodeError, Result, VmView, domain_ref, lock, not_running, undefine_flags,
-};
+use super::{Action, Node, NodeError, Result, VmView, domain_ref, undefine_flags};
 use crate::render;
 use crate::spec::{
     BalloonMode, CpuSpec, CreateVm, DiskDevice, DiskSpec, MAX_VCPUS, MemorySpec, NicSpec, UpdateVm,
@@ -210,53 +208,6 @@ impl Node {
         }
         self.refresh(&spec).await;
         Ok(self.vm_view(spec))
-    }
-
-    pub async fn delete_vm(&self, id: Uuid, delete_disks: bool) -> Result<()> {
-        let c = self.client()?;
-        let _guard = self.ops.lock().await;
-        let spec = self.local_spec(id)?;
-        let dom = domain_ref(&spec);
-        match c.destroy(&dom, 0).await {
-            Ok(()) => {}
-            Err(e) if not_running(&e) => {}
-            Err(e) => return Err(e.into()),
-        }
-        // Snapshot overlays belong to the VM; collect them before libvirt
-        // forgets the chain.
-        let overlays = self.snapshot_files(&spec).await.unwrap_or_default();
-        match c.undefine(&dom, undefine_flags()).await {
-            Ok(()) => {}
-            Err(e) if e.remote_code() == Some(prism_libvirt::proto::error_codes::NO_DOMAIN) => {}
-            Err(e) => return Err(e.into()),
-        }
-        self.state
-            .apply(crate::state::Command::DeleteVm { id })
-            .await?;
-        lock(&self.runtime).remove(&id);
-        self.remove_seed_iso(&spec);
-        if delete_disks {
-            let mut files: Vec<(String, String)> = spec
-                .disks
-                .iter()
-                .filter(|d| d.device == DiskDevice::Disk)
-                .filter_map(|d| d.volume.clone().map(|v| (d.pool.clone(), v)))
-                .collect();
-            files.extend(overlays);
-            files.sort();
-            files.dedup();
-            for (pool, volume) in files {
-                let res = self
-                    .storage
-                    .get(&pool)
-                    .and_then(|p| p.delete_volume(&volume));
-                if let Err(e) = res {
-                    tracing::warn!(vm = %spec.name, "deleting {pool}/{volume}: {e}");
-                }
-            }
-        }
-        tracing::info!(vm = %spec.name, "deleted VM");
-        Ok(())
     }
 
     pub async fn action(&self, id: Uuid, action: Action) -> Result<VmView> {

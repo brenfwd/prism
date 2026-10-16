@@ -8,8 +8,8 @@ use uuid::Uuid;
 
 use super::{ApiError, AppState, Json};
 use crate::node::{
-    Action, AddDisk, AddNic, CloneVm, CreateSnapshot, GuestNetwork, MigrateVm, MoveVm, SetVlans,
-    SnapshotView, UpdateDisk, VmView,
+    Action, AddDisk, AddNic, CloneVm, CreateSnapshot, DeletePlan, GuestNetwork, MigrateVm, MoveVm,
+    SetVlans, SnapshotView, UpdateDisk, VmView,
 };
 use crate::spec::{CreateVm, PortForward, UpdateVm};
 use crate::tasks::Task;
@@ -18,6 +18,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/vms", get(list).post(create))
         .route("/vms/{id}", get(show).patch(update).delete(remove))
+        .route("/vms/{id}/delete-plan", get(delete_plan))
         .route("/vms/{id}/actions/{action}", post(action))
         .route("/vms/{id}/disks", post(add_disk))
         .route(
@@ -235,8 +236,21 @@ async fn update(
 
 #[derive(Debug, Deserialize)]
 struct DeleteQuery {
-    #[serde(default)]
+    /// Deletes the VM's own disk and snapshot files. On by default; files
+    /// that another VM uses are always kept.
+    #[serde(default = "yes")]
     delete_disks: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+async fn delete_plan(
+    State(node): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<axum::Json<DeletePlan>, ApiError> {
+    Ok(axum::Json(node.delete_plan(parse_id(&id)?).await?))
 }
 
 async fn remove(

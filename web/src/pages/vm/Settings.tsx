@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import { api, humanError, type BalloonMode, type CpuModel, type UpdateVm, type Vm } from "../../api";
 import { putVm } from "../../events";
-import { memLabel } from "../../lib/format";
+import { bytes, memLabel, plural } from "../../lib/format";
 import { useNode } from "../../lib/hooks";
 import { toast } from "../../lib/toast";
 import { Icon } from "../../components/icons";
@@ -257,7 +257,10 @@ export function DeleteDialog({ vm, onClose }: { vm: Vm; onClose: () => void }) {
       navigate({ to: "/vms" });
     },
   });
-  const diskCount = vm.disks.filter((d) => d.device === "disk").length;
+  const plan = useQuery({ queryKey: ["delete-plan", vm.id], queryFn: () => api.deletePlan(vm.id) });
+  const items = plan.data?.items ?? [];
+  const owned = items.filter((i) => i.shared_with.length === 0);
+  const total = owned.reduce((n, i) => n + i.size_bytes, 0);
   return (
     <Modal
       title={`Delete ${vm.name}?`}
@@ -279,9 +282,27 @@ export function DeleteDialog({ vm, onClose }: { vm: Vm; onClose: () => void }) {
         }}
       >
         <p className="text-zinc-600 dark:text-zinc-300">{isOn(vm) ? "It's running and will be powered off first. " : ""}This can't be undone.</p>
-        <Checkbox checked={disks} onChange={setDisks}>
-          Also delete its {diskCount === 1 ? "disk" : `${diskCount} disks`} and snapshots <span className="text-zinc-500">(ISOs are kept)</span>
-        </Checkbox>
+        {items.length > 0 && (
+          <div className="space-y-2">
+            <Checkbox checked={disks} onChange={setDisks}>
+              Delete its {plural(owned.length, "file")} too <span className="text-zinc-500">({bytes(total)})</span>
+            </Checkbox>
+            <ul className="max-h-40 divide-y divide-zinc-100 overflow-auto rounded-lg text-[13px] ring-1 ring-zinc-200 dark:divide-zinc-800 dark:ring-zinc-800">
+              {items.map((i) => {
+                const keep = !disks || i.shared_with.length > 0;
+                return (
+                  <li key={`${i.pool}/${i.volume}`} className="flex items-center justify-between gap-3 px-3 py-1.5">
+                    <span className={`min-w-0 truncate font-mono text-[12px] ${keep ? "text-zinc-500" : "text-zinc-800 dark:text-zinc-200"}`} title={`${i.pool}/${i.volume}`}>{i.volume}</span>
+                    <span className="shrink-0 text-zinc-500">
+                      {i.shared_with.length > 0 ? `kept, also used by ${i.shared_with.join(", ")}` : `${i.kind === "snapshot" ? "snapshot, " : ""}${bytes(i.size_bytes)}${keep ? ", kept" : ""}`}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+            <p className="text-xs text-zinc-500">ISOs and volumes used by other machines are kept.</p>
+          </div>
+        )}
         <label className="block">
           <span className="mb-1.5 block text-[13px] text-zinc-600 dark:text-zinc-300">
             Type <span className="rounded bg-zinc-100 px-1 py-0.5 font-mono text-[12px] font-semibold text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100">{vm.name}</span> to confirm

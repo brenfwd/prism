@@ -459,7 +459,7 @@ impl Node {
     }
 }
 
-fn chain_files(spec: &VmSpec) -> Vec<(String, String)> {
+pub(super) fn chain_files(spec: &VmSpec) -> Vec<(String, String)> {
     spec.disks
         .iter()
         .filter(|d| d.device == DiskDevice::Disk)

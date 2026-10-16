@@ -379,6 +379,25 @@ impl Cluster {
         membership::check_removal(doc.mode, &members, node_id)
     }
 
+    /// Waits up to `timeout` for this node's own state to stop listing `node_id`, and says
+    /// whether it did.
+    pub async fn wait_removed(&self, node_id: Uuid, timeout: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let gone = self
+                .state
+                .members()
+                .is_ok_and(|m| m.iter().all(|m| m.node_id != node_id));
+            if gone {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    }
+
     pub(crate) fn pending_join(&self) -> bool {
         self.state.db().meta(META_PENDING).ok().flatten().is_some()
     }

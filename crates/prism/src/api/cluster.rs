@@ -201,13 +201,21 @@ async fn leave(State(node): State<AppState>) -> Result<StatusCode, ApiError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
-        node.state
+        let removed = node
+            .state
             .apply(Command::RemoveMember {
                 node_id: node.id,
                 now,
             })
-            .await
-            .map_err(NodeError::from)?;
+            .await;
+        // The leader cuts this node's tunnel as it applies the removal, so the reply can be lost
+        // even though the removal went through. The entry still reaches this node's own state
+        // first, so a removal that is visible there counts as done.
+        if let Err(e) = removed
+            && !c.wait_removed(node.id, Duration::from_secs(10)).await
+        {
+            return Err(NodeError::from(e).into());
+        }
     }
     tokio::spawn(async {
         tokio::time::sleep(Duration::from_secs(1)).await;

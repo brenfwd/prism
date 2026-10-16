@@ -23,6 +23,7 @@ mod remote;
 mod runtime;
 mod seed_xml;
 mod snapshot_move;
+mod snapshot_xml;
 mod snapshots;
 mod state_events;
 mod vlan_subnets;

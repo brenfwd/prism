@@ -6,16 +6,15 @@
 //! definition from the spec would point at a stale layer.
 
 use std::collections::BTreeMap;
-use std::fmt::Write;
 use std::path::Path;
 
 use prism_libvirt::DomainChild;
 use prism_libvirt::ops::flags as op;
 use prism_libvirt::proto::flags;
-use quick_xml::escape::escape;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::snapshot_xml::{SnapshotDisk, snapshot_xml};
 use super::{Node, NodeError, Result, domain_ref};
 use crate::render;
 use crate::spec::{DiskDevice, DiskSpec, VmSpec};
@@ -203,11 +202,6 @@ impl Node {
         let c = self.client()?;
         let dom = domain_ref(spec);
         let rt = self.runtime(spec.id);
-        let mut xml = format!(
-            "<domainsnapshot>\n  <name>{}</name>\n  <description>{}</description>\n",
-            escape(name),
-            escape(&req.description)
-        );
         let memory_file = if req.memory && rt.state.is_active() {
             let disk = spec
                 .disks
@@ -217,43 +211,36 @@ impl Node {
                     NodeError::Invalid("a memory snapshot needs a disk to store it beside".into())
                 })?;
             let pool = self.storage.get(&disk.pool)?;
-            let file = pool.path.join(format!("{}.{name}.mem", spec.name));
-            let _ = writeln!(
-                xml,
-                "  <memory snapshot='external' file='{}'/>",
-                escape(file.to_string_lossy().as_ref())
-            );
-            Some(file)
+            Some(pool.path.join(format!("{}.{name}.mem", spec.name)))
         } else {
-            xml.push_str("  <memory snapshot='no'/>\n");
             None
         };
-        xml.push_str("  <disks>\n");
+        let mut overlays = Vec::new();
         for disk in &spec.disks {
-            match (disk.device, &disk.volume) {
-                (DiskDevice::Disk, Some(_)) => {
-                    let pool = self.storage.get(&disk.pool)?;
-                    let overlay = overlay_name(disk, name);
-                    if pool.volume(&overlay).is_ok() {
-                        return Err(NodeError::Conflict(format!("{overlay} already exists")));
-                    }
-                    let _ = writeln!(
-                        xml,
-                        "    <disk name='{}' snapshot='external' type='file'>\n      <driver type='qcow2'/>\n      <source file='{}'/>\n    </disk>",
-                        escape(&disk.target),
-                        escape(pool.path.join(&overlay).to_string_lossy().as_ref())
-                    );
+            if let (DiskDevice::Disk, Some(_)) = (disk.device, &disk.volume) {
+                let pool = self.storage.get(&disk.pool)?;
+                let overlay = overlay_name(disk, name);
+                if pool.volume(&overlay).is_ok() {
+                    return Err(NodeError::Conflict(format!("{overlay} already exists")));
                 }
-                _ => {
-                    let _ = writeln!(
-                        xml,
-                        "    <disk name='{}' snapshot='no'/>",
-                        escape(&disk.target)
-                    );
-                }
+                overlays.push(Some(pool.path.join(overlay)));
+            } else {
+                overlays.push(None);
             }
         }
-        xml.push_str("  </disks>\n</domainsnapshot>\n");
+        let disks: Vec<SnapshotDisk<'_>> = spec
+            .disks
+            .iter()
+            .zip(&overlays)
+            .map(|(d, overlay)| match overlay {
+                Some(overlay) => SnapshotDisk::Overlay {
+                    target: &d.target,
+                    overlay,
+                },
+                None => SnapshotDisk::Skip { target: &d.target },
+            })
+            .collect();
+        let xml = snapshot_xml(name, &req.description, memory_file.as_deref(), &disks);
 
         ctx.progress(
             Some(0.2),

@@ -8,6 +8,7 @@ use super::{Node, NodeError, Result};
 use crate::storage::valid_name;
 use crate::tasks::Task;
 
+/// Request body for downloading a file into a pool.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DownloadReq {
@@ -30,6 +31,9 @@ fn name_from_url(url: &str) -> Option<String> {
 }
 
 impl Node {
+    /// Starts a `volume.download` task that fetches `req.url` into a partial file and renames it
+    /// into the pool once the SHA-256 (if given) matches. Fails with `Invalid` for a non-HTTP URL,
+    /// a bad checksum or a bad name, and `Conflict` if the volume exists.
     pub fn download_volume(self: &Arc<Self>, pool: &str, req: DownloadReq) -> Result<Task> {
         if !(req.url.starts_with("http://") || req.url.starts_with("https://")) {
             return Err(NodeError::Invalid("the URL must be http or https".into()));

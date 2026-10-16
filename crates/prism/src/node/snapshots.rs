@@ -24,6 +24,7 @@ use crate::tasks::Task;
 /// libvirt 9.9 reverts and deletes external snapshots natively.
 const MIN_LIBVIRT_EXTERNAL: u64 = 9_009_000;
 
+/// Request body for taking a snapshot.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateSnapshot {
@@ -36,6 +37,7 @@ pub struct CreateSnapshot {
     pub memory: bool,
 }
 
+/// A snapshot as the API returns it, parsed from libvirt's snapshot XML.
 #[derive(Debug, Clone, Serialize)]
 pub struct SnapshotView {
     pub name: String,
@@ -145,6 +147,7 @@ impl Node {
         Ok(())
     }
 
+    /// Lists the VM's snapshots, oldest first.
     pub async fn snapshots(&self, id: Uuid) -> Result<Vec<SnapshotView>> {
         let c = self.client()?;
         let spec = self.local_spec(id)?;
@@ -162,6 +165,8 @@ impl Node {
         Ok(out)
     }
 
+    /// Starts a `snapshot.create` task. Without a name the snapshot is named after the current
+    /// time. Fails with `Invalid` for a bad name and `Conflict` while another task runs on the VM.
     pub fn create_snapshot(
         self: &std::sync::Arc<Self>,
         id: Uuid,
@@ -321,6 +326,8 @@ impl Node {
             }))
     }
 
+    /// Starts a `snapshot.delete` task that merges the snapshot's overlays into their parents and
+    /// deletes the files libvirt no longer uses. Needs libvirt 9.9 or newer.
     pub fn delete_snapshot(self: &std::sync::Arc<Self>, id: Uuid, name: String) -> Result<Task> {
         self.snapshot_api_check()?;
         let spec = self.local_spec(id)?;

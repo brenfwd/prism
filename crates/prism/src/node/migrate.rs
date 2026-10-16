@@ -29,6 +29,7 @@ use crate::tasks::Task;
 /// Maximum pause at switch-over.
 const MAX_DOWNTIME_MS: u64 = 300;
 
+/// Request body for live-migrating a running VM to another node.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MigrateVm {
@@ -49,6 +50,8 @@ pub struct ImageReq {
     pub backing: Option<String>,
 }
 
+/// Source to destination: everything the destination needs to create images and call
+/// `Prepare3Params`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrepareReq {
     pub vm: Box<VmSpec>,
@@ -61,12 +64,14 @@ pub struct PrepareReq {
     pub flags: u32,
 }
 
+/// Destination to source: the Prepare cookie and the migration parameters to use for Perform.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrepareResp {
     pub cookie: String,
     pub params: Vec<(String, String)>,
 }
 
+/// Source to destination: finish the migration, or cancel it and delete the images.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinishReq {
     pub params: Vec<(String, String)>,
@@ -84,6 +89,7 @@ pub struct FinishReq {
     pub vm: Option<Box<VmSpec>>,
 }
 
+/// Destination to source: the Finish cookie, and whether the guest now runs on the destination.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FinishResp {
     pub cookie: String,
@@ -109,6 +115,10 @@ fn on_destination(spec: &VmSpec, dst: Uuid, pool: &str) -> VmSpec {
 }
 
 impl Node {
+    /// Starts a `vm.migrate` task. Fails with `Invalid` outside a cluster or when the target is
+    /// this node, `NotFound` for an unknown or inactive node, and `Conflict` if the VM is not
+    /// running, has a CD-ROM inserted or has another task running. A failed migration restores the
+    /// source's snapshot metadata and clears the migration intent.
     pub fn migrate_vm(self: &Arc<Self>, id: Uuid, req: MigrateVm) -> Result<Task> {
         let spec = self.local_spec(id)?;
         let cluster = self

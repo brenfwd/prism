@@ -39,6 +39,8 @@ impl Node {
         }
     }
 
+    /// Replaces what this node knows about a peer: its VMs' runtime state, its tasks and its
+    /// status. Called when a peer's event stream sends its snapshot message.
     pub fn apply_remote_snapshot(&self, snap: RuntimeSnapshot) {
         let node = snap.node.id;
         let owned: Vec<Uuid> = self

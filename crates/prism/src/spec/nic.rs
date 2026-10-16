@@ -5,6 +5,7 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// A network interface attached to a VM.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NicSpec {
     pub id: Uuid,
@@ -14,6 +15,7 @@ pub struct NicSpec {
     pub boot_order: Option<u32>,
 }
 
+/// What a NIC is plugged into.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NicNetwork {
@@ -52,6 +54,7 @@ pub enum NicNetwork {
     },
 }
 
+/// Transport protocol of a port forward.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Proto {
@@ -60,6 +63,7 @@ pub enum Proto {
 }
 
 impl Proto {
+    /// The lowercase protocol name, as libvirt and nftables spell it.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Tcp => "tcp",

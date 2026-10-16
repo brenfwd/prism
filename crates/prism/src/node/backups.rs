@@ -19,9 +19,11 @@ use crate::spec::{DiskDevice, VmSpec, random_mac};
 use crate::state::Command;
 use crate::tasks::Task;
 
+/// Database collection holding one [`BackupDoc`] per backup, keyed by backup ID.
 pub const BACKUPS: &str = "backup";
 const JOB_TIMEOUT: Duration = Duration::from_secs(24 * 3600);
 
+/// Whether a backup holds whole disks or only blocks changed since its parent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupKind {
@@ -29,6 +31,7 @@ pub enum BackupKind {
     Incremental,
 }
 
+/// One disk image of a backup, stored as a file in the backup's archive pool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupDisk {
     pub target: String,
@@ -37,6 +40,7 @@ pub struct BackupDisk {
     pub blake3: String,
 }
 
+/// A stored backup: which VM, when, where the disk images are and the VM spec for a restore.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackupDoc {
     pub id: Uuid,
@@ -54,6 +58,7 @@ pub struct BackupDoc {
     pub spec: Box<VmSpec>,
 }
 
+/// Request body for starting a backup.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateBackup {
@@ -64,6 +69,7 @@ pub struct CreateBackup {
     pub full: bool,
 }
 
+/// Request body for restoring a backup as a new VM.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RestoreBackup {
@@ -80,6 +86,7 @@ pub(super) fn unix_now() -> i64 {
 }
 
 impl Node {
+    /// Lists backups, oldest first, for one VM or (with `None`) for every VM.
     pub fn backups(&self, vm: Option<Uuid>) -> Result<Vec<BackupDoc>> {
         let mut all: Vec<BackupDoc> = self.state.db().list(BACKUPS)?;
         all.retain(|b| vm.is_none_or(|v| b.vm == v));
@@ -87,6 +94,7 @@ impl Node {
         Ok(all)
     }
 
+    /// Returns one backup. Fails with `NotFound` if `id` is unknown.
     pub fn backup(&self, id: Uuid) -> Result<BackupDoc> {
         self.state
             .db()
@@ -94,6 +102,10 @@ impl Node {
             .ok_or_else(|| NodeError::NotFound(format!("backup {id}")))
     }
 
+    /// Starts a `vm.backup` task for a VM this node owns. A running VM gets a push-mode backup
+    /// (incremental when an earlier checkpoint still exists); a stopped VM is flattened and copied.
+    /// Fails with `NotFound` for an unknown archive pool and `Conflict` while another task runs on
+    /// the VM.
     pub fn create_backup(self: &Arc<Self>, id: Uuid, req: CreateBackup) -> Result<Task> {
         let spec = self.local_spec(id)?;
         if !self
@@ -439,6 +451,9 @@ impl Node {
         ))
     }
 
+    /// Deletes a backup and its archive files. Fails with `Conflict` while a later incremental
+    /// backup depends on it. A file that cannot be removed is logged and the record is still
+    /// deleted.
     pub async fn delete_backup(&self, id: Uuid) -> Result<()> {
         let backup = self.backup(id)?;
         if self

@@ -23,6 +23,7 @@ use crate::storage::valid_name;
 /// The `owner_epoch` of a VM that has never moved between nodes.
 pub const FIRST_OWNER_EPOCH: u64 = 1;
 
+/// The desired state of one VM. Stored in the cluster database; the domain XML is rendered from it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmSpec {
     pub id: Uuid,
@@ -59,12 +60,14 @@ pub struct VmSpec {
     pub snapshot_xml: Vec<String>,
 }
 
+/// The two nodes of a live migration in progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Migration {
     pub src: Uuid,
     pub dst: Uuid,
 }
 
+/// CPU count and model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CpuSpec {
     pub vcpus: u32,
@@ -72,6 +75,7 @@ pub struct CpuSpec {
     pub model: CpuModel,
 }
 
+/// How the guest CPU is derived from the host's.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CpuModel {
@@ -90,6 +94,7 @@ pub struct CloudInit {
     pub network_config: Option<String>,
 }
 
+/// Memory size and balloon settings, in MiB.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemorySpec {
     /// Boot (maximum) memory.
@@ -101,6 +106,7 @@ pub struct MemorySpec {
     pub balloon: BalloonMode,
 }
 
+/// How a VM's memory balloon is driven.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BalloonMode {
@@ -109,6 +115,7 @@ pub enum BalloonMode {
     Auto,
 }
 
+/// Boot firmware: legacy BIOS or UEFI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Firmware {
@@ -116,14 +123,19 @@ pub enum Firmware {
     Uefi,
 }
 
+/// Most virtual CPUs a VM may have.
 pub const MAX_VCPUS: u32 = 512;
+/// Least memory a VM may have, in MiB.
 pub const MIN_MEMORY_MIB: u64 = 64;
 
+/// Whether `name` is a valid VM name: a valid volume name of at most 64 bytes.
 pub fn valid_vm_name(name: &str) -> bool {
     valid_name(name) && name.len() <= 64
 }
 
 impl MemorySpec {
+    /// Checks that max is at least `MIN_MEMORY_MIB`, min does not exceed max, and the
+    /// target lies between them.
     pub fn validate(&self) -> Result<(), String> {
         if self.max_mib < MIN_MEMORY_MIB {
             return Err(format!("memory must be at least {MIN_MEMORY_MIB} MiB"));
@@ -176,6 +188,7 @@ impl VmSpec {
         Ok(())
     }
 
+    /// The disk with this ID, if the VM has it.
     pub fn disk(&self, id: Uuid) -> Option<&DiskSpec> {
         self.disks.iter().find(|d| d.id == id)
     }

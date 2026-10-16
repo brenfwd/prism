@@ -12,6 +12,7 @@ use crate::cluster::model::MemberState;
 use crate::spec::DiskDevice;
 use crate::tasks::Task;
 
+/// Request body for moving a stopped VM to another node.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MoveVm {
@@ -22,6 +23,10 @@ pub struct MoveVm {
 }
 
 impl Node {
+    /// Starts a `vm.move` task that copies every disk and snapshot file of a stopped VM to a pool
+    /// on another node, transfers ownership and deletes the source copy. Fails with `Invalid`
+    /// outside a cluster, `NotFound` for an unknown or inactive node, and `Conflict` if the VM is
+    /// running or busy.
     pub fn move_vm(self: &Arc<Self>, id: Uuid, req: MoveVm) -> Result<Task> {
         let spec = self.local_spec(id)?;
         let cluster = self

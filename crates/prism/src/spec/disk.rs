@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// A disk or CD-ROM attached to a VM.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiskSpec {
     pub id: Uuid,
@@ -22,6 +23,7 @@ pub struct DiskSpec {
     pub backing: Vec<String>,
 }
 
+/// What kind of drive a disk is. It decides the bus: `virtio` for disks, SATA for CD-ROMs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiskDevice {
@@ -30,6 +32,7 @@ pub enum DiskDevice {
 }
 
 impl DiskDevice {
+    /// Guest device name prefix: `vd` for disks, `sd` for CD-ROMs.
     pub fn target_prefix(self) -> &'static str {
         match self {
             Self::Disk => "vd",

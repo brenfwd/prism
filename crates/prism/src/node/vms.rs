@@ -13,6 +13,9 @@ use crate::spec::{
 };
 
 impl Node {
+    /// Creates a VM: validates the request, makes the boot disk if asked, defines the domain and
+    /// stores the spec. Fails with `Invalid` for a bad request and `Conflict` if the name is taken.
+    /// If a later step fails, the domain and any new volume are removed.
     pub async fn create_vm(&self, req: CreateVm) -> Result<VmView> {
         req.validate().map_err(NodeError::Invalid)?;
         let c = self.client()?;
@@ -135,6 +138,8 @@ impl Node {
         Ok(self.vm_view(spec))
     }
 
+    /// Applies a spec change. Fails with `Conflict` when `req.generation` does not match the stored
+    /// one. Changes that need a cold boot set `pending_restart` on a running VM.
     pub async fn update_vm(&self, id: Uuid, req: UpdateVm) -> Result<VmView> {
         let c = self.client()?;
         let _guard = self.ops.lock().await;
@@ -212,6 +217,8 @@ impl Node {
         Ok(self.vm_view(spec))
     }
 
+    /// Runs a power action. `Start` first redefines the domain from the current spec, so pending
+    /// changes apply, and refuses when host memory pressure is red.
     pub async fn action(&self, id: Uuid, action: Action) -> Result<VmView> {
         let c = self.client()?;
         let spec = self.local_spec(id)?;
@@ -248,6 +255,7 @@ impl Node {
             .ok_or_else(|| NodeError::Conflict("VM has no VNC socket; is it running?".into()))
     }
 
+    /// Opens the VM's serial console, taking it over from any other client.
     pub async fn open_serial(&self, id: Uuid) -> Result<prism_libvirt::Stream> {
         let c = self.client()?;
         let spec = self.local_spec(id)?;

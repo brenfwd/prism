@@ -67,6 +67,7 @@ pub use vm_delete::DeletePlan;
 pub(crate) use libvirt::undefine_flags;
 pub use snapshots::{CreateSnapshot, SnapshotView};
 
+/// Why a node operation failed. The API maps each variant to an HTTP status.
 #[derive(Debug, thiserror::Error)]
 pub enum NodeError {
     #[error("{0} not found")]
@@ -105,8 +106,11 @@ impl From<render::RenderError> for NodeError {
     }
 }
 
+/// Result of a node operation.
 pub type Result<T, E = NodeError> = std::result::Result<T, E>;
 
+/// The local node: its identity, stores and libvirt connection. All VM operations are methods on
+/// `Node`.
 #[derive(Debug)]
 pub struct Node {
     pub id: Uuid,
@@ -156,6 +160,8 @@ pub(crate) fn not_running(e: &prism_libvirt::Error) -> bool {
 }
 
 impl Node {
+    /// Builds the node. `host_booted` is true on the first start after the host boots, which makes
+    /// the node start its autostart VMs once libvirt connects.
     #[allow(clippy::too_many_arguments)] // assembled once, in main
     pub fn new(
         id: Uuid,
@@ -248,6 +254,7 @@ impl Node {
         lock(&self.host).libvirt_version_num
     }
 
+    /// A snapshot of this node's status for the API and the event bus.
     pub fn view(&self) -> NodeView {
         NodeView {
             id: self.id,
@@ -296,6 +303,7 @@ impl Node {
         }
     }
 
+    /// Every VM in the cluster, with runtime state from this node or its peers' event streams.
     pub fn vms(&self) -> Result<Vec<VmView>> {
         Ok(self
             .state
@@ -305,6 +313,8 @@ impl Node {
             .collect())
     }
 
+    /// The stored spec of a VM on any node, with guest device names assigned. Fails with `NotFound`
+    /// for an unknown ID.
     pub fn spec(&self, id: Uuid) -> Result<VmSpec> {
         let mut spec = self
             .state
@@ -314,6 +324,7 @@ impl Node {
         Ok(spec)
     }
 
+    /// One VM on any node, with its runtime state. Cloud-init user-data is replaced by a hash.
     pub fn vm(&self, id: Uuid) -> Result<VmView> {
         Ok(self.vm_view(self.spec(id)?))
     }

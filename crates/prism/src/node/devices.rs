@@ -22,6 +22,7 @@ pub struct ArchiveRef {
     pub path: String,
 }
 
+/// Request body for attaching a disk or CD-ROM.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddDisk {
@@ -43,6 +44,7 @@ fn default_device() -> DiskDevice {
     DiskDevice::Disk
 }
 
+/// Request body for changing a disk: swap CD-ROM media or grow a disk.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateDisk {
@@ -66,6 +68,7 @@ where
     Option::<T>::deserialize(d).map(Some)
 }
 
+/// Request body for adding a NIC.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddNic {
@@ -163,6 +166,9 @@ impl Node {
         }
     }
 
+    /// Attaches a disk or CD-ROM, creating the volume when `size_gib` is given. A running VM gets
+    /// the disk hot-plugged, except CD-ROMs, which wait for a restart. A volume created here is
+    /// deleted again if the change fails.
     pub async fn add_disk(&self, id: Uuid, mut req: AddDisk) -> Result<VmView> {
         let _guard = self.ops.lock().await;
         let old = self.local_spec(id)?;
@@ -238,6 +244,8 @@ impl Node {
         res
     }
 
+    /// Swaps CD-ROM media or grows a disk. Fails with `Invalid` when asked to resize a CD-ROM or a
+    /// disk without a volume.
     pub async fn update_disk(&self, id: Uuid, disk_id: Uuid, req: UpdateDisk) -> Result<VmView> {
         let _guard = self.ops.lock().await;
         let old = self.local_spec(id)?;
@@ -312,6 +320,9 @@ impl Node {
         Ok(self.vm_view(spec))
     }
 
+    /// Detaches a disk and waits up to the unplug timeout for the guest to release it. With
+    /// `delete_volume`, the volume is also deleted unless the detach is still pending a restart or
+    /// another VM uses it.
     pub async fn remove_disk(
         &self,
         id: Uuid,
@@ -362,6 +373,8 @@ impl Node {
         Ok(view)
     }
 
+    /// Adds a NIC, hot-plugging it into a running VM. Fails with `Invalid` for a bad bridge name or
+    /// MAC address.
     pub async fn add_nic(&self, id: Uuid, req: AddNic) -> Result<VmView> {
         let _guard = self.ops.lock().await;
         let old = self.local_spec(id)?;
@@ -400,6 +413,7 @@ impl Node {
         .await
     }
 
+    /// Removes a NIC, hot-unplugging it from a running VM.
     pub async fn remove_nic(&self, id: Uuid, nic_id: Uuid) -> Result<VmView> {
         let _guard = self.ops.lock().await;
         let old = self.local_spec(id)?;

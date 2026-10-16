@@ -32,6 +32,7 @@ pub fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
+/// Why a pool or volume operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error("pool {0} not found")]
@@ -56,6 +57,8 @@ impl From<rustix::io::Errno> for StorageError {
     }
 }
 
+/// A directory of volumes. All access goes through a directory file descriptor opened once, so
+/// paths cannot escape the pool.
 #[derive(Debug)]
 pub struct Pool {
     pub name: String,
@@ -69,6 +72,7 @@ pub struct Pool {
     root: OwnedFd,
 }
 
+/// A pool's configuration and capacity, as the API returns it.
 #[derive(Debug, Clone, Serialize)]
 pub struct PoolInfo {
     pub name: String,
@@ -81,6 +85,7 @@ pub struct PoolInfo {
     pub available_bytes: u64,
 }
 
+/// A regular file in a pool.
 #[derive(Debug, Clone, Serialize)]
 pub struct Volume {
     pub name: String,
@@ -142,6 +147,7 @@ fn probe_direct_io(root: &OwnedFd) -> bool {
 }
 
 impl Pool {
+    /// Opens a pool at `path`, creating the directory if needed and probing for `O_DIRECT` support.
     pub fn open(
         name: &str,
         path: &Path,
@@ -171,6 +177,7 @@ impl Pool {
         })
     }
 
+    /// The pool's settings and the capacity and free space of its filesystem.
     pub fn info(&self) -> PoolInfo {
         let (capacity_bytes, available_bytes) = rustix::fs::fstatvfs(&self.root)
             .map_or((0, 0), |s| {
@@ -195,6 +202,7 @@ impl Pool {
         }
     }
 
+    /// Lists the regular files whose names are valid volume names, sorted by name.
     pub fn volumes(&self) -> Result<Vec<Volume>, StorageError> {
         let dir = rustix::fs::openat2(
             &self.root,
@@ -221,6 +229,8 @@ impl Pool {
         Ok(out)
     }
 
+    /// Describes one volume. Fails with `NoVolume` for a missing file or anything that is not a
+    /// regular file.
     pub fn volume(&self, name: &str) -> Result<Volume, StorageError> {
         Self::check(name)?;
         let fd = self.open_existing(name)?;
@@ -306,6 +316,7 @@ impl Pool {
         self.volume(name)
     }
 
+    /// Deletes a volume. Fails with `NoVolume` if it does not exist.
     pub fn delete_volume(&self, name: &str) -> Result<(), StorageError> {
         Self::check(name)?;
         rustix::fs::unlinkat(&self.root, name, AtFlags::empty()).map_err(|e| match e {
@@ -331,6 +342,8 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// An empty set of pools. `pool_roots` are the directories under which API-created pools may
+    /// live.
     pub fn new(pool_roots: Vec<PathBuf>) -> Self {
         Self {
             pools: RwLock::default(),
@@ -338,6 +351,8 @@ impl Storage {
         }
     }
 
+    /// Adds a pool, replacing one of the same name, after removing partial files a crash left in
+    /// it.
     pub fn insert(&self, pool: Pool) {
         pool.clean_partials();
         self.pools
@@ -346,6 +361,7 @@ impl Storage {
             .insert(pool.name.clone(), Arc::new(pool));
     }
 
+    /// Forgets a pool without touching its files. Returns it if it existed.
     pub fn remove(&self, name: &str) -> Option<Arc<Pool>> {
         self.pools
             .write()
@@ -353,6 +369,7 @@ impl Storage {
             .remove(name)
     }
 
+    /// Looks up a pool by name. Fails with `NoPool` if there is none.
     pub fn get(&self, name: &str) -> Result<Arc<Pool>, StorageError> {
         self.pools
             .read()
@@ -362,6 +379,7 @@ impl Storage {
             .ok_or_else(|| StorageError::NoPool(name.into()))
     }
 
+    /// Every pool, ordered by name.
     pub fn list(&self) -> Vec<Arc<Pool>> {
         self.pools
             .read()

@@ -16,6 +16,7 @@ pub enum DeleteKind {
     Snapshot,
 }
 
+/// One file that deleting a VM would remove.
 #[derive(Debug, Clone, Serialize)]
 pub struct DeleteItem {
     pub pool: String,
@@ -26,6 +27,7 @@ pub struct DeleteItem {
     pub shared_with: Vec<String>,
 }
 
+/// The files a VM delete with disks would remove.
 #[derive(Debug, Clone, Serialize)]
 pub struct DeletePlan {
     pub items: Vec<DeleteItem>,

@@ -10,6 +10,7 @@ use uuid::Uuid;
 use super::{BalloonStatus, NodeError, Result, balloon};
 use crate::spec::VmSpec;
 
+/// A VM's power state, as derived from libvirt's domain state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VmState {
@@ -48,6 +49,8 @@ impl VmState {
     }
 }
 
+/// Guest memory counters from the balloon driver. Every field is in KiB except `major_faults`, and
+/// is `None` until the guest reports it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[allow(clippy::struct_field_names)] // units in names match the API
 pub struct MemoryStats {
@@ -62,6 +65,7 @@ pub struct MemoryStats {
     pub swap_in_kib: Option<u64>,
 }
 
+/// Live state of a VM on its owning node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct VmRuntime {
     pub state: VmState,
@@ -93,6 +97,7 @@ impl Default for VmRuntime {
     }
 }
 
+/// A VM as the API returns it: the spec, its runtime state and derived network data.
 #[derive(Debug, Clone, Serialize)]
 pub struct VmView {
     #[serde(flatten)]
@@ -119,6 +124,7 @@ pub struct HotplugResult {
     pub error: Option<String>,
 }
 
+/// Facts about the host, read from libvirt at connect time.
 #[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
 pub struct HostInfo {
     pub hostname: String,
@@ -130,6 +136,7 @@ pub struct HostInfo {
     pub free_memory_bytes: u64,
 }
 
+/// A node's status as shown in the API and sent to peers.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct NodeView {
     pub id: Uuid,
@@ -151,6 +158,7 @@ fn yes() -> bool {
     true
 }
 
+/// A power action on a VM. Parsed from the lowercase name in the URL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Start,

@@ -22,6 +22,7 @@ const FAULT_SPIKE: u64 = 200;
 /// Ticks a VM may miss its target before being flagged unresponsive.
 const UNRESPONSIVE_TICKS: u32 = 6;
 
+/// Host memory pressure, from `Green` (reclaiming is safe) to `Red` (no new VMs start).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PressureLevel {
@@ -30,6 +31,7 @@ pub enum PressureLevel {
     Red,
 }
 
+/// A reading of host memory pressure.
 #[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct HostPressure {
     pub level: PressureLevel,
@@ -39,6 +41,7 @@ pub struct HostPressure {
     pub mem_available_pct: f64,
 }
 
+/// What the balloon controller last did to a VM.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct BalloonStatus {
     pub target_kib: u64,
@@ -81,6 +84,8 @@ fn parse_meminfo(text: &str) -> Option<(u64, u64)> {
     Some((get("MemTotal:")?, get("MemAvailable:")?))
 }
 
+/// Reads `/proc/meminfo` and, when the kernel has PSI, `/proc/pressure/memory`. Returns `None` if
+/// `/proc/meminfo` cannot be read or parsed.
 pub fn read_host_pressure() -> Option<HostPressure> {
     let (total, avail) = parse_meminfo(&std::fs::read_to_string("/proc/meminfo").ok()?)?;
     let (some, full) =

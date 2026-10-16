@@ -11,6 +11,7 @@ use crate::spec::{DiskDevice, NicNetwork, random_mac};
 use crate::storage::valid_name;
 use crate::tasks::Task;
 
+/// Request body for cloning a VM.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CloneVm {
@@ -19,6 +20,9 @@ pub struct CloneVm {
 }
 
 impl Node {
+    /// Starts a `vm.clone` task that copies a stopped VM's disks into new volumes and defines a new
+    /// VM with fresh IDs and MAC addresses. Fails with `Invalid` for a bad name, and `Conflict` if
+    /// the name is taken or the source is running.
     pub fn clone_vm(self: &Arc<Self>, id: Uuid, req: CloneVm) -> Result<Task> {
         let src = self.local_spec(id)?;
         if !valid_name(&req.name) || req.name.len() > 64 {

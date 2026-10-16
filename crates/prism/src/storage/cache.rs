@@ -14,6 +14,7 @@ const PREFIX: &str = "archive-";
 /// just fetched survives until its VM references it.
 const MIN_AGE_SECS: i64 = 600;
 
+/// Whether `name` is a cached archive ISO: `archive-` prefix and `.iso` extension.
 pub fn is_cached_iso(name: &str) -> bool {
     name.starts_with(PREFIX)
         && std::path::Path::new(name)

@@ -169,6 +169,7 @@ impl Node {
         })
     }
 
+    /// Lists every Prism network with its VMs.
     pub fn networks(&self) -> Result<Vec<NetworkView>> {
         self.state
             .networks()?
@@ -189,6 +190,8 @@ impl Node {
         self.network_view(net)
     }
 
+    /// Creates a network. Without a name, the first one is called `default` and later ones `net1`,
+    /// `net2` and so on.
     pub async fn create_network(&self, req: CreateNetwork) -> Result<NetworkView> {
         let nets = self.state.networks()?;
         let name = req.name.unwrap_or_else(|| {
@@ -249,6 +252,7 @@ impl Node {
         self.network(&id.to_string())
     }
 
+    /// Changes a network's name, egress node or DHCP setting.
     pub async fn update_network(&self, id: &str, req: UpdateNetwork) -> Result<NetworkView> {
         let mut doc = self.network(id)?.network;
         if let Some(n) = req.name {
@@ -314,6 +318,7 @@ impl Node {
         self.network(&id.to_string())
     }
 
+    /// Deletes a network. Fails with `Conflict` while any VM has a NIC on it.
     pub async fn delete_network(&self, id: &str) -> Result<()> {
         let id = self.network(id)?.network.id;
         self.state

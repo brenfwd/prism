@@ -77,6 +77,8 @@ impl Pool {
         Ok((partial, std::fs::File::from(fd)))
     }
 
+    /// Renames a partial file to `name`. Fails with `Exists` if a volume of that name appeared
+    /// meanwhile. The partial file is deleted on any failure.
     pub fn commit_partial(&self, partial: &str, name: &str) -> Result<(), StorageError> {
         rustix::fs::renameat_with(
             &self.root,
@@ -94,6 +96,7 @@ impl Pool {
         })
     }
 
+    /// Deletes a partial file; a missing file is ignored.
     pub fn abort_partial(&self, partial: &str) {
         let _ = rustix::fs::unlinkat(&self.root, partial, AtFlags::empty());
     }

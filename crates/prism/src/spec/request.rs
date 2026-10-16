@@ -80,6 +80,7 @@ where
     Option::<T>::deserialize(d).map(Some)
 }
 
+/// Memory fields of an update request, in MiB. Absent fields keep their value.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateMemory {
@@ -90,6 +91,8 @@ pub struct UpdateMemory {
 }
 
 impl CreateVm {
+    /// Checks the name, vCPU count, bridge name, disk size, and that `image` and `iso` are not both
+    /// set.
     pub fn validate(&self) -> Result<(), String> {
         if !valid_vm_name(&self.name) {
             return Err("name must match [A-Za-z0-9._-]{1,64} without a leading '.' or '-'".into());

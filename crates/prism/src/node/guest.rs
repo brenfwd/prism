@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use super::{Node, Result, domain_ref};
 
+/// One address on a guest interface.
 #[derive(Debug, Clone, Serialize)]
 pub struct GuestAddr {
     pub addr: String,
@@ -13,6 +14,7 @@ pub struct GuestAddr {
     pub ipv6: bool,
 }
 
+/// One network interface as the guest reports it.
 #[derive(Debug, Clone, Serialize)]
 pub struct GuestNic {
     pub name: String,
@@ -20,6 +22,7 @@ pub struct GuestNic {
     pub addrs: Vec<GuestAddr>,
 }
 
+/// The guest's network interfaces, as read through the guest agent.
 #[derive(Debug, Clone, Serialize)]
 pub struct GuestNetwork {
     /// The agent answered; otherwise `interfaces` is empty.

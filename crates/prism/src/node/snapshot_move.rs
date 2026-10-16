@@ -25,7 +25,7 @@ impl Node {
         let mut memory = Vec::new();
         for snap in c.snapshots(&domain_ref(spec)).await? {
             let xml = c.snapshot_xml(&snap, op::SNAPSHOT_XML_SECURE).await?;
-            if let Some(file) = super::snapshots::memory_file(&xml) {
+            if let Some(file) = super::snapshot_scan::memory_file(&xml) {
                 let base = file.file_name().and_then(|f| f.to_str());
                 let pool = spec.disks.iter().find(|d| d.device == DiskDevice::Disk);
                 let (Some(base), Some(pool)) = (base, pool) else {

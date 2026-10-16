@@ -3,6 +3,7 @@
 
 mod hub;
 mod join;
+mod join_finish;
 mod membership;
 mod progress;
 mod proposer;

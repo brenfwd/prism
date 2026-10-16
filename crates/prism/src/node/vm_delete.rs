@@ -3,7 +3,7 @@
 use serde::Serialize;
 use uuid::Uuid;
 
-use super::snapshots::chain_files;
+use super::snapshot_chain::chain_files;
 use super::{Node, Result, domain_ref, lock, not_running, undefine_flags};
 
 /// What a file is to the VM that owns it.

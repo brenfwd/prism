@@ -22,6 +22,9 @@ use tokio::sync::oneshot;
 
 /// A registered session waits this long for its connection.
 const SESSION_TTL: Duration = Duration::from_secs(60);
+/// Read and write timeout on an established volume transfer, so a stalled
+/// sender cannot hold a blocking thread forever.
+const IO_TIMEOUT: Duration = Duration::from_secs(120);
 const CHUNK: usize = 1 << 20;
 
 type SessionId = [u8; 16];
@@ -46,7 +49,7 @@ impl std::fmt::Debug for DataPlane {
 
 impl DataPlane {
     /// Registers a session for a connection from `peer`.
-    pub fn expect(&self, peer: Ipv6Addr) -> (SessionId, oneshot::Receiver<TcpStream>) {
+    pub fn register_session(&self, peer: Ipv6Addr) -> (SessionId, oneshot::Receiver<TcpStream>) {
         let id = *uuid::Uuid::new_v4().as_bytes();
         let (tx, rx) = oneshot::channel();
         let mut s = self
@@ -102,7 +105,11 @@ impl DataPlane {
                             if IpAddr::V6(p.peer) == from.ip() && p.expires > Instant::now() =>
                         {
                             let _ = stream.set_nodelay(true);
-                            let _ = p.tx.send(stream);
+                            if p.tx.send(stream).is_err() {
+                                tracing::debug!(
+                                    "data plane: the session from {from} was no longer awaited"
+                                );
+                            }
                         }
                         _ => {
                             tracing::warn!(
@@ -281,7 +288,7 @@ impl prism_proto::v1::data_plane_server::DataPlane for DataPlaneService {
                 let (partial, file) = pool
                     .begin_partial(&volume)
                     .map_err(|e| tonic::Status::already_exists(e.to_string()))?;
-                let (id, rx) = self.plane.expect(peer);
+                let (id, rx) = self.plane.register_session(peer);
                 tokio::spawn(async move {
                     let res: anyhow::Result<()> = async {
                         let stream = tokio::time::timeout(SESSION_TTL, rx)
@@ -289,6 +296,8 @@ impl prism_proto::v1::data_plane_server::DataPlane for DataPlaneService {
                             .map_err(|_| anyhow::anyhow!("sender never connected"))??;
                         let stream = stream.into_std()?;
                         stream.set_nonblocking(false)?;
+                        stream.set_read_timeout(Some(IO_TIMEOUT))?;
+                        stream.set_write_timeout(Some(IO_TIMEOUT))?;
                         let result = tokio::task::spawn_blocking(move || {
                             let r = receive_file(
                                 &mut std::io::BufReader::new(&stream),
@@ -296,7 +305,9 @@ impl prism_proto::v1::data_plane_server::DataPlane for DataPlaneService {
                                 &|_, _| {},
                             );
                             // One status byte back to the sender.
-                            let _ = (&stream).write_all(&[u8::from(r.is_err())]);
+                            if let Err(e) = (&stream).write_all(&[u8::from(r.is_err())]) {
+                                tracing::debug!("sending the volume status byte: {e}");
+                            }
                             r
                         })
                         .await??;
@@ -320,7 +331,7 @@ impl prism_proto::v1::data_plane_server::DataPlane for DataPlaneService {
                     return Err(tonic::Status::invalid_argument("unknown migration socket"));
                 }
                 let path = migration_dir(migration).join(format!("{which}.sock"));
-                let (id, rx) = self.plane.expect(peer);
+                let (id, rx) = self.plane.register_session(peer);
                 tokio::spawn(async move {
                     let res: anyhow::Result<()> = async {
                         let mut tcp = tokio::time::timeout(SESSION_TTL, rx)

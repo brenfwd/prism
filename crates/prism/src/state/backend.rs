@@ -54,7 +54,7 @@ impl prism_cluster::Backend for StateBackend {
         });
         let outcome = match outcome {
             Ok(o) => {
-                let _ = s.changes.send(Change::Applied(Arc::new(cmd)));
+                s.notify(Change::Applied(Arc::new(cmd)));
                 o
             }
             Err(e) => match e.downcast::<Rejected>() {
@@ -106,7 +106,7 @@ impl prism_cluster::Backend for StateBackend {
             }
             d.set_meta(APPLIED_META, &meta_json)
         })?;
-        let _ = self.state.changes.send(Change::Reset);
+        self.state.notify(Change::Reset);
         Ok(())
     }
 }

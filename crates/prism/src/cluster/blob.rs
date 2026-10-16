@@ -99,7 +99,8 @@ fn encode(prefix: &str, fields: BTreeMap<u64, Value>) -> String {
     // A BTreeMap gives ascending integer keys: deterministic CBOR.
     let map = Value::Map(fields.into_iter().map(|(k, v)| (int(k), v)).collect());
     let mut cbor = Vec::new();
-    ciborium::into_writer(&map, &mut cbor).expect("CBOR into a Vec cannot fail");
+    ciborium::into_writer(&map, &mut cbor)
+        .expect("ciborium writes into a Vec, which never returns an I/O error");
     let sum = blake3::hash(&cbor);
     cbor.extend_from_slice(&sum.as_bytes()[..4]);
     format!("{prefix}{}", URL_SAFE_NO_PAD.encode(cbor))
@@ -327,6 +328,7 @@ impl Reply {
 pub fn hex(b: &[u8]) -> String {
     use std::fmt::Write;
     b.iter().fold(String::new(), |mut s, x| {
+        // Writing into a String never fails.
         let _ = write!(s, "{x:02x}");
         s
     })

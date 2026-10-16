@@ -120,7 +120,9 @@ impl State {
         }
     }
 
-    pub fn db(&self) -> &StateDb {
+    /// The raw database. Writing through it skips [`Command`] validation and
+    /// replication, so callers use it only for node-local metadata.
+    pub(crate) fn db(&self) -> &StateDb {
         &self.db
     }
 
@@ -131,9 +133,12 @@ impl State {
 
     /// Routes future commands through the replicated log.
     pub fn set_proposer(&self, p: Arc<dyn Propose>) {
-        let _ = self.proposer.set(p);
+        if self.proposer.set(p).is_err() {
+            tracing::warn!("set_proposer called twice; keeping the first proposer");
+        }
     }
 
+    /// Whether commands go through raft, which is true once a proposer is set.
     pub fn clustered(&self) -> bool {
         self.proposer.get().is_some()
     }
@@ -149,16 +154,22 @@ impl State {
             return outcome.into_result();
         }
         let (db, node) = (Arc::clone(&self.db), self.node);
-        let cmd2 = cmd.clone();
+        let cmd = Arc::new(cmd);
+        let cmd2 = Arc::clone(&cmd);
         let outcome = tokio::task::spawn_blocking(move || {
             db.transaction(|d| apply_command(d, node, 0, &cmd2))
         })
         .await
         .map_err(|e| StateError::Internal(e.into()))??;
         if outcome == Outcome::Ok {
-            let _ = self.changes.send(Change::Applied(Arc::new(cmd)));
+            self.notify(Change::Applied(cmd));
         }
         outcome.into_result()
+    }
+
+    /// Broadcasts a change. A send error only means nobody is subscribed.
+    fn notify(&self, change: Change) {
+        let _ = self.changes.send(change);
     }
 
     /// Refuses commands newer than the cluster's feature level, so that

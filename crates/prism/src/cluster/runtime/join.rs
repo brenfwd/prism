@@ -23,6 +23,23 @@ use crate::cluster::model::{
 use crate::spec::VmSpec;
 use crate::state::{Command, PoolDoc, StateError};
 
+/// How many times [`wait_until`] polls before giving up.
+const WAIT_ATTEMPTS: u32 = 100;
+/// The pause between polls in [`wait_until`].
+const WAIT_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Polls `cond` every 50 ms, up to 100 times (about 5 s). Returns whether it
+/// became true.
+async fn wait_until(mut cond: impl FnMut() -> bool) -> bool {
+    for _ in 0..WAIT_ATTEMPTS {
+        if cond() {
+            return true;
+        }
+        tokio::time::sleep(WAIT_INTERVAL).await;
+    }
+    cond()
+}
+
 /// The preview shown before admitting a node.
 #[derive(Debug, Clone, Serialize)]
 pub struct AcceptPreview {
@@ -135,26 +152,29 @@ impl Cluster {
             joined: now(),
         };
         // Wait for this single voter to become leader, then commit.
-        for _ in 0..100 {
-            if raft.is_leader() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        if !wait_until(|| raft.is_leader()).await {
+            tracing::warn!("the new hub did not become raft leader within 5 s; committing anyway");
         }
         self.state
             .apply(Command::InitCluster { cluster, hub })
             .await?;
         // Pre-cluster documents are not in the log: snapshot and purge so
         // every future member starts from a snapshot that includes them.
-        let _ = raft.raft.trigger().snapshot().await;
-        for _ in 0..100 {
-            if raft.metrics().snapshot.is_some() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        if let Err(e) = raft.raft.trigger().snapshot().await {
+            tracing::warn!("requesting the initial snapshot: {e}");
         }
-        if let Some(s) = raft.metrics().snapshot {
-            let _ = raft.raft.trigger().purge_log(s.index).await;
+        if !wait_until(|| raft.metrics().snapshot.is_some()).await {
+            tracing::warn!(
+                "the initial snapshot did not appear within 5 s; nodes that join later may miss pre-cluster documents"
+            );
+        }
+        if let Some(s) = raft.metrics().snapshot
+            && let Err(e) = raft.raft.trigger().purge_log(s.index).await
+        {
+            tracing::warn!(
+                index = s.index,
+                "purging the log after the initial snapshot: {e}"
+            );
         }
         tracing::info!(mesh = %mesh_addr, "initialised a new cluster as its hub");
         Ok(self.status()?)
@@ -433,7 +453,14 @@ impl Cluster {
             .local
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(local);
-        for mut vm in own_vms {
+        self.adopt_local_documents(own_vms, own_pools).await;
+        tracing::info!("joined the cluster");
+    }
+
+    /// Re-proposes the VMs and pools this node owned before joining, which
+    /// the leader's snapshot replaced. Failures are logged per document.
+    async fn adopt_local_documents(&self, vms: Vec<VmSpec>, pools: Vec<PoolDoc>) {
+        for mut vm in vms {
             vm.node = self.me;
             if let Err(e) = self
                 .state
@@ -446,11 +473,16 @@ impl Cluster {
                 tracing::warn!(vm = %vm.name, "could not bring this VM into the cluster: {e}");
             }
         }
-        for mut pool in own_pools {
+        for mut pool in pools {
             pool.node = self.me;
-            let _ = self.state.apply(Command::PutPool { pool }).await;
+            if let Err(e) = self
+                .state
+                .apply(Command::PutPool { pool: pool.clone() })
+                .await
+            {
+                tracing::warn!(pool = %pool.name, "could not bring this pool into the cluster: {e}");
+            }
         }
-        tracing::info!("joined the cluster");
     }
 
     async fn bootstrap(&self, addr: &str) -> anyhow::Result<BootstrapMembers> {

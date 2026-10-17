@@ -43,11 +43,14 @@ impl Node {
     }
 
     /// Re-reads one VM's runtime state from libvirt.
+    ///
+    /// The libvirt calls take a while, so the result is applied to the state as it is when
+    /// they return: other tasks (the guest address loop, the balloon, the agent events) change
+    /// their own fields meanwhile, and a copy taken before the calls would undo those.
     pub(crate) async fn refresh(&self, spec: &VmSpec) {
         let Ok(c) = self.client() else { return };
         let dom = domain_ref(spec);
-        let prev = self.runtime(spec.id);
-        let rt = match c.get_info(&dom).await {
+        match c.get_info(&dom).await {
             Ok(info) => {
                 let state = VmState::from(info.state);
                 let memory_stats = if state.is_active() {
@@ -58,33 +61,32 @@ impl Node {
                 } else {
                     MemoryStats::default()
                 };
-                VmRuntime {
-                    state,
-                    vcpus: info.nr_virt_cpu,
-                    memory_kib: info.memory_kib,
-                    max_memory_kib: info.max_mem_kib,
-                    cpu_time_ns: info.cpu_time_ns,
-                    memory_stats,
-                    pending_restart: prev.pending_restart && state.is_active(),
-                    agent: prev.agent && state.is_active(),
-                    balloon: prev.balloon.filter(|_| state.is_active()),
-                    learned_v6: if state.is_active() {
-                        prev.learned_v6
-                    } else {
-                        Default::default()
+                self.update_runtime(spec.id, |rt| {
+                    rt.state = state;
+                    rt.vcpus = info.nr_virt_cpu;
+                    rt.memory_kib = info.memory_kib;
+                    rt.max_memory_kib = info.max_mem_kib;
+                    rt.cpu_time_ns = info.cpu_time_ns;
+                    rt.memory_stats = memory_stats;
+                    if !state.is_active() {
+                        rt.pending_restart = false;
+                        rt.agent = false;
+                        rt.balloon = None;
+                        rt.learned_v6.clear();
+                    }
+                });
+            }
+            Err(e) if e.remote_code() == Some(error_codes::NO_DOMAIN) => {
+                self.set_runtime(
+                    spec.id,
+                    VmRuntime {
+                        state: VmState::Missing,
+                        ..VmRuntime::default()
                     },
-                }
+                );
             }
-            Err(e) if e.remote_code() == Some(error_codes::NO_DOMAIN) => VmRuntime {
-                state: VmState::Missing,
-                ..VmRuntime::default()
-            },
-            Err(e) => {
-                tracing::warn!(vm = %spec.name, "get_info failed: {e}");
-                return;
-            }
-        };
-        self.set_runtime(spec.id, rt);
+            Err(e) => tracing::warn!(vm = %spec.name, "get_info failed: {e}"),
+        }
     }
 
     pub(crate) async fn refresh_id(&self, id: Uuid) {

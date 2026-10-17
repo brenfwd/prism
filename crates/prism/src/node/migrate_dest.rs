@@ -32,6 +32,7 @@ impl Node {
                 for n in &created {
                     pool.delete_volume_best_effort(n);
                 }
+                pool.remove_seed_iso(&req.vm.id);
                 Err(e)
             }
         }
@@ -139,6 +140,10 @@ impl Node {
                 if let Ok(pool) = self.storage.get(&req.pool) {
                     for n in &req.images {
                         pool.delete_volume_best_effort(n);
+                    }
+                    // Prepare wrote the seed ISO; without the guest here nothing uses it.
+                    if let Some(vm) = &req.vm {
+                        pool.remove_seed_iso(&vm.id);
                     }
                 }
                 Ok(FinishResp {

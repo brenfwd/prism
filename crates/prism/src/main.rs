@@ -78,7 +78,8 @@ enum Command {
     },
     /// Manage the cluster this node belongs to.
     Cluster {
-        #[arg(long)]
+        /// May come before or after the cluster subcommand.
+        #[arg(long, global = true)]
         config: PathBuf,
         #[command(subcommand)]
         cmd: cli::ClusterCmd,

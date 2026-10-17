@@ -33,7 +33,31 @@ struct Rollback {
     /// Set while the destination may already run the guest, in which case
     /// the source must stay as it is.
     dest_may_run: std::sync::atomic::AtomicBool,
+    /// The Finish request that could not reach the destination after a failed transfer, with
+    /// the migration it belongs to; the destination still holds its half-built copy.
+    leftover: std::sync::Mutex<Option<(Uuid, FinishReq)>>,
+    /// The intent write failed, for example for lack of a quorum. A write that timed out can
+    /// still commit later, so the intent may show up after the failure was handled.
+    intent_uncertain: std::sync::atomic::AtomicBool,
 }
+
+/// What clearing a migration intent found.
+#[derive(Debug, PartialEq, Eq)]
+enum Intent {
+    /// There was none (or the VM is no longer ours).
+    Absent,
+    /// It was there and has been removed.
+    Cleared,
+    /// It is there and could not be removed yet.
+    Stuck,
+}
+
+/// How long to wait for libvirt to close an aborted migration job.
+const CANCEL_CONFIRM_WAIT: Duration = Duration::from_secs(60);
+
+/// How often a failed migration retries what it could not clean up, and how many times.
+const CLEANUP_EVERY: Duration = Duration::from_secs(20);
+const CLEANUP_TRIES: u32 = 90;
 
 /// Tries at the Finish call to the destination.
 const FINISH_TRIES: u32 = 3;
@@ -177,7 +201,9 @@ impl Node {
                 // destination may already have taken the guest over.
                 if res.is_err()
                     && was_running
-                    && !rollback.dest_may_run.load(std::sync::atomic::Ordering::SeqCst)
+                    && !rollback
+                        .dest_may_run
+                        .load(std::sync::atomic::Ordering::SeqCst)
                 {
                     node.resume_source(&spec).await;
                 }
@@ -197,21 +223,87 @@ impl Node {
                     // While the destination may run the guest the intent
                     // stays: it exempts the VM from quarantine there until an
                     // operator resolves it.
-                    if !dest_may_run
-                        && let Ok(mut cur) = node.spec(spec.id)
-                        && cur.migrating.is_some()
-                        && cur.node == node.id
-                    {
-                        let base = cur.generation;
-                        cur.migrating = None;
-                        cur.generation += 1;
-                        if let Err(e) = node.put_spec(&cur, Some(base)).await {
-                            tracing::warn!(vm = %spec.name, "could not clear the migration intent: {e:#}");
+                    if !dest_may_run {
+                        let leftover = super::lock(&rollback.leftover).take();
+                        let uncertain = rollback
+                            .intent_uncertain
+                            .load(std::sync::atomic::Ordering::SeqCst);
+                        let cleared = node.clear_migration_intent(spec.id).await;
+                        if cleared == Intent::Stuck || uncertain || leftover.is_some() {
+                            node.retry_failed_cleanup(cluster, dst, spec.id, leftover, uncertain);
                         }
                     }
                 }
                 res
             }))
+    }
+
+    /// Drops the migration intent of `id` when this node still owns the VM.
+    async fn clear_migration_intent(&self, id: Uuid) -> Intent {
+        let Ok(mut cur) = self.spec(id) else {
+            return Intent::Absent;
+        };
+        if cur.migrating.is_none() || cur.node != self.id {
+            return Intent::Absent;
+        }
+        let base = cur.generation;
+        cur.migrating = None;
+        cur.generation += 1;
+        match self.put_spec(&cur, Some(base)).await {
+            Ok(_) => Intent::Cleared,
+            Err(e) => {
+                tracing::warn!(vm = %cur.name, "could not clear the migration intent: {e:#}");
+                Intent::Stuck
+            }
+        }
+    }
+
+    /// After a failed transfer: keeps trying, in the background, to tell the destination to
+    /// remove its half-built copy and to clear the intent. Both can fail while the mesh or the
+    /// cluster quorum is down at the moment the migration fails. With `uncertain` the intent
+    /// write itself failed and may still commit, so it has to be missing on two checks in a row.
+    fn retry_failed_cleanup(
+        self: &Arc<Self>,
+        cluster: Arc<crate::cluster::Cluster>,
+        dst: MemberDoc,
+        id: Uuid,
+        mut leftover: Option<(Uuid, FinishReq)>,
+        uncertain: bool,
+    ) {
+        let node = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut absent = 0;
+            for _ in 0..CLEANUP_TRIES {
+                tokio::time::sleep(CLEANUP_EVERY).await;
+                // A new task on the VM owns the intent from here on.
+                if node.tasks.busy(&format!("/vms/{id}")) {
+                    return;
+                }
+                if let Some((migration, req)) = &leftover {
+                    let path = format!("/api/v1/internal/migrations/{migration}/finish");
+                    let sent: anyhow::Result<FinishResp> =
+                        node.call_peer(&cluster, &dst, &path, req).await;
+                    if sent.is_err() {
+                        continue;
+                    }
+                    leftover = None;
+                }
+                match node.clear_migration_intent(id).await {
+                    Intent::Cleared => {
+                        tracing::info!(%id, "finished cleaning up a failed migration");
+                        return;
+                    }
+                    Intent::Absent => {
+                        absent += 1;
+                        if !uncertain || absent >= 2 {
+                            return;
+                        }
+                    }
+                    Intent::Stuck => absent = 0,
+                }
+            }
+            tracing::error!(%id, "gave up cleaning up a failed migration; clear the intent by hand");
+        });
     }
 
     /// Runs the migration phases in order; any phase may fail, and
@@ -237,7 +329,12 @@ impl Node {
             dst: dst.node_id,
         });
         intent.generation += 1;
-        self.put_spec(&intent, Some(spec.generation)).await?;
+        if let Err(e) = self.put_spec(&intent, Some(spec.generation)).await {
+            rollback
+                .intent_uncertain
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            return Err(e.into());
+        }
 
         // 2. Read-only layers and saved-memory images go over the data plane.
         let (images, copied) = self
@@ -361,6 +458,7 @@ impl Node {
                 // The transfer failed, so the destination never owned the
                 // guest. Close the source job and resume it below anyway.
                 tracing::warn!(vm = %spec.name, "destination cleanup failed: {e:#}");
+                *super::lock(&rollback.leftover) = Some((migration, finish_req.clone()));
                 FinishResp {
                     cookie: String::new(),
                     ok: false,
@@ -382,9 +480,21 @@ impl Node {
         }
         let succeeded = perform.error.is_none() && fin.ok;
         let confirm_cookie = B64.decode(&fin.cookie).unwrap_or_default();
-        let confirmed = c
-            .migrate_confirm3(&dom, &params, &confirm_cookie, flags, !succeeded)
-            .await;
+        let confirm = c.migrate_confirm3(&dom, &params, &confirm_cookie, flags, !succeeded);
+        let confirmed = if succeeded {
+            confirm.await
+        } else {
+            // Cancelling can wait on the aborted Perform call, which libvirtd may keep for
+            // minutes while its sockets drain. The cancel is delivered either way, and the
+            // source is resumed below, so do not hold the task for the full call timeout.
+            match tokio::time::timeout(CANCEL_CONFIRM_WAIT, confirm).await {
+                Ok(r) => r,
+                Err(_) => {
+                    tracing::warn!(vm = %spec.name, "libvirt is slow to close the aborted migration job; going on");
+                    Ok(())
+                }
+            }
+        };
         // Aborting the job already ended the migration, so cancelling it again is not an error.
         let confirmed = match confirmed {
             Err(e)

@@ -2,6 +2,17 @@
 
 All notable changes to Prism are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- A node that does not run a VM learns the guest's IPv6 addresses from the owning node, through the VM's runtime state in the event stream. AAAA answers and IPv6 port forwards are the same on every node.
+- `prism cluster` takes `--config` before or after its subcommand, as the guide shows.
+- A live migration that fails while the destination or the cluster quorum is unreachable keeps retrying the destination cleanup and the removal of its intent for 30 minutes. A write of the intent that timed out and committed later is removed too.
+- The VM runtime refresh applies its result to the current state instead of a copy taken before the libvirt calls, so changes made meanwhile (agent, balloon, restart flag) are no longer lost.
+- A failed or cancelled live migration also removes the cloud-init seed ISO it wrote in the destination pool.
+- CI builds the docs with warnings denied, pins zig, and checks the static binary's NEEDED entries without relying on a pipe. The release job verifies `SHA256SUMS` and fails on unmatched files.
+
 ## [0.1.0] - 2026-10-16
 
 First release.
